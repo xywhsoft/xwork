@@ -10,6 +10,10 @@ xwork_status xwork_runtime_register_tool(
     if ( !pRuntime || !pDef || !pDef->sToolId || !pDef->sToolId[0] ) {
         return XWORK_ERROR_INVALID_ARGUMENT;
     }
+    if ( pDef->eHostService != XWORK_HOST_NONE &&
+         (!pDef->sOperationId || !pDef->sOperationId[0]) ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
 
     if ( xwork_runtime_find_tool(pRuntime, pDef->sToolId) ) {
         return XWORK_ERROR_ALREADY_EXISTS;
