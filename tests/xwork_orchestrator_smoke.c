@@ -3,6 +3,14 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef _WIN32
+#include <direct.h>
+#define XWORK_TEST_RMDIR _rmdir
+#else
+#include <unistd.h>
+#define XWORK_TEST_RMDIR rmdir
+#endif
+
 #define XRT_IMPLEMENTATION
 #include "../lib/xrt.h"
 
@@ -45,10 +53,24 @@ typedef struct {
 #ifdef _WIN32
 #define XWORK_TEST_PROCESS_ENV_COMMAND "set XWORK_TEST_PROCESS_ENV"
 #define XWORK_TEST_PROCESS_ENV_EXPECTED "XWORK_TEST_PROCESS_ENV=xwork-process-env"
+#define XWORK_TEST_PROCESS_STDIN_COMMAND "more"
+#define XWORK_TEST_PROCESS_NONZERO_COMMAND_RAW \
+    "cmd /c \"echo xwork-local-process-nonzero && exit /b 3\""
+#define XWORK_TEST_PROCESS_NONZERO_COMMAND \
+    "cmd /c \\\"echo xwork-local-process-nonzero && exit /b 3\\\""
 #else
 #define XWORK_TEST_PROCESS_ENV_COMMAND "printf %s \"$XWORK_TEST_PROCESS_ENV\""
 #define XWORK_TEST_PROCESS_ENV_EXPECTED "xwork-process-env"
+#define XWORK_TEST_PROCESS_STDIN_COMMAND "cat"
+#define XWORK_TEST_PROCESS_NONZERO_COMMAND_RAW \
+    "sh -c 'printf %s xwork-local-process-nonzero; exit 3'"
+#define XWORK_TEST_PROCESS_NONZERO_COMMAND XWORK_TEST_PROCESS_NONZERO_COMMAND_RAW
 #endif
+
+#define XWORK_TEST_PROCESS_STDIN_INPUT "xwork-process-stdin\\n"
+#define XWORK_TEST_PROCESS_STDIN_EXPECTED "xwork-process-stdin"
+#define XWORK_TEST_PROCESS_NONZERO_EXPECTED "xwork-local-process-nonzero"
+#define XWORK_TEST_PROCESS_NONZERO_EXIT_CODE 3
 
 static char *xwork_test_dup_cstr(const char *sText)
 {
@@ -68,6 +90,14 @@ static char *xwork_test_dup_cstr(const char *sText)
     memcpy(sCopy, sText, iLen);
     sCopy[iLen] = '\0';
     return sCopy;
+}
+
+static void xwork_test_remove_empty_directory(const char *sPath)
+{
+    if ( !sPath || !sPath[0] ) {
+        return;
+    }
+    (void)XWORK_TEST_RMDIR(sPath);
 }
 
 static void xwork_test_init_custom_session_policy(xwork_session_policy *pPolicy)
@@ -747,6 +777,15 @@ static int32 xwork_mock_adapter_chat(
                 "{\"path\":\"README.md\"}"
             );
         } else if ( sInstruction &&
+                    strstr(sInstruction, "Read part of a local note through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-host-offset",
+                "filesystem.read_text",
+                "{\"path\":\"tests/local_host_write_smoke.txt\","
+                "\"offset_bytes\":6,\"max_bytes\":4}"
+            );
+        } else if ( sInstruction &&
                     strstr(sInstruction, "Write a note through host service.") != NULL ) {
             *ppResponse = xwork_mock_build_tool_call_response(
                 pProfile->sId,
@@ -754,6 +793,25 @@ static int32 xwork_mock_adapter_chat(
                 "filesystem.write_text",
                 "{\"path\":\"tests/local_host_orchestrator_write_smoke.txt\","
                 "\"text\":\"xwork-write-note\"}"
+            );
+        } else if ( sInstruction &&
+                    strstr(sInstruction, "Create a fresh note through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-write-create",
+                "filesystem.write_text",
+                "{\"path\":\"tests/local_host_orchestrator_create_smoke.txt\","
+                "\"text\":\"xwork-create-note\",\"mode\":\"create\"}"
+            );
+        } else if ( sInstruction &&
+                    strstr(sInstruction, "Write a nested note through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-write-create-dirs",
+                "filesystem.write_text",
+                "{\"path\":\"tests/local_host_nested/orchestrator/"
+                "local_host_orchestrator_create_dirs_smoke.txt\","
+                "\"text\":\"xwork-create-dirs-note\",\"create_dirs\":true}"
             );
         } else if ( sInstruction &&
                     strstr(sInstruction, "Append a note through host service.") != NULL ) {
@@ -799,6 +857,34 @@ static int32 xwork_mock_adapter_chat(
                 "\"env\":[\"XWORK_TEST_PROCESS_ENV=xwork-process-env\"]}"
             );
         } else if ( sInstruction &&
+                    strstr(sInstruction, "Run the local process with too many env values through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-process-env-too-many",
+                "process.exec",
+                "{\"command\":\"" XWORK_TEST_PROCESS_ENV_COMMAND "\","
+                "\"env\":[\"XWORK_TEST_PROCESS_ENV=xwork-process-env\","
+                "\"XWORK_TEST_PROCESS_ENV_EXTRA=xwork-process-env-extra\"]}"
+            );
+        } else if ( sInstruction &&
+                    strstr(sInstruction, "Run the local process with stdin through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-process-stdin",
+                "process.exec",
+                "{\"command\":\"" XWORK_TEST_PROCESS_STDIN_COMMAND "\","
+                "\"stdin_text\":\"" XWORK_TEST_PROCESS_STDIN_INPUT "\"}"
+            );
+        } else if ( sInstruction &&
+                    strstr(sInstruction, "Run the local process with non-zero exit through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-process-nonzero",
+                "process.exec",
+                "{\"command\":\"" XWORK_TEST_PROCESS_NONZERO_COMMAND "\","
+                "\"allow_nonzero_exit\":true}"
+            );
+        } else if ( sInstruction &&
                     strstr(sInstruction, "Read git status through host service.") != NULL ) {
             *ppResponse = xwork_mock_build_tool_call_response(
                 pProfile->sId,
@@ -839,7 +925,11 @@ static int32 xwork_mock_adapter_chat(
             );
         } else if ( strcmp(sToolId, "filesystem.read_text") == 0 ) {
             if ( strstr(sToolText, "\"ok\":true") == NULL ||
-                 strstr(sToolText, "\"text\":\"") == NULL ) {
+                 strstr(sToolText, "\"text\":\"") == NULL ||
+                 strstr(sToolText, "\"eof\":") == NULL ||
+                 strstr(sToolText, "\"file_size_bytes\":") == NULL ||
+                 strstr(sToolText, "\"next_offset_bytes\":") == NULL ||
+                 strstr(sToolText, "\"remaining_bytes\":") == NULL ) {
                 return XRT_NET_ERROR;
             }
             *ppResponse = xwork_mock_build_final_response(
@@ -855,6 +945,16 @@ static int32 xwork_mock_adapter_chat(
                 *ppResponse = xwork_mock_build_final_response(
                     pProfile->sId,
                     "Host service append completed."
+                );
+            } else if ( strstr(sToolText, "\"mode\":\"create\"") != NULL ) {
+                *ppResponse = xwork_mock_build_final_response(
+                    pProfile->sId,
+                    "Host service create completed."
+                );
+            } else if ( strstr(sToolText, "\"create_dirs\":true") != NULL ) {
+                *ppResponse = xwork_mock_build_final_response(
+                    pProfile->sId,
+                    "Host service nested write completed."
                 );
             } else {
                 *ppResponse = xwork_mock_build_final_response(
@@ -882,6 +982,23 @@ static int32 xwork_mock_adapter_chat(
                 *ppResponse = xwork_mock_build_final_response(
                     pProfile->sId,
                     "Host service process env completed."
+                );
+            } else if ( strstr(sToolText, XWORK_TEST_PROCESS_STDIN_EXPECTED) != NULL ) {
+                if ( strstr(sToolText, "\"stdin_bytes\":20") == NULL ) {
+                    return XRT_NET_ERROR;
+                }
+                *ppResponse = xwork_mock_build_final_response(
+                    pProfile->sId,
+                    "Host service process stdin completed."
+                );
+            } else if ( strstr(sToolText, XWORK_TEST_PROCESS_NONZERO_EXPECTED) != NULL ) {
+                if ( strstr(sToolText, "\"exit_code\":3") == NULL ||
+                     strstr(sToolText, "\"allow_nonzero_exit\":true") == NULL ) {
+                    return XRT_NET_ERROR;
+                }
+                *ppResponse = xwork_mock_build_final_response(
+                    pProfile->sId,
+                    "Host service process non-zero completed."
                 );
             } else if ( strstr(sToolText, "\"cwd\":\"./tests\"") != NULL ) {
                 if ( strstr(sToolText, "tests") == NULL ) {
@@ -1013,7 +1130,9 @@ static xwork_status xwork_mock_host_invoke(
         return XWORK_ERROR_UNSUPPORTED;
     }
 
-    pResult->sOutputText = "{\"ok\":true,\"text\":\"README preview\"}";
+    pResult->sOutputText =
+        "{\"ok\":true,\"text\":\"README preview\",\"file_size_bytes\":14,\"bytes_read\":14,"
+        "\"next_offset_bytes\":14,\"remaining_bytes\":0,\"truncated\":false,\"eof\":true}";
     pResult->sVisibleSummary = "filesystem.read_text ok";
     return XWORK_OK;
 }
@@ -1112,14 +1231,27 @@ int main(void)
     char *sPendingBeforeToolCheckpointId = NULL;
     char *sFileBeforeToolCheckpointId = NULL;
     char *sFirstArtifactId = NULL;
+    size_t iSavedMaxProcessInputBytes = 0u;
+    size_t iSavedMaxProcessEnvEntries = 0u;
     char sFilePersistenceRoot[256];
     const char *asWorkspaceIds[1];
     const char *sLocalHostWritePath = "tests/local_host_write_smoke.txt";
     const char *sLocalHostAppendPath = "tests/local_host_append_smoke.txt";
+    const char *sLocalHostCreatePath = "tests/local_host_create_smoke.txt";
+    const char *sLocalHostCreateDirsPath =
+        "tests/local_host_nested/create_dirs/local_host_create_dirs_smoke.txt";
+    const char *sLocalHostCreateDirsDir = "tests/local_host_nested/create_dirs";
+    const char *sLocalHostCreateDirsParentDir = "tests/local_host_nested";
     const char *sLocalHostOrchestratorWritePath =
         "tests/local_host_orchestrator_write_smoke.txt";
     const char *sLocalHostOrchestratorAppendPath =
         "tests/local_host_orchestrator_append_smoke.txt";
+    const char *sLocalHostOrchestratorCreatePath =
+        "tests/local_host_orchestrator_create_smoke.txt";
+    const char *sLocalHostOrchestratorCreateDirsPath =
+        "tests/local_host_nested/orchestrator/local_host_orchestrator_create_dirs_smoke.txt";
+    const char *sLocalHostOrchestratorCreateDirsDir =
+        "tests/local_host_nested/orchestrator";
 
     memset(&tAdapterCtx, 0, sizeof(tAdapterCtx));
     memset(&tToolExecCtx, 0, sizeof(tToolExecCtx));
@@ -1148,8 +1280,15 @@ int main(void)
     xwork_tool_result_init(&tLocalHostResult);
     (void)remove(sLocalHostWritePath);
     (void)remove(sLocalHostAppendPath);
+    (void)remove(sLocalHostCreatePath);
+    (void)remove(sLocalHostCreateDirsPath);
     (void)remove(sLocalHostOrchestratorWritePath);
     (void)remove(sLocalHostOrchestratorAppendPath);
+    (void)remove(sLocalHostOrchestratorCreatePath);
+    (void)remove(sLocalHostOrchestratorCreateDirsPath);
+    xwork_test_remove_empty_directory(sLocalHostCreateDirsDir);
+    xwork_test_remove_empty_directory(sLocalHostOrchestratorCreateDirsDir);
+    xwork_test_remove_empty_directory(sLocalHostCreateDirsParentDir);
 
     xllm_runtime_options_init(&tLlmRuntimeOptions);
     assert(xllm_runtime_create(&tLlmRuntimeOptions, &pLlmRuntime) == XRT_NET_OK);
@@ -1840,6 +1979,30 @@ int main(void)
     assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.read_text ok") == 0);
     assert(tLocalHostResult.sOutputText != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "local host write smoke") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"file_size_bytes\":22") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"next_offset_bytes\":22") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"remaining_bytes\":0") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"eof\":true") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_READ_TEXT,
+            "{\"path\":\"tests/local_host_write_smoke.txt\","
+            "\"offset_bytes\":6,\"max_bytes\":4}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.read_text ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"offset_bytes\":6") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"file_size_bytes\":22") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"bytes_read\":4") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"next_offset_bytes\":10") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"remaining_bytes\":12") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"text\":\"host\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"truncated\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"eof\":false") != NULL);
 
     assert(
         xwork_runtime_invoke_host_service(
@@ -1879,6 +2042,83 @@ int main(void)
     assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.read_text ok") == 0);
     assert(tLocalHostResult.sOutputText != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "alpha-beta") != NULL);
+
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_WRITE_TEXT,
+            "{\"path\":\"tests/local_host_create_smoke.txt\","
+            "\"text\":\"local host create smoke\",\"mode\":\"create\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.write_text ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"mode\":\"create\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"bytes_written\":23") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_READ_TEXT,
+            "{\"path\":\"tests/local_host_create_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.read_text ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "local host create smoke") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_WRITE_TEXT,
+            "{\"path\":\"tests/local_host_create_smoke.txt\","
+            "\"text\":\"local host create smoke\",\"mode\":\"create\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_EXTERNAL_FAILURE
+    );
+
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_WRITE_TEXT,
+            "{\"path\":\"tests/local_host_nested/create_dirs/"
+            "local_host_create_dirs_smoke.txt\","
+            "\"text\":\"xwork-create-dirs-note\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_EXTERNAL_FAILURE
+    );
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_WRITE_TEXT,
+            "{\"path\":\"tests/local_host_nested/create_dirs/"
+            "local_host_create_dirs_smoke.txt\","
+            "\"text\":\"xwork-create-dirs-note\",\"create_dirs\":true}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.write_text ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"create_dirs\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"bytes_written\":22") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_READ_TEXT,
+            "{\"path\":\"tests/local_host_nested/create_dirs/"
+            "local_host_create_dirs_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.read_text ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "xwork-create-dirs-note") != NULL);
 
     assert(
         xwork_runtime_invoke_host_service(
@@ -1940,6 +2180,116 @@ int main(void)
     assert(tLocalHostResult.sOutputText != NULL);
     assert(strstr(tLocalHostResult.sOutputText, XWORK_TEST_PROCESS_ENV_EXPECTED) != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "\"env_count\":1") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"truncated\":false") != NULL);
+    iSavedMaxProcessEnvEntries = tLocalHost.iMaxProcessEnvEntries;
+    tLocalHost.iMaxProcessEnvEntries = 1u;
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_PROCESS,
+            XWORK_HOST_PROCESS_EXEC,
+            "{\"command\":\"" XWORK_TEST_PROCESS_ENV_COMMAND "\","
+            "\"env\":[\"XWORK_TEST_PROCESS_ENV=xwork-process-env\","
+            "\"XWORK_TEST_PROCESS_ENV_EXTRA=xwork-process-env-extra\"]}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_INVALID_ARGUMENT
+    );
+    assert(
+        strcmp(
+            tLocalHostResult.sVisibleSummary,
+            "process.exec invalid request (env limit exceeded)"
+        ) == 0
+    );
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"ok\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"env_count\":2") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"invalid_request\"") != NULL);
+    assert(
+        strstr(
+            tLocalHostResult.sOutputText,
+            "\"error\":\"env exceeds max_process_env_entries\""
+        ) != NULL
+    );
+    tLocalHost.iMaxProcessEnvEntries = iSavedMaxProcessEnvEntries;
+
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_PROCESS,
+            XWORK_HOST_PROCESS_EXEC,
+            "{\"command\":\"" XWORK_TEST_PROCESS_STDIN_COMMAND "\","
+            "\"stdin_text\":\"" XWORK_TEST_PROCESS_STDIN_INPUT "\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "process.exec ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, XWORK_TEST_PROCESS_STDIN_EXPECTED) != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"stdin_bytes\":20") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"truncated\":false") != NULL);
+    iSavedMaxProcessInputBytes = tLocalHost.iMaxProcessInputBytes;
+    tLocalHost.iMaxProcessInputBytes = 8u;
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_PROCESS,
+            XWORK_HOST_PROCESS_EXEC,
+            "{\"command\":\"" XWORK_TEST_PROCESS_STDIN_COMMAND "\","
+            "\"stdin_text\":\"" XWORK_TEST_PROCESS_STDIN_INPUT "\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_INVALID_ARGUMENT
+    );
+    assert(
+        strcmp(
+            tLocalHostResult.sVisibleSummary,
+            "process.exec invalid request (stdin_text exceeds limit)"
+        ) == 0
+    );
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"ok\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"invalid_request\"") != NULL);
+    assert(
+        strstr(
+            tLocalHostResult.sOutputText,
+            "\"error\":\"stdin_text exceeds max_process_input_bytes\""
+        ) != NULL
+    );
+    tLocalHost.iMaxProcessInputBytes = iSavedMaxProcessInputBytes;
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_PROCESS,
+            XWORK_HOST_PROCESS_EXEC,
+            "{\"command\":\"" XWORK_TEST_PROCESS_NONZERO_COMMAND "\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_EXTERNAL_FAILURE
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "process.exec failed (exit 3)") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"ok\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, XWORK_TEST_PROCESS_NONZERO_EXPECTED) != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"nonzero_exit\"") != NULL);
+    assert(
+        strstr(
+            tLocalHostResult.sOutputText,
+            "\"error\":\"process exited with code 3\""
+        ) != NULL
+    );
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_PROCESS,
+            XWORK_HOST_PROCESS_EXEC,
+            "{\"command\":\"" XWORK_TEST_PROCESS_NONZERO_COMMAND "\","
+            "\"allow_nonzero_exit\":true}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "process.exec ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, XWORK_TEST_PROCESS_NONZERO_EXPECTED) != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"exit_code\":3") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"allow_nonzero_exit\":true") != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "\"truncated\":false") != NULL);
 
     assert(
@@ -2023,6 +2373,56 @@ int main(void)
     pLocalHostRun = NULL;
 
     tAdapterCtx.iTurnCount = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-host-offset-tool";
+    tRunOptions.sInstruction = "Read part of a local note through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "Host service tool completed."
+        ) == 0
+    );
+    assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+    assert(tRunSnapshot.sLastToolResultText != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"offset_bytes\":6") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"file_size_bytes\":22") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"bytes_read\":4") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"next_offset_bytes\":10") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"remaining_bytes\":12") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"text\":\"host\"") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"eof\":false") != NULL);
+    xwork_run_snapshot_reset(&tRunSnapshot);
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 1u);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+    assert(tArtifact.eKind == XWORK_ARTIFACT_OUTPUT);
+    assert(strcmp(tArtifact.sName, "local_host_write_smoke.txt") == 0);
+    assert(tArtifact.sContentText != NULL);
+    assert(strcmp(tArtifact.sContentText, "host") == 0);
+    xwork_artifact_reset(&tArtifact);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
     assert(
         xwork_runtime_invoke_host_service(
             pLocalHostRuntime,
@@ -2078,6 +2478,107 @@ int main(void)
         ) == XWORK_OK
     );
     assert(strstr(tLocalHostResult.sOutputText, "seed-xwork-append-note") != NULL);
+    xwork_artifact_reset(&tArtifact);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-create-tool";
+    tRunOptions.sInstruction = "Create a fresh note through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "Host service create completed."
+        ) == 0
+    );
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 1u);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+    assert(tArtifact.eKind == XWORK_ARTIFACT_OUTPUT);
+    assert(strcmp(tArtifact.sName, "local_host_orchestrator_create_smoke.txt") == 0);
+    assert(tArtifact.sStorageRef != NULL);
+    assert(strstr(tArtifact.sStorageRef, sLocalHostOrchestratorCreatePath) != NULL);
+    assert(strcmp(tArtifact.sContentText, "xwork-create-note") == 0);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_READ_TEXT,
+            "{\"path\":\"tests/local_host_orchestrator_create_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strstr(tLocalHostResult.sOutputText, "xwork-create-note") != NULL);
+    xwork_artifact_reset(&tArtifact);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-write-create-dirs-tool";
+    tRunOptions.sInstruction = "Write a nested note through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "Host service nested write completed."
+        ) == 0
+    );
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 1u);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+    assert(tArtifact.eKind == XWORK_ARTIFACT_OUTPUT);
+    assert(strcmp(tArtifact.sName, "local_host_orchestrator_create_dirs_smoke.txt") == 0);
+    assert(tArtifact.sStorageRef != NULL);
+    assert(strstr(tArtifact.sStorageRef, sLocalHostOrchestratorCreateDirsPath) != NULL);
+    assert(strcmp(tArtifact.sContentText, "xwork-create-dirs-note") == 0);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_READ_TEXT,
+            "{\"path\":\"tests/local_host_nested/orchestrator/"
+            "local_host_orchestrator_create_dirs_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strstr(tLocalHostResult.sOutputText, "xwork-create-dirs-note") != NULL);
     xwork_artifact_reset(&tArtifact);
     xwork_run_destroy(pLocalHostRun);
     pLocalHostRun = NULL;
@@ -2173,6 +2674,192 @@ int main(void)
     xwork_artifact_reset(&tArtifact);
     xwork_run_destroy(pLocalHostRun);
     pLocalHostRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-process-stdin-tool";
+    tRunOptions.sInstruction = "Run the local process with stdin through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "Host service process stdin completed."
+        ) == 0
+    );
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 1u);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+    assert(tArtifact.eKind == XWORK_ARTIFACT_COMMAND);
+    assert(strcmp(tArtifact.sName, "process.exec.txt") == 0);
+    assert(strcmp(tArtifact.sCommandText, XWORK_TEST_PROCESS_STDIN_COMMAND) == 0);
+    assert(tArtifact.sContentText != NULL);
+    assert(strstr(tArtifact.sContentText, XWORK_TEST_PROCESS_STDIN_EXPECTED) != NULL);
+    assert(tArtifact.bHasExitCode);
+    assert(tArtifact.iExitCode == 0);
+    xwork_artifact_reset(&tArtifact);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-process-nonzero-tool";
+    tRunOptions.sInstruction = "Run the local process with non-zero exit through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "Host service process non-zero completed."
+        ) == 0
+    );
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 1u);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+    assert(tArtifact.eKind == XWORK_ARTIFACT_COMMAND);
+    assert(strcmp(tArtifact.sName, "process.exec.txt") == 0);
+    assert(strcmp(tArtifact.sCommandText, XWORK_TEST_PROCESS_NONZERO_COMMAND_RAW) == 0);
+    assert(tArtifact.sStorageRef != NULL);
+    assert(strcmp(tArtifact.sStorageRef, ".") == 0);
+    assert(tArtifact.sContentText != NULL);
+    assert(strstr(tArtifact.sContentText, XWORK_TEST_PROCESS_NONZERO_EXPECTED) != NULL);
+    assert(tArtifact.bHasExitCode);
+    assert(tArtifact.iExitCode == XWORK_TEST_PROCESS_NONZERO_EXIT_CODE);
+    xwork_artifact_reset(&tArtifact);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
+    iSavedMaxProcessInputBytes = tLocalHost.iMaxProcessInputBytes;
+    tLocalHost.iMaxProcessInputBytes = 8u;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-process-stdin-too-large-tool";
+    tRunOptions.sInstruction = "Run the local process with stdin through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_ERROR_INVALID_ARGUMENT);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_FAILED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "process.exec invalid request (stdin_text exceeds limit)"
+        ) == 0
+    );
+    assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+    assert(tRunSnapshot.sLastToolResultText != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"ok\":false") != NULL);
+    assert(
+        strstr(
+            tRunSnapshot.sLastToolResultText,
+            "\"error_kind\":\"invalid_request\""
+        ) != NULL
+    );
+    assert(
+        strstr(
+            tRunSnapshot.sLastToolResultText,
+            "\"error\":\"stdin_text exceeds max_process_input_bytes\""
+        ) != NULL
+    );
+    xwork_run_snapshot_reset(&tRunSnapshot);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+    tLocalHost.iMaxProcessInputBytes = iSavedMaxProcessInputBytes;
+
+    tAdapterCtx.iTurnCount = 0;
+    iSavedMaxProcessEnvEntries = tLocalHost.iMaxProcessEnvEntries;
+    tLocalHost.iMaxProcessEnvEntries = 1u;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-process-env-too-many-tool";
+    tRunOptions.sInstruction = "Run the local process with too many env values through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_ERROR_INVALID_ARGUMENT);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_FAILED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "process.exec invalid request (env limit exceeded)"
+        ) == 0
+    );
+    assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+    assert(tRunSnapshot.sLastToolResultText != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"ok\":false") != NULL);
+    assert(
+        strstr(
+            tRunSnapshot.sLastToolResultText,
+            "\"env_count\":2"
+        ) != NULL
+    );
+    assert(
+        strstr(
+            tRunSnapshot.sLastToolResultText,
+            "\"error\":\"env exceeds max_process_env_entries\""
+        ) != NULL
+    );
+    xwork_run_snapshot_reset(&tRunSnapshot);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+    tLocalHost.iMaxProcessEnvEntries = iSavedMaxProcessEnvEntries;
 
     tAdapterCtx.iTurnCount = 0;
     asWorkspaceIds[0] = "local-host-main";
@@ -3409,8 +4096,15 @@ int main(void)
     xwork_file_persistence_reset(&tFilePersistenceStore);
     (void)remove(sLocalHostWritePath);
     (void)remove(sLocalHostAppendPath);
+    (void)remove(sLocalHostCreatePath);
+    (void)remove(sLocalHostCreateDirsPath);
     (void)remove(sLocalHostOrchestratorWritePath);
     (void)remove(sLocalHostOrchestratorAppendPath);
+    (void)remove(sLocalHostOrchestratorCreatePath);
+    (void)remove(sLocalHostOrchestratorCreateDirsPath);
+    xwork_test_remove_empty_directory(sLocalHostCreateDirsDir);
+    xwork_test_remove_empty_directory(sLocalHostOrchestratorCreateDirsDir);
+    xwork_test_remove_empty_directory(sLocalHostCreateDirsParentDir);
     free(sPendingBeforeToolCheckpointId);
     free(sAfterToolCheckpointId);
     free(sFileBeforeToolCheckpointId);

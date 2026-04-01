@@ -485,6 +485,8 @@ typedef struct {
 typedef struct {
     const char *sDefaultWorkingDirectory;
     size_t iMaxReadBytes;
+    size_t iMaxProcessInputBytes;
+    size_t iMaxProcessEnvEntries;
     size_t iMaxProcessOutputBytes;
     bool bEnableFilesystemReadText;
     bool bEnableFilesystemWriteText;
@@ -495,6 +497,8 @@ typedef struct {
 typedef struct {
     char *sDefaultWorkingDirectory;
     size_t iMaxReadBytes;
+    size_t iMaxProcessInputBytes;
+    size_t iMaxProcessEnvEntries;
     size_t iMaxProcessOutputBytes;
     bool bEnableFilesystemReadText;
     bool bEnableFilesystemWriteText;

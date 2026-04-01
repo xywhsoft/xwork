@@ -52,9 +52,18 @@ What exists now:
 - built-in host tool defs for `filesystem.read_text` / `filesystem.write_text` / `process.exec` / `vcs.status`
 - builtin host tool execution now auto-synthesizes output/command artifacts for read/write/process/vcs flows
 - local `filesystem.write_text` host contract now supports `mode=append`
+- local `filesystem.write_text` host contract now supports `mode=create`
+- local `filesystem.write_text` host contract now supports request-level `create_dirs:true`
+- local `filesystem.read_text` host contract now supports request-level `offset_bytes`
+- local `filesystem.read_text` host contract now returns explicit `file_size_bytes` / `remaining_bytes` / `eof` / `next_offset_bytes`
 - local `process.exec` host contract now supports request-level `cwd` override
 - local `process.exec` host contract now supports request-level `max_output_bytes` truncation
 - local `process.exec` host contract now supports request-level `env:["KEY=VALUE"]`
+- local `process.exec` host contract now supports request-level `stdin_text`
+- local `process.exec` host contract now supports request-level `allow_nonzero_exit:true`
+- local `process.exec` failure paths now preserve structured result payloads for invalid request / non-zero exit cases
+- local `process.exec` stdin_text is bounded by configured `iMaxProcessInputBytes`
+- local `process.exec` env list is bounded by configured `iMaxProcessEnvEntries`
 - typed artifact emit helpers for patch / report / command / output
 - workspace memory attach and tool/artifact memory ingest hooks
 - in-memory and file-backed checkpoint / snapshot persistence

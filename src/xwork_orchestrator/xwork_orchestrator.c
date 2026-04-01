@@ -791,14 +791,52 @@ static xwork_status xwork__record_run_state_event(
     return xwork__run_record_event(pRun, eKind, NULL, NULL, NULL, sSummary);
 }
 
+static xwork_status xwork__store_tool_result(
+    xwork_run *pRun,
+    const xwork_tool_result *pResult
+);
+
 static xwork_status xwork__fail_run_with_summary(xwork_run *pRun, const char *sSummary)
 {
+    xwork_status iStatus;
+    const char *sEffectiveSummary = sSummary ? sSummary : "Run failed.";
+
+    iStatus = xwork__replace_cstr(&pRun->sLastOutputText, sEffectiveSummary);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
     return xwork__record_run_state_event(
         pRun,
         XWORK_RUN_FAILED,
         XWORK_EVENT_RUN_FAILED,
-        sSummary ? sSummary : "Run failed."
+        sEffectiveSummary
     );
+}
+
+static void xwork__fail_run_after_tool_error(
+    xwork_run *pRun,
+    const xwork_tool_result *pToolResult,
+    const char *sFallbackSummary
+)
+{
+    const char *sSummary = sFallbackSummary ? sFallbackSummary : "Tool execution failed.";
+
+    if ( !pRun ) {
+        return;
+    }
+
+    if ( pToolResult &&
+         ((pToolResult->sOutputText && pToolResult->sOutputText[0]) ||
+          (pToolResult->sVisibleSummary && pToolResult->sVisibleSummary[0])) ) {
+        (void)xwork__store_tool_result(pRun, pToolResult);
+    }
+    if ( pToolResult &&
+         pToolResult->sVisibleSummary &&
+         pToolResult->sVisibleSummary[0] ) {
+        sSummary = pToolResult->sVisibleSummary;
+    }
+
+    (void)xwork__fail_run_with_summary(pRun, sSummary);
 }
 
 static xwork_status xwork__save_checkpoint(
@@ -1214,8 +1252,9 @@ static xwork_status xwork__resume_pending_tool(
         pOptions
     );
     if ( iStatus != XWORK_OK ) {
-        (void)xwork__fail_run_with_summary(
+        xwork__fail_run_after_tool_error(
             pRun,
+            &tToolResult,
             "Tool execution failed after resume."
         );
         return iStatus;
@@ -1713,8 +1752,9 @@ xwork_status xwork_run_execute(
             );
             if ( iStatus != XWORK_OK ) {
                 xllm_response_free(pResponse);
-                (void)xwork__fail_run_with_summary(
+                xwork__fail_run_after_tool_error(
                     pRun,
+                    &tToolResult,
                     "Tool execution failed."
                 );
                 return iStatus;

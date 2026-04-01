@@ -231,9 +231,18 @@
 - builtin host tools 已有 `filesystem.read_text` / `filesystem.write_text` / `process.exec` / `vcs.status`
 - builtin host tool 在 orchestrator 中已能自动落最小 output/command artifact
 - `filesystem.write_text` 最小 request contract 已支持 `mode=append`
+- `filesystem.write_text` 最小 request contract 已支持 `mode=create`
+- `filesystem.write_text` 最小 request contract 已支持 `create_dirs:true`
+- `filesystem.read_text` 最小 request contract 已支持 `offset_bytes`
+- `filesystem.read_text` 最小 response contract 已显式返回 `file_size_bytes` / `remaining_bytes` / `eof` / `next_offset_bytes`
 - `process.exec` 最小 request contract 已支持 `cwd` 覆盖
 - `process.exec` 最小 request contract 已支持 `max_output_bytes` 截断
 - `process.exec` 最小 request contract 已支持 `env:["KEY=VALUE"]`
+- `process.exec` 最小 request contract 已支持 `stdin_text`
+- `process.exec` 最小 request contract 已支持 `allow_nonzero_exit:true`
+- `process.exec` 失败路径已保留最小结构化结果，可区分 invalid request / non-zero exit
+- `process.exec` 最小 stdin contract 已会校验 configured `iMaxProcessInputBytes`
+- `process.exec` 最小 env contract 已会校验 configured `iMaxProcessEnvEntries`
 
 这一层接下来更重要的是：
 
