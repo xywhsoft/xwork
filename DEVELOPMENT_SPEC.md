@@ -22,7 +22,17 @@
 - 项目入口说明：[README.md](/D:/git/xwork/README.md)
 - 公共 API 草案：[xwork.h](/D:/git/xwork/xwork.h)
 - 公共实现入口：[xwork.c](/D:/git/xwork/xwork.c)
-- 内部模块骨架：
+- 已落成的最小共享 runtime 主线：
+  - runtime / workspace / tool registry / run lifecycle
+  - event / approval request / checkpoint / artifact 公共对象
+  - `xllm` model-turn + tool-loop 最小编排闭环
+  - approval pause/resume 与 checkpoint load/recover
+  - workspace memory attach / tool-result ingest / artifact ingest 入口
+  - typed patch/report/command/output artifact emit helper
+  - in-memory persistence 与 file persistence backend
+  - persisted run/event/checkpoint/artifact 查询面
+  - `xcode` / `xclaw` 内建 profile
+- 内部模块目录：
   - [src/xwork_core](/D:/git/xwork/src/xwork_core)
   - [src/xwork_workspace](/D:/git/xwork/src/xwork_workspace)
   - [src/xwork_tools](/D:/git/xwork/src/xwork_tools)
@@ -33,9 +43,9 @@
   - [src/xwork_host](/D:/git/xwork/src/xwork_host)
   - [src/xwork_profiles](/D:/git/xwork/src/xwork_profiles)
 
-当前状态仍然是“bootstrap + API 草案阶段”。
+当前状态已经不是纯 bootstrap，而是“最小闭环已具备、正在补硬化层”的阶段。
 
-距离完整共享 runtime 还有明显差距，但对象边界和演进方向已经明确。
+距离完整共享 runtime 仍有明显差距，但 v1 最小对象边界和主流程已经站住。
 
 ## 3. 开发目标
 
@@ -143,6 +153,11 @@
 - command artifact
 - output artifact
 
+当前最小基线：
+
+- 通用 artifact 对象已能携带 `content_text / command_text / exit_code`
+- 公共 helper 已补 `emit_patch/report/command/output_artifact`
+
 ### 5.8 `xwork_host`
 
 负责：
@@ -208,6 +223,23 @@
 
 - 定义 filesystem / process / vcs 基础抽象
 - 不先实现全部功能，但先固定接口和 ownership
+
+当前最小基线：
+
+- `xwork_host_service` / `xwork_host_services` 已接入 runtime
+- `xwork_local_host` 已能跑通最小 filesystem/process/vcs dispatch
+- builtin host tools 已有 `filesystem.read_text` / `filesystem.write_text` / `process.exec` / `vcs.status`
+- builtin host tool 在 orchestrator 中已能自动落最小 output/command artifact
+- `filesystem.write_text` 最小 request contract 已支持 `mode=append`
+- `process.exec` 最小 request contract 已支持 `cwd` 覆盖
+- `process.exec` 最小 request contract 已支持 `max_output_bytes` 截断
+- `process.exec` 最小 request contract 已支持 `env:["KEY=VALUE"]`
+
+这一层接下来更重要的是：
+
+- 收紧 request/response contract，而不是继续堆新的 host kind
+- 补更真实的 filesystem/process/vcs 操作面和平台差异处理
+- 为后续 streaming / richer artifacts 保留稳定边界
 
 ### M3: `xllm` 编排最小闭环
 
@@ -280,9 +312,10 @@
 
 最合理的下一步顺序：
 
-1. 保持当前 API 草案足够小，不急着做大而全
-2. 先把 event model 和 host service 抽象补出来
-3. 再引入 `xllm` 依赖
-4. 最后再做 checkpoint 和 profile
+1. 扩 builtin host tool 面，并继续硬化 filesystem/process/vcs request contract
+2. 继续硬化 persistence format、versioning 和 direct query surface
+3. 扩大真实 `xllm` smoke 覆盖，保留离线 stub 基线并增加 provider matrix
+4. 补更细的 artifact 语义和输出类型，而不是继续堆更多顶层对象
+5. 在当前同步 loop 之上再考虑 streaming / interrupt / richer orchestration
 
-当前阶段最重要的不是功能数量，而是边界是否清晰、对象是否站得住。
+当前阶段最重要的不是再发明更多名词，而是把已经存在的 runtime 主线做稳、做可测、做可恢复。

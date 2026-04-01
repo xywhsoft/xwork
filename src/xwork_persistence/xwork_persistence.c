@@ -15,20 +15,78 @@
 #endif
 
 static const unsigned char xwork__snapshot_magic[] = {
-    'X', 'W', 'O', 'R', 'K', 'S', 'N', '4'
+    'X', 'W', 'O', 'R', 'K', 'S', 'N', '5'
 };
 
 static const unsigned char xwork__artifact_magic[] = {
-    'X', 'W', 'O', 'R', 'K', 'A', 'R', '1'
+    'X', 'W', 'O', 'R', 'K', 'A', 'R', '2'
 };
 
 static xwork_status xwork__file_persistence_list_runs_cb(
     xwork_string_list *pList,
     void *pUserData
 );
+static xwork_status xwork__file_persistence_list_checkpoints_cb(
+    const char *sRunId,
+    xwork_string_list *pList,
+    void *pUserData
+);
+static xwork_status xwork__file_persistence_list_events_cb(
+    const char *sRunId,
+    xwork_string_list *pList,
+    void *pUserData
+);
+static xwork_status xwork__file_persistence_list_artifacts_cb(
+    const char *sRunId,
+    xwork_string_list *pList,
+    void *pUserData
+);
 static xwork_status xwork__file_persistence_query_run_index_cb(
     const xwork_run_index_query *pQuery,
     xwork_run_index_list *pList,
+    void *pUserData
+);
+static xwork_status xwork__file_persistence_load_run_summary_cb(
+    const char *sRunId,
+    xwork_run_summary *pSummary,
+    void *pUserData
+);
+static xwork_status xwork__file_persistence_load_last_event_cb(
+    const char *sRunId,
+    xwork_event *pEvent,
+    void *pUserData
+);
+static xwork_status xwork__file_persistence_load_last_approval_request_cb(
+    const char *sRunId,
+    xwork_approval_request *pRequest,
+    void *pUserData
+);
+static xwork_status xwork__file_persistence_load_last_checkpoint_cb(
+    const char *sRunId,
+    xwork_checkpoint *pCheckpoint,
+    void *pUserData
+);
+static xwork_status xwork__file_persistence_load_last_artifact_cb(
+    const char *sRunId,
+    xwork_artifact *pArtifact,
+    void *pUserData
+);
+static xwork_status xwork__file_persistence_load_event_cb(
+    const char *sRunId,
+    const char *sEventId,
+    xwork_event *pEvent,
+    void *pUserData
+);
+static xwork_status xwork__file_persistence_load_checkpoint_cb(
+    const char *sRunId,
+    const char *sCheckpointId,
+    xwork_checkpoint *pCheckpoint,
+    void *pUserData
+);
+static xwork_status xwork__file_persistence_load_artifact_cb(
+    const char *sRunId,
+    const char *sArtifactId,
+    xwork_artifact *pArtifact,
     void *pUserData
 );
 
@@ -306,14 +364,79 @@ static bool xwork__run_index_matches_query(
             return false;
         }
     }
+    if ( pQuery->bRequireLastEvent && !pEntry->bHasLastEvent ) {
+        return false;
+    }
+    if ( pQuery->bFilterLastEventKind ) {
+        if ( !pEntry->bHasLastEvent ||
+             pEntry->tLastEvent.eKind != pQuery->eLastEventKind ) {
+            return false;
+        }
+    }
     if ( pQuery->bRequireLastApprovalRequest && !pEntry->bHasLastApprovalRequest ) {
         return false;
     }
     if ( pQuery->bRequireLastCheckpoint && !pEntry->bHasLastCheckpoint ) {
         return false;
     }
+    if ( pQuery->bFilterLastCheckpointKind ) {
+        if ( !pEntry->bHasLastCheckpoint ||
+             pEntry->tLastCheckpoint.eKind != pQuery->eLastCheckpointKind ) {
+            return false;
+        }
+    }
     if ( pQuery->bRequireArtifacts && pEntry->iArtifactCount == 0u ) {
         return false;
+    }
+    if ( pQuery->bFilterMinEventCount &&
+         pEntry->iEventCount < pQuery->iMinEventCount ) {
+        return false;
+    }
+    if ( pQuery->bFilterMaxEventCount &&
+         pEntry->iEventCount > pQuery->iMaxEventCount ) {
+        return false;
+    }
+    if ( pQuery->bFilterMinCheckpointCount &&
+         pEntry->iCheckpointCount < pQuery->iMinCheckpointCount ) {
+        return false;
+    }
+    if ( pQuery->bFilterMaxCheckpointCount &&
+         pEntry->iCheckpointCount > pQuery->iMaxCheckpointCount ) {
+        return false;
+    }
+    if ( pQuery->bFilterMinArtifactCount &&
+         pEntry->iArtifactCount < pQuery->iMinArtifactCount ) {
+        return false;
+    }
+    if ( pQuery->bFilterMaxArtifactCount &&
+         pEntry->iArtifactCount > pQuery->iMaxArtifactCount ) {
+        return false;
+    }
+    if ( pQuery->bFilterMinLastEventSequence ) {
+        if ( !pEntry->bHasLastEvent ||
+             pEntry->tLastEvent.iSequence < pQuery->iMinLastEventSequence ) {
+            return false;
+        }
+    }
+    if ( pQuery->bFilterMaxLastEventSequence ) {
+        if ( !pEntry->bHasLastEvent ||
+             pEntry->tLastEvent.iSequence > pQuery->iMaxLastEventSequence ) {
+            return false;
+        }
+    }
+    if ( pQuery->bFilterMinLastCheckpointSequence ) {
+        if ( !pEntry->bHasLastCheckpoint ||
+             pEntry->tLastCheckpoint.iSequence <
+                 pQuery->iMinLastCheckpointSequence ) {
+            return false;
+        }
+    }
+    if ( pQuery->bFilterMaxLastCheckpointSequence ) {
+        if ( !pEntry->bHasLastCheckpoint ||
+             pEntry->tLastCheckpoint.iSequence >
+                 pQuery->iMaxLastCheckpointSequence ) {
+            return false;
+        }
     }
     return true;
 }
@@ -350,6 +473,21 @@ static int xwork__run_index_compare(
         iRightSequence = pRight->bHasLastCheckpoint ? pRight->tLastCheckpoint.iSequence : 0u;
         if ( iLeftSequence != iRightSequence ) {
             return iLeftSequence > iRightSequence ? -1 : 1;
+        }
+        break;
+    case XWORK_RUN_INDEX_SORT_EVENT_COUNT_DESC:
+        if ( pLeft->iEventCount != pRight->iEventCount ) {
+            return pLeft->iEventCount > pRight->iEventCount ? -1 : 1;
+        }
+        break;
+    case XWORK_RUN_INDEX_SORT_CHECKPOINT_COUNT_DESC:
+        if ( pLeft->iCheckpointCount != pRight->iCheckpointCount ) {
+            return pLeft->iCheckpointCount > pRight->iCheckpointCount ? -1 : 1;
+        }
+        break;
+    case XWORK_RUN_INDEX_SORT_ARTIFACT_COUNT_DESC:
+        if ( pLeft->iArtifactCount != pRight->iArtifactCount ) {
+            return pLeft->iArtifactCount > pRight->iArtifactCount ? -1 : 1;
         }
         break;
     case XWORK_RUN_INDEX_SORT_RUN_ID_ASC:
@@ -816,6 +954,11 @@ static xwork_status xwork__file_write_size(FILE *pFile, size_t iValue)
     return xwork__file_write_u64(pFile, (uint64_t)iValue);
 }
 
+static xwork_status xwork__file_write_i64(FILE *pFile, int64_t iValue)
+{
+    return xwork__file_write_u64(pFile, (uint64_t)iValue);
+}
+
 static xwork_status xwork__file_read_size(FILE *pFile, size_t *piValue)
 {
     uint64_t iValue;
@@ -833,6 +976,24 @@ static xwork_status xwork__file_read_size(FILE *pFile, size_t *piValue)
         return XWORK_ERROR_EXTERNAL_FAILURE;
     }
     *piValue = (size_t)iValue;
+    return XWORK_OK;
+}
+
+static xwork_status xwork__file_read_i64(FILE *pFile, int64_t *piValue)
+{
+    uint64_t iValue;
+    xwork_status iStatus;
+
+    if ( !piValue ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    iStatus = xwork__file_read_u64(pFile, &iValue);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    *piValue = (int64_t)iValue;
     return XWORK_OK;
 }
 
@@ -1001,6 +1162,17 @@ static xwork_status xwork__file_write_artifact_fields(
     if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__file_write_string(pFile, pArtifact->sSummary);
     if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_write_string(pFile, pArtifact->sContentText);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_write_string(pFile, pArtifact->sCommandText);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_write_size(pFile, pArtifact->bHasExitCode ? 1u : 0u);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_write_i64(
+        pFile,
+        pArtifact->bHasExitCode ? (int64_t)pArtifact->iExitCode : 0
+    );
+    if ( iStatus != XWORK_OK ) return iStatus;
     return xwork__file_write_size(pFile, pArtifact->iSequence);
 }
 
@@ -1033,6 +1205,20 @@ static xwork_status xwork__file_read_artifact_fields(
     if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__file_read_string(pFile, &pArtifact->sSummary);
     if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_read_string(pFile, &pArtifact->sContentText);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_read_string(pFile, &pArtifact->sCommandText);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_read_size(pFile, &iValue);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    pArtifact->bHasExitCode = (iValue != 0u);
+    {
+        int64_t iExitCodeValue;
+
+        iStatus = xwork__file_read_i64(pFile, &iExitCodeValue);
+        if ( iStatus != XWORK_OK ) return iStatus;
+        pArtifact->iExitCode = pArtifact->bHasExitCode ? (int)iExitCodeValue : 0;
+    }
     return xwork__file_read_size(pFile, &pArtifact->iSequence);
 }
 
@@ -2504,7 +2690,18 @@ xwork_status xwork_file_persistence_configure_backend(
     pBackend->pfnLoadRunSnapshot = xwork__file_persistence_load_run_snapshot_cb;
     pBackend->pfnLoadCheckpointSnapshot = xwork__file_persistence_load_checkpoint_snapshot_cb;
     pBackend->pfnListRuns = xwork__file_persistence_list_runs_cb;
+    pBackend->pfnListCheckpoints = xwork__file_persistence_list_checkpoints_cb;
+    pBackend->pfnListEvents = xwork__file_persistence_list_events_cb;
+    pBackend->pfnListArtifacts = xwork__file_persistence_list_artifacts_cb;
     pBackend->pfnQueryRunIndex = xwork__file_persistence_query_run_index_cb;
+    pBackend->pfnLoadRunSummary = xwork__file_persistence_load_run_summary_cb;
+    pBackend->pfnLoadLastEvent = xwork__file_persistence_load_last_event_cb;
+    pBackend->pfnLoadLastApprovalRequest = xwork__file_persistence_load_last_approval_request_cb;
+    pBackend->pfnLoadLastCheckpoint = xwork__file_persistence_load_last_checkpoint_cb;
+    pBackend->pfnLoadLastArtifact = xwork__file_persistence_load_last_artifact_cb;
+    pBackend->pfnLoadEvent = xwork__file_persistence_load_event_cb;
+    pBackend->pfnLoadCheckpoint = xwork__file_persistence_load_checkpoint_cb;
+    pBackend->pfnLoadArtifact = xwork__file_persistence_load_artifact_cb;
     pBackend->pUserData = pStore;
     return XWORK_OK;
 }
@@ -2620,15 +2817,21 @@ xwork_status xwork_file_persistence_list_run_index(
     for ( i = 0u; i < pList->iCount; ++i ) {
         xwork_status iLoadStatus;
         xwork_string_list tArtifactIds;
+        xwork_string_list tEventIds;
+        xwork_string_list tCheckpointIds;
 
         xwork_run_index_entry_init(&pItems[i]);
         xwork_string_list_init(&tArtifactIds);
+        xwork_string_list_init(&tEventIds);
+        xwork_string_list_init(&tCheckpointIds);
         iStatus = xwork_file_persistence_load_run_summary(
             pStore,
             tRunIds.psItems[i],
             &pItems[i].tSummary
         );
         if ( iStatus != XWORK_OK ) {
+            xwork_string_list_reset(&tCheckpointIds);
+            xwork_string_list_reset(&tEventIds);
             xwork_string_list_reset(&tArtifactIds);
             goto done;
         }
@@ -2642,9 +2845,25 @@ xwork_status xwork_file_persistence_list_run_index(
             pItems[i].bHasLastApprovalRequest = true;
         } else if ( iLoadStatus != XWORK_ERROR_NOT_FOUND ) {
             iStatus = iLoadStatus;
+            xwork_string_list_reset(&tCheckpointIds);
+            xwork_string_list_reset(&tEventIds);
             xwork_string_list_reset(&tArtifactIds);
             goto done;
         }
+
+        iLoadStatus = xwork_file_persistence_list_events(
+            pStore,
+            tRunIds.psItems[i],
+            &tEventIds
+        );
+        if ( iLoadStatus != XWORK_OK ) {
+            iStatus = iLoadStatus;
+            xwork_string_list_reset(&tCheckpointIds);
+            xwork_string_list_reset(&tEventIds);
+            xwork_string_list_reset(&tArtifactIds);
+            goto done;
+        }
+        pItems[i].iEventCount = tEventIds.iCount;
 
         iLoadStatus = xwork_file_persistence_load_last_event(
             pStore,
@@ -2655,9 +2874,25 @@ xwork_status xwork_file_persistence_list_run_index(
             pItems[i].bHasLastEvent = true;
         } else if ( iLoadStatus != XWORK_ERROR_NOT_FOUND ) {
             iStatus = iLoadStatus;
+            xwork_string_list_reset(&tCheckpointIds);
+            xwork_string_list_reset(&tEventIds);
             xwork_string_list_reset(&tArtifactIds);
             goto done;
         }
+
+        iLoadStatus = xwork_file_persistence_list_checkpoints(
+            pStore,
+            tRunIds.psItems[i],
+            &tCheckpointIds
+        );
+        if ( iLoadStatus != XWORK_OK ) {
+            iStatus = iLoadStatus;
+            xwork_string_list_reset(&tCheckpointIds);
+            xwork_string_list_reset(&tEventIds);
+            xwork_string_list_reset(&tArtifactIds);
+            goto done;
+        }
+        pItems[i].iCheckpointCount = tCheckpointIds.iCount;
 
         iLoadStatus = xwork_file_persistence_load_last_checkpoint(
             pStore,
@@ -2668,6 +2903,8 @@ xwork_status xwork_file_persistence_list_run_index(
             pItems[i].bHasLastCheckpoint = true;
         } else if ( iLoadStatus != XWORK_ERROR_NOT_FOUND ) {
             iStatus = iLoadStatus;
+            xwork_string_list_reset(&tCheckpointIds);
+            xwork_string_list_reset(&tEventIds);
             xwork_string_list_reset(&tArtifactIds);
             goto done;
         }
@@ -2679,6 +2916,8 @@ xwork_status xwork_file_persistence_list_run_index(
         );
         if ( iLoadStatus != XWORK_OK ) {
             iStatus = iLoadStatus;
+            xwork_string_list_reset(&tCheckpointIds);
+            xwork_string_list_reset(&tEventIds);
             xwork_string_list_reset(&tArtifactIds);
             goto done;
         }
@@ -2693,10 +2932,14 @@ xwork_status xwork_file_persistence_list_run_index(
             pItems[i].bHasLastArtifact = true;
         } else if ( iLoadStatus != XWORK_ERROR_NOT_FOUND ) {
             iStatus = iLoadStatus;
+            xwork_string_list_reset(&tCheckpointIds);
+            xwork_string_list_reset(&tEventIds);
             xwork_string_list_reset(&tArtifactIds);
             goto done;
         }
 
+        xwork_string_list_reset(&tCheckpointIds);
+        xwork_string_list_reset(&tEventIds);
         xwork_string_list_reset(&tArtifactIds);
     }
 
@@ -3574,6 +3817,116 @@ xwork_status xwork__runtime_list_runs(
     );
 }
 
+xwork_status xwork__runtime_list_checkpoints(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_string_list *pList
+)
+{
+    if ( !pRuntime || !sRunId || !sRunId[0] || !pList ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pRuntime->tPersistenceBackend.pfnListCheckpoints ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    return pRuntime->tPersistenceBackend.pfnListCheckpoints(
+        sRunId,
+        pList,
+        pRuntime->tPersistenceBackend.pUserData
+    );
+}
+
+xwork_status xwork__runtime_list_events(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_string_list *pList
+)
+{
+    if ( !pRuntime || !sRunId || !sRunId[0] || !pList ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pRuntime->tPersistenceBackend.pfnListEvents ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    return pRuntime->tPersistenceBackend.pfnListEvents(
+        sRunId,
+        pList,
+        pRuntime->tPersistenceBackend.pUserData
+    );
+}
+
+xwork_status xwork__runtime_list_artifacts(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_string_list *pList
+)
+{
+    if ( !pRuntime || !sRunId || !sRunId[0] || !pList ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pRuntime->tPersistenceBackend.pfnListArtifacts ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    return pRuntime->tPersistenceBackend.pfnListArtifacts(
+        sRunId,
+        pList,
+        pRuntime->tPersistenceBackend.pUserData
+    );
+}
+
+xwork_status xwork__runtime_list_run_summaries(
+    const xwork_runtime *pRuntime,
+    xwork_run_summary_list *pList
+)
+{
+    xwork_string_list tRunIds;
+    xwork_run_summary *pItems = NULL;
+    xwork_status iStatus = XWORK_OK;
+    size_t i;
+
+    if ( !pRuntime || !pList ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    xwork_run_summary_list_reset(pList);
+    xwork_string_list_init(&tRunIds);
+
+    iStatus = xwork__runtime_list_runs(pRuntime, &tRunIds);
+    if ( iStatus != XWORK_OK ) {
+        goto done;
+    }
+    if ( tRunIds.iCount == 0u ) {
+        goto done;
+    }
+
+    pItems = (xwork_run_summary *)calloc(tRunIds.iCount, sizeof(*pItems));
+    if ( !pItems ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto done;
+    }
+
+    pList->pItems = pItems;
+    pList->iCount = tRunIds.iCount;
+    for ( i = 0u; i < pList->iCount; ++i ) {
+        xwork_run_summary_init(&pItems[i]);
+        iStatus = xwork__runtime_load_run_summary(
+            pRuntime,
+            tRunIds.psItems[i],
+            &pItems[i]
+        );
+        if ( iStatus != XWORK_OK ) {
+            goto done;
+        }
+    }
+
+done:
+    xwork_string_list_reset(&tRunIds);
+    if ( iStatus != XWORK_OK ) {
+        xwork_run_summary_list_reset(pList);
+    }
+    return iStatus;
+}
+
 xwork_status xwork__runtime_query_run_index(
     const xwork_runtime *pRuntime,
     const xwork_run_index_query *pQuery,
@@ -3593,6 +3946,167 @@ xwork_status xwork__runtime_query_run_index(
     );
 }
 
+xwork_status xwork__runtime_load_run_summary(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_run_summary *pSummary
+)
+{
+    if ( !pRuntime || !sRunId || !sRunId[0] || !pSummary ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pRuntime->tPersistenceBackend.pfnLoadRunSummary ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    return pRuntime->tPersistenceBackend.pfnLoadRunSummary(
+        sRunId,
+        pSummary,
+        pRuntime->tPersistenceBackend.pUserData
+    );
+}
+
+xwork_status xwork__runtime_load_last_event(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_event *pEvent
+)
+{
+    if ( !pRuntime || !sRunId || !sRunId[0] || !pEvent ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pRuntime->tPersistenceBackend.pfnLoadLastEvent ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    return pRuntime->tPersistenceBackend.pfnLoadLastEvent(
+        sRunId,
+        pEvent,
+        pRuntime->tPersistenceBackend.pUserData
+    );
+}
+
+xwork_status xwork__runtime_load_last_approval_request(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_approval_request *pRequest
+)
+{
+    if ( !pRuntime || !sRunId || !sRunId[0] || !pRequest ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pRuntime->tPersistenceBackend.pfnLoadLastApprovalRequest ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    return pRuntime->tPersistenceBackend.pfnLoadLastApprovalRequest(
+        sRunId,
+        pRequest,
+        pRuntime->tPersistenceBackend.pUserData
+    );
+}
+
+xwork_status xwork__runtime_load_last_checkpoint(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_checkpoint *pCheckpoint
+)
+{
+    if ( !pRuntime || !sRunId || !sRunId[0] || !pCheckpoint ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pRuntime->tPersistenceBackend.pfnLoadLastCheckpoint ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    return pRuntime->tPersistenceBackend.pfnLoadLastCheckpoint(
+        sRunId,
+        pCheckpoint,
+        pRuntime->tPersistenceBackend.pUserData
+    );
+}
+
+xwork_status xwork__runtime_load_last_artifact(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_artifact *pArtifact
+)
+{
+    if ( !pRuntime || !sRunId || !sRunId[0] || !pArtifact ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pRuntime->tPersistenceBackend.pfnLoadLastArtifact ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    return pRuntime->tPersistenceBackend.pfnLoadLastArtifact(
+        sRunId,
+        pArtifact,
+        pRuntime->tPersistenceBackend.pUserData
+    );
+}
+
+xwork_status xwork__runtime_load_event(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sEventId,
+    xwork_event *pEvent
+)
+{
+    if ( !pRuntime || !sRunId || !sRunId[0] ||
+         !sEventId || !sEventId[0] || !pEvent ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pRuntime->tPersistenceBackend.pfnLoadEvent ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    return pRuntime->tPersistenceBackend.pfnLoadEvent(
+        sRunId,
+        sEventId,
+        pEvent,
+        pRuntime->tPersistenceBackend.pUserData
+    );
+}
+
+xwork_status xwork__runtime_load_checkpoint(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sCheckpointId,
+    xwork_checkpoint *pCheckpoint
+)
+{
+    if ( !pRuntime || !sRunId || !sRunId[0] ||
+         !sCheckpointId || !sCheckpointId[0] || !pCheckpoint ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pRuntime->tPersistenceBackend.pfnLoadCheckpoint ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    return pRuntime->tPersistenceBackend.pfnLoadCheckpoint(
+        sRunId,
+        sCheckpointId,
+        pCheckpoint,
+        pRuntime->tPersistenceBackend.pUserData
+    );
+}
+
+xwork_status xwork__runtime_load_artifact(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sArtifactId,
+    xwork_artifact *pArtifact
+)
+{
+    if ( !pRuntime || !sRunId || !sRunId[0] ||
+         !sArtifactId || !sArtifactId[0] || !pArtifact ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pRuntime->tPersistenceBackend.pfnLoadArtifact ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    return pRuntime->tPersistenceBackend.pfnLoadArtifact(
+        sRunId,
+        sArtifactId,
+        pArtifact,
+        pRuntime->tPersistenceBackend.pUserData
+    );
+}
+
 static xwork_status xwork__file_persistence_list_runs_cb(
     xwork_string_list *pList,
     void *pUserData
@@ -3601,6 +4115,39 @@ static xwork_status xwork__file_persistence_list_runs_cb(
     const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
 
     return xwork_file_persistence_list_runs(pStore, pList);
+}
+
+static xwork_status xwork__file_persistence_list_checkpoints_cb(
+    const char *sRunId,
+    xwork_string_list *pList,
+    void *pUserData
+)
+{
+    const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
+
+    return xwork_file_persistence_list_checkpoints(pStore, sRunId, pList);
+}
+
+static xwork_status xwork__file_persistence_list_events_cb(
+    const char *sRunId,
+    xwork_string_list *pList,
+    void *pUserData
+)
+{
+    const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
+
+    return xwork_file_persistence_list_events(pStore, sRunId, pList);
+}
+
+static xwork_status xwork__file_persistence_list_artifacts_cb(
+    const char *sRunId,
+    xwork_string_list *pList,
+    void *pUserData
+)
+{
+    const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
+
+    return xwork_file_persistence_list_artifacts(pStore, sRunId, pList);
 }
 
 static xwork_status xwork__file_persistence_query_run_index_cb(
@@ -3612,4 +4159,105 @@ static xwork_status xwork__file_persistence_query_run_index_cb(
     const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
 
     return xwork_file_persistence_query_run_index(pStore, pQuery, pList);
+}
+
+static xwork_status xwork__file_persistence_load_run_summary_cb(
+    const char *sRunId,
+    xwork_run_summary *pSummary,
+    void *pUserData
+)
+{
+    const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
+
+    return xwork_file_persistence_load_run_summary(pStore, sRunId, pSummary);
+}
+
+static xwork_status xwork__file_persistence_load_last_event_cb(
+    const char *sRunId,
+    xwork_event *pEvent,
+    void *pUserData
+)
+{
+    const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
+
+    return xwork_file_persistence_load_last_event(pStore, sRunId, pEvent);
+}
+
+static xwork_status xwork__file_persistence_load_last_approval_request_cb(
+    const char *sRunId,
+    xwork_approval_request *pRequest,
+    void *pUserData
+)
+{
+    const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
+
+    return xwork_file_persistence_load_last_approval_request(pStore, sRunId, pRequest);
+}
+
+static xwork_status xwork__file_persistence_load_last_checkpoint_cb(
+    const char *sRunId,
+    xwork_checkpoint *pCheckpoint,
+    void *pUserData
+)
+{
+    const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
+
+    return xwork_file_persistence_load_last_checkpoint(pStore, sRunId, pCheckpoint);
+}
+
+static xwork_status xwork__file_persistence_load_last_artifact_cb(
+    const char *sRunId,
+    xwork_artifact *pArtifact,
+    void *pUserData
+)
+{
+    const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
+
+    return xwork_file_persistence_load_last_artifact(pStore, sRunId, pArtifact);
+}
+
+static xwork_status xwork__file_persistence_load_event_cb(
+    const char *sRunId,
+    const char *sEventId,
+    xwork_event *pEvent,
+    void *pUserData
+)
+{
+    const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
+
+    return xwork_file_persistence_load_event(pStore, sRunId, sEventId, pEvent);
+}
+
+static xwork_status xwork__file_persistence_load_checkpoint_cb(
+    const char *sRunId,
+    const char *sCheckpointId,
+    xwork_checkpoint *pCheckpoint,
+    void *pUserData
+)
+{
+    const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
+
+    return xwork_file_persistence_load_checkpoint(
+        pStore,
+        sRunId,
+        sCheckpointId,
+        pCheckpoint
+    );
+}
+
+static xwork_status xwork__file_persistence_load_artifact_cb(
+    const char *sRunId,
+    const char *sArtifactId,
+    xwork_artifact *pArtifact,
+    void *pUserData
+)
+{
+    const xwork_file_persistence *pStore = (const xwork_file_persistence *)pUserData;
+
+    return xwork_file_persistence_load_artifact(
+        pStore,
+        sRunId,
+        sArtifactId,
+        pArtifact
+    );
 }

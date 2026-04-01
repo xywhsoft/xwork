@@ -18,6 +18,24 @@ extern "C" {
 
 #define XWORK_PROFILE_XCODE "xcode"
 #define XWORK_PROFILE_XCLAW "xclaw"
+#define XWORK_XLLM_ADAPTER_OPENAI_COMPAT "openai_compat"
+#define XWORK_XLLM_ADAPTER_GLM_NATIVE "glm_native"
+#define XWORK_XLLM_ADAPTER_MINIMAX_NATIVE "minimax_native"
+#define XWORK_XLLM_ADAPTER_KIMI_NATIVE "kimi_native"
+#define XWORK_XLLM_ADAPTER_GEMINI_NATIVE "gemini_native"
+#define XWORK_XLLM_ADAPTER_VERTEX_GEMINI_NATIVE "vertex_gemini_native"
+#define XWORK_XLLM_ADAPTER_QWEN_NATIVE "qwen_native"
+#define XWORK_XLLM_ADAPTER_DOUBAO_NATIVE "doubao_native"
+#define XWORK_XLLM_ADAPTER_ANTHROPIC_NATIVE "anthropic_native"
+#define XWORK_XLLM_ADAPTER_OLLAMA_NATIVE "ollama_native"
+#define XWORK_TOOL_FILESYSTEM_READ_TEXT "filesystem.read_text"
+#define XWORK_TOOL_FILESYSTEM_WRITE_TEXT "filesystem.write_text"
+#define XWORK_TOOL_PROCESS_EXEC "process.exec"
+#define XWORK_TOOL_VCS_STATUS "vcs.status"
+#define XWORK_HOST_FILESYSTEM_READ_TEXT "read_text"
+#define XWORK_HOST_FILESYSTEM_WRITE_TEXT "write_text"
+#define XWORK_HOST_PROCESS_EXEC "exec"
+#define XWORK_HOST_VCS_STATUS "status"
 
 typedef struct xllm_runtime xllm_runtime;
 typedef struct xllm_session xllm_session;
@@ -35,6 +53,9 @@ typedef struct xwork_run_snapshot xwork_run_snapshot;
 typedef struct xwork_persistence_backend xwork_persistence_backend;
 typedef struct xwork_run_index_list xwork_run_index_list;
 typedef struct xwork_run_index_query xwork_run_index_query;
+typedef struct xwork_xllm_profile_options xwork_xllm_profile_options;
+typedef struct xwork_xllm_bootstrap_options xwork_xllm_bootstrap_options;
+typedef struct xwork_xllm_transport_options xwork_xllm_transport_options;
 
 typedef enum {
     XWORK_OK = 0,
@@ -209,6 +230,68 @@ typedef struct {
     size_t iCompactTriggerTurns;
 } xwork_session_policy;
 
+typedef enum {
+    XWORK_XLLM_PROXY_UNSPECIFIED = 0,
+    XWORK_XLLM_PROXY_NONE,
+    XWORK_XLLM_PROXY_SOCKS5,
+    XWORK_XLLM_PROXY_HTTP_CONNECT
+} xwork_xllm_proxy_kind;
+
+typedef enum {
+    XWORK_XLLM_DEBUG_NONE = 0,
+    XWORK_XLLM_DEBUG_HEADERS,
+    XWORK_XLLM_DEBUG_BODY,
+    XWORK_XLLM_DEBUG_WIRE
+} xwork_xllm_debug_mode;
+
+typedef enum {
+    XWORK_XLLM_REDACT_DEFAULT = 0,
+    XWORK_XLLM_REDACT_OFF,
+    XWORK_XLLM_REDACT_STRICT
+} xwork_xllm_redact_mode;
+
+struct xwork_xllm_profile_options {
+    const char *sProfileId;
+    const char *sDisplayName;
+    const char *sProvider;
+    const char *sAdapter;
+    const char *sBaseUrl;
+    const char *sModelId;
+    const char *sApiKey;
+    const char *sOpenAIOrganizationId;
+    const char *sOpenAIProjectId;
+    const char *sAnthropicApiVersion;
+    const char **psAnthropicBetaHeaders;
+    size_t iAnthropicBetaHeaderCount;
+    size_t iMaxOutputTokens;
+};
+
+struct xwork_xllm_transport_options {
+    bool bSetConnectTimeoutMs;
+    size_t iConnectTimeoutMs;
+    bool bSetReadTimeoutMs;
+    size_t iReadTimeoutMs;
+    bool bSetVerifyPeer;
+    bool bVerifyPeer;
+    xwork_xllm_proxy_kind eProxyKind;
+    const char *sProxyHost;
+    bool bSetProxyPort;
+    size_t iProxyPort;
+    const char *sProxyUser;
+    const char *sProxyPass;
+    const char *sCaBundlePath;
+    const char *sClientCertPath;
+    const char *sClientKeyPath;
+};
+
+struct xwork_xllm_bootstrap_options {
+    const xwork_xllm_profile_options *pProfiles;
+    size_t iProfileCount;
+    xwork_xllm_debug_mode eDebugMode;
+    xwork_xllm_redact_mode eRedactMode;
+    xwork_xllm_transport_options tTransportDefaults;
+};
+
 struct xwork_profile {
     const char *sProfileId;
     const char *sDisplayName;
@@ -225,6 +308,7 @@ struct xwork_profile {
 
 typedef struct {
     xllm_runtime *pLlmRuntime;
+    const xwork_xllm_bootstrap_options *pLlmBootstrap;
     const xwork_host_services *pHostServices;
     const xwork_persistence_backend *pPersistenceBackend;
     xwork_policy_options tPolicy;
@@ -282,7 +366,49 @@ typedef struct {
     const char *sMimeType;
     const char *sStorageRef;
     const char *sSummary;
+    const char *sContentText;
+    const char *sCommandText;
+    bool bHasExitCode;
+    int iExitCode;
 } xwork_artifact_options;
+
+typedef struct {
+    const char *sArtifactId;
+    const char *sName;
+    const char *sTargetRef;
+    const char *sSummary;
+    const char *sPatchText;
+} xwork_patch_artifact_options;
+
+typedef struct {
+    const char *sArtifactId;
+    const char *sName;
+    const char *sMimeType;
+    const char *sStorageRef;
+    const char *sSummary;
+    const char *sReportText;
+} xwork_report_artifact_options;
+
+typedef struct {
+    const char *sArtifactId;
+    const char *sName;
+    const char *sMimeType;
+    const char *sStorageRef;
+    const char *sSummary;
+    const char *sOutputText;
+} xwork_output_artifact_options;
+
+typedef struct {
+    const char *sArtifactId;
+    const char *sName;
+    const char *sMimeType;
+    const char *sStorageRef;
+    const char *sSummary;
+    const char *sCommandText;
+    const char *sOutputText;
+    bool bHasExitCode;
+    int iExitCode;
+} xwork_command_artifact_options;
 
 typedef struct {
     const char *sRunId;
@@ -357,6 +483,28 @@ typedef struct {
 } xwork_file_persistence;
 
 typedef struct {
+    const char *sDefaultWorkingDirectory;
+    size_t iMaxReadBytes;
+    size_t iMaxProcessOutputBytes;
+    bool bEnableFilesystemReadText;
+    bool bEnableFilesystemWriteText;
+    bool bEnableProcessExec;
+    bool bEnableVcsStatus;
+} xwork_local_host_options;
+
+typedef struct {
+    char *sDefaultWorkingDirectory;
+    size_t iMaxReadBytes;
+    size_t iMaxProcessOutputBytes;
+    bool bEnableFilesystemReadText;
+    bool bEnableFilesystemWriteText;
+    bool bEnableProcessExec;
+    bool bEnableVcsStatus;
+    char *sLastOutputText;
+    char *sLastVisibleSummary;
+} xwork_local_host;
+
+typedef struct {
     const char **psItems;
     size_t iCount;
 } xwork_string_list;
@@ -395,9 +543,66 @@ typedef xwork_status (*xwork_persistence_list_runs_fn)(
     void *pUserData
 );
 
+typedef xwork_status (*xwork_persistence_list_run_items_fn)(
+    const char *sRunId,
+    xwork_string_list *pList,
+    void *pUserData
+);
+
 typedef xwork_status (*xwork_persistence_query_run_index_fn)(
     const xwork_run_index_query *pQuery,
     xwork_run_index_list *pList,
+    void *pUserData
+);
+
+typedef xwork_status (*xwork_persistence_load_run_summary_fn)(
+    const char *sRunId,
+    xwork_run_summary *pSummary,
+    void *pUserData
+);
+
+typedef xwork_status (*xwork_persistence_load_last_event_fn)(
+    const char *sRunId,
+    xwork_event *pEvent,
+    void *pUserData
+);
+
+typedef xwork_status (*xwork_persistence_load_last_approval_request_fn)(
+    const char *sRunId,
+    xwork_approval_request *pRequest,
+    void *pUserData
+);
+
+typedef xwork_status (*xwork_persistence_load_last_checkpoint_fn)(
+    const char *sRunId,
+    xwork_checkpoint *pCheckpoint,
+    void *pUserData
+);
+
+typedef xwork_status (*xwork_persistence_load_last_artifact_fn)(
+    const char *sRunId,
+    xwork_artifact *pArtifact,
+    void *pUserData
+);
+
+typedef xwork_status (*xwork_persistence_load_event_fn)(
+    const char *sRunId,
+    const char *sEventId,
+    xwork_event *pEvent,
+    void *pUserData
+);
+
+typedef xwork_status (*xwork_persistence_load_checkpoint_fn)(
+    const char *sRunId,
+    const char *sCheckpointId,
+    xwork_checkpoint *pCheckpoint,
+    void *pUserData
+);
+
+typedef xwork_status (*xwork_persistence_load_artifact_fn)(
+    const char *sRunId,
+    const char *sArtifactId,
+    xwork_artifact *pArtifact,
     void *pUserData
 );
 
@@ -408,7 +613,18 @@ struct xwork_persistence_backend {
     xwork_persistence_load_run_snapshot_fn pfnLoadRunSnapshot;
     xwork_persistence_load_checkpoint_snapshot_fn pfnLoadCheckpointSnapshot;
     xwork_persistence_list_runs_fn pfnListRuns;
+    xwork_persistence_list_run_items_fn pfnListCheckpoints;
+    xwork_persistence_list_run_items_fn pfnListEvents;
+    xwork_persistence_list_run_items_fn pfnListArtifacts;
     xwork_persistence_query_run_index_fn pfnQueryRunIndex;
+    xwork_persistence_load_run_summary_fn pfnLoadRunSummary;
+    xwork_persistence_load_last_event_fn pfnLoadLastEvent;
+    xwork_persistence_load_last_approval_request_fn pfnLoadLastApprovalRequest;
+    xwork_persistence_load_last_checkpoint_fn pfnLoadLastCheckpoint;
+    xwork_persistence_load_last_artifact_fn pfnLoadLastArtifact;
+    xwork_persistence_load_event_fn pfnLoadEvent;
+    xwork_persistence_load_checkpoint_fn pfnLoadCheckpoint;
+    xwork_persistence_load_artifact_fn pfnLoadArtifact;
     void *pUserData;
 };
 
@@ -456,6 +672,10 @@ struct xwork_artifact {
     const char *sMimeType;
     const char *sStorageRef;
     const char *sSummary;
+    const char *sContentText;
+    const char *sCommandText;
+    bool bHasExitCode;
+    int iExitCode;
     size_t iSequence;
 };
 
@@ -463,8 +683,10 @@ typedef struct xwork_run_index_entry {
     xwork_run_summary tSummary;
     bool bHasLastApprovalRequest;
     xwork_approval_request tLastApprovalRequest;
+    size_t iEventCount;
     bool bHasLastEvent;
     xwork_event tLastEvent;
+    size_t iCheckpointCount;
     bool bHasLastCheckpoint;
     xwork_checkpoint tLastCheckpoint;
     size_t iArtifactCount;
@@ -481,7 +703,10 @@ typedef enum {
     XWORK_RUN_INDEX_SORT_RUN_ID_ASC = 0,
     XWORK_RUN_INDEX_SORT_RUN_ID_DESC,
     XWORK_RUN_INDEX_SORT_LAST_EVENT_SEQUENCE_DESC,
-    XWORK_RUN_INDEX_SORT_LAST_CHECKPOINT_SEQUENCE_DESC
+    XWORK_RUN_INDEX_SORT_LAST_CHECKPOINT_SEQUENCE_DESC,
+    XWORK_RUN_INDEX_SORT_EVENT_COUNT_DESC,
+    XWORK_RUN_INDEX_SORT_CHECKPOINT_COUNT_DESC,
+    XWORK_RUN_INDEX_SORT_ARTIFACT_COUNT_DESC
 } xwork_run_index_sort;
 
 struct xwork_run_index_query {
@@ -491,9 +716,34 @@ struct xwork_run_index_query {
     xwork_autonomy_mode eAutonomy;
     bool bFilterLastApprovalState;
     xwork_approval_state eLastApprovalState;
+    bool bRequireLastEvent;
+    bool bFilterLastEventKind;
+    xwork_event_kind eLastEventKind;
     bool bRequireLastApprovalRequest;
     bool bRequireLastCheckpoint;
+    bool bFilterLastCheckpointKind;
+    xwork_checkpoint_kind eLastCheckpointKind;
     bool bRequireArtifacts;
+    bool bFilterMinEventCount;
+    size_t iMinEventCount;
+    bool bFilterMaxEventCount;
+    size_t iMaxEventCount;
+    bool bFilterMinCheckpointCount;
+    size_t iMinCheckpointCount;
+    bool bFilterMaxCheckpointCount;
+    size_t iMaxCheckpointCount;
+    bool bFilterMinArtifactCount;
+    size_t iMinArtifactCount;
+    bool bFilterMaxArtifactCount;
+    size_t iMaxArtifactCount;
+    bool bFilterMinLastEventSequence;
+    size_t iMinLastEventSequence;
+    bool bFilterMaxLastEventSequence;
+    size_t iMaxLastEventSequence;
+    bool bFilterMinLastCheckpointSequence;
+    size_t iMinLastCheckpointSequence;
+    bool bFilterMaxLastCheckpointSequence;
+    size_t iMaxLastCheckpointSequence;
     xwork_run_index_sort eSort;
 };
 
@@ -529,6 +779,9 @@ XWORK_API void xwork_approval_decision_init(xwork_approval_decision *pDecision);
 XWORK_API void xwork_memory_context_init(xwork_memory_context *pContext);
 XWORK_API void xwork_memory_context_reset(xwork_memory_context *pContext);
 XWORK_API void xwork_session_policy_init(xwork_session_policy *pPolicy);
+XWORK_API void xwork_xllm_transport_options_init(xwork_xllm_transport_options *pOptions);
+XWORK_API void xwork_xllm_profile_options_init(xwork_xllm_profile_options *pOptions);
+XWORK_API void xwork_xllm_bootstrap_options_init(xwork_xllm_bootstrap_options *pOptions);
 XWORK_API void xwork_profile_init(xwork_profile *pProfile);
 XWORK_API void xwork_persistence_backend_init(xwork_persistence_backend *pBackend);
 XWORK_API void xwork_file_persistence_options_init(
@@ -536,6 +789,9 @@ XWORK_API void xwork_file_persistence_options_init(
 );
 XWORK_API void xwork_file_persistence_init(xwork_file_persistence *pStore);
 XWORK_API void xwork_file_persistence_reset(xwork_file_persistence *pStore);
+XWORK_API void xwork_local_host_options_init(xwork_local_host_options *pOptions);
+XWORK_API void xwork_local_host_init(xwork_local_host *pHost);
+XWORK_API void xwork_local_host_reset(xwork_local_host *pHost);
 XWORK_API void xwork_string_list_init(xwork_string_list *pList);
 XWORK_API void xwork_string_list_reset(xwork_string_list *pList);
 XWORK_API void xwork_event_init(xwork_event *pEvent);
@@ -545,6 +801,10 @@ XWORK_API void xwork_approval_request_reset(xwork_approval_request *pRequest);
 XWORK_API void xwork_checkpoint_init(xwork_checkpoint *pCheckpoint);
 XWORK_API void xwork_checkpoint_reset(xwork_checkpoint *pCheckpoint);
 XWORK_API void xwork_artifact_options_init(xwork_artifact_options *pOptions);
+XWORK_API void xwork_patch_artifact_options_init(xwork_patch_artifact_options *pOptions);
+XWORK_API void xwork_report_artifact_options_init(xwork_report_artifact_options *pOptions);
+XWORK_API void xwork_output_artifact_options_init(xwork_output_artifact_options *pOptions);
+XWORK_API void xwork_command_artifact_options_init(xwork_command_artifact_options *pOptions);
 XWORK_API void xwork_artifact_init(xwork_artifact *pArtifact);
 XWORK_API void xwork_artifact_reset(xwork_artifact *pArtifact);
 XWORK_API void xwork_run_snapshot_init(xwork_run_snapshot *pSnapshot);
@@ -558,6 +818,15 @@ XWORK_API xwork_status xwork_profile_get_builtin(
 XWORK_API xwork_status xwork_profile_apply_runtime_options(
     const xwork_profile *pProfile,
     xwork_runtime_options *pOptions
+);
+XWORK_API xwork_status xwork_profile_apply_xllm_profile_options(
+    const xwork_profile *pProfile,
+    xwork_xllm_profile_options *pOptions
+);
+XWORK_API xwork_status xwork_profile_apply_xllm_bootstrap_options(
+    const xwork_profile *pProfile,
+    xwork_xllm_profile_options *pProfileOptions,
+    xwork_xllm_bootstrap_options *pBootstrapOptions
 );
 XWORK_API xwork_status xwork_profile_apply_workspace_options(
     const xwork_profile *pProfile,
@@ -575,6 +844,11 @@ XWORK_API xwork_status xwork_file_persistence_configure_backend(
     xwork_file_persistence *pStore,
     const xwork_file_persistence_options *pOptions,
     xwork_persistence_backend *pBackend
+);
+XWORK_API xwork_status xwork_local_host_configure_services(
+    xwork_local_host *pHost,
+    const xwork_local_host_options *pOptions,
+    xwork_host_services *pServices
 );
 XWORK_API xwork_status xwork_file_persistence_list_runs(
     const xwork_file_persistence *pStore,
@@ -678,6 +952,25 @@ XWORK_API xwork_status xwork_runtime_list_persisted_runs(
     const xwork_runtime *pRuntime,
     xwork_string_list *pList
 );
+XWORK_API xwork_status xwork_runtime_list_persisted_checkpoints(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_string_list *pList
+);
+XWORK_API xwork_status xwork_runtime_list_persisted_events(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_string_list *pList
+);
+XWORK_API xwork_status xwork_runtime_list_persisted_artifacts(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_string_list *pList
+);
+XWORK_API xwork_status xwork_runtime_list_persisted_run_summaries(
+    const xwork_runtime *pRuntime,
+    xwork_run_summary_list *pList
+);
 XWORK_API xwork_status xwork_runtime_list_persisted_run_index(
     const xwork_runtime *pRuntime,
     xwork_run_index_list *pList
@@ -686,6 +979,49 @@ XWORK_API xwork_status xwork_runtime_query_persisted_run_index(
     const xwork_runtime *pRuntime,
     const xwork_run_index_query *pQuery,
     xwork_run_index_list *pList
+);
+XWORK_API xwork_status xwork_runtime_load_persisted_run_summary(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_run_summary *pSummary
+);
+XWORK_API xwork_status xwork_runtime_load_persisted_last_event(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_event *pEvent
+);
+XWORK_API xwork_status xwork_runtime_load_persisted_last_approval_request(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_approval_request *pRequest
+);
+XWORK_API xwork_status xwork_runtime_load_persisted_last_checkpoint(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_checkpoint *pCheckpoint
+);
+XWORK_API xwork_status xwork_runtime_load_persisted_last_artifact(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_artifact *pArtifact
+);
+XWORK_API xwork_status xwork_runtime_load_persisted_event(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sEventId,
+    xwork_event *pEvent
+);
+XWORK_API xwork_status xwork_runtime_load_persisted_checkpoint(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sCheckpointId,
+    xwork_checkpoint *pCheckpoint
+);
+XWORK_API xwork_status xwork_runtime_load_persisted_artifact(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sArtifactId,
+    xwork_artifact *pArtifact
 );
 XWORK_API xwork_status xwork_runtime_get_policy_options(
     const xwork_runtime *pRuntime,
@@ -720,6 +1056,11 @@ XWORK_API xllm_memory *xwork_workspace_get_memory(const xwork_workspace *pWorksp
 XWORK_API xwork_status xwork_runtime_register_tool(
     xwork_runtime *pRuntime,
     const xwork_tool_def *pDef
+);
+XWORK_API const xwork_tool_def *xwork_get_builtin_tool_def(const char *sToolId);
+XWORK_API xwork_status xwork_runtime_register_builtin_tool(
+    xwork_runtime *pRuntime,
+    const char *sToolId
 );
 XWORK_API const xwork_tool_def *xwork_runtime_find_tool(
     const xwork_runtime *pRuntime,
@@ -759,6 +1100,26 @@ XWORK_API xwork_status xwork_run_resume(xwork_run *pRun);
 XWORK_API xwork_status xwork_run_emit_artifact(
     xwork_run *pRun,
     const xwork_artifact_options *pOptions,
+    xwork_artifact *pArtifact
+);
+XWORK_API xwork_status xwork_run_emit_patch_artifact(
+    xwork_run *pRun,
+    const xwork_patch_artifact_options *pOptions,
+    xwork_artifact *pArtifact
+);
+XWORK_API xwork_status xwork_run_emit_report_artifact(
+    xwork_run *pRun,
+    const xwork_report_artifact_options *pOptions,
+    xwork_artifact *pArtifact
+);
+XWORK_API xwork_status xwork_run_emit_output_artifact(
+    xwork_run *pRun,
+    const xwork_output_artifact_options *pOptions,
+    xwork_artifact *pArtifact
+);
+XWORK_API xwork_status xwork_run_emit_command_artifact(
+    xwork_run *pRun,
+    const xwork_command_artifact_options *pOptions,
     xwork_artifact *pArtifact
 );
 XWORK_API xwork_status xwork_run_complete(xwork_run *pRun);

@@ -1,5 +1,70 @@
 #include "../xwork_core/xwork_internal.h"
 
+static const xwork_tool_def *xwork__get_builtin_tool_def(const char *sToolId)
+{
+    static const xwork_tool_def tFilesystemReadText = {
+        XWORK_TOOL_FILESYSTEM_READ_TEXT,
+        "Filesystem Read Text",
+        "Read text from a workspace file.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_FILESYSTEM,
+        XWORK_HOST_FILESYSTEM_READ_TEXT,
+        XWORK_SIDE_EFFECT_READ_ONLY,
+        XWORK_APPROVAL_DEFAULT,
+        false
+    };
+    static const xwork_tool_def tFilesystemWriteText = {
+        XWORK_TOOL_FILESYSTEM_WRITE_TEXT,
+        "Filesystem Write Text",
+        "Write text into a workspace file.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_FILESYSTEM,
+        XWORK_HOST_FILESYSTEM_WRITE_TEXT,
+        XWORK_SIDE_EFFECT_WORKSPACE_WRITE,
+        XWORK_APPROVAL_ALWAYS,
+        false
+    };
+    static const xwork_tool_def tProcessExec = {
+        XWORK_TOOL_PROCESS_EXEC,
+        "Process Exec",
+        "Run a process command and capture output.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_PROCESS,
+        XWORK_HOST_PROCESS_EXEC,
+        XWORK_SIDE_EFFECT_PROCESS_EXEC,
+        XWORK_APPROVAL_ALWAYS,
+        false
+    };
+    static const xwork_tool_def tVcsStatus = {
+        XWORK_TOOL_VCS_STATUS,
+        "VCS Status",
+        "Read version-control status for a workspace path.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_VCS,
+        XWORK_HOST_VCS_STATUS,
+        XWORK_SIDE_EFFECT_READ_ONLY,
+        XWORK_APPROVAL_DEFAULT,
+        false
+    };
+
+    if ( !sToolId || !sToolId[0] ) {
+        return NULL;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_FILESYSTEM_READ_TEXT) == 0 ) {
+        return &tFilesystemReadText;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_FILESYSTEM_WRITE_TEXT) == 0 ) {
+        return &tFilesystemWriteText;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_PROCESS_EXEC) == 0 ) {
+        return &tProcessExec;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_VCS_STATUS) == 0 ) {
+        return &tVcsStatus;
+    }
+    return NULL;
+}
+
 xwork_status xwork_runtime_register_tool(
     xwork_runtime *pRuntime,
     const xwork_tool_def *pDef
@@ -59,4 +124,22 @@ const xwork_tool_def *xwork_runtime_find_tool(
         }
     }
     return NULL;
+}
+
+const xwork_tool_def *xwork_get_builtin_tool_def(const char *sToolId)
+{
+    return xwork__get_builtin_tool_def(sToolId);
+}
+
+xwork_status xwork_runtime_register_builtin_tool(
+    xwork_runtime *pRuntime,
+    const char *sToolId
+)
+{
+    const xwork_tool_def *pDef = xwork__get_builtin_tool_def(sToolId);
+
+    if ( !pDef ) {
+        return XWORK_ERROR_NOT_FOUND;
+    }
+    return xwork_runtime_register_tool(pRuntime, pDef);
 }

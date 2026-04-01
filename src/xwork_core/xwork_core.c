@@ -1,4 +1,5 @@
 #include "xwork_internal.h"
+#include "../../lib/xllm.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -663,6 +664,8 @@ void xwork_run_index_query_init(xwork_run_index_query *pQuery)
         pQuery->eState = XWORK_RUN_CREATED;
         pQuery->eAutonomy = XWORK_AUTONOMY_SEMI_AUTO;
         pQuery->eLastApprovalState = XWORK_APPROVAL_PENDING;
+        pQuery->eLastEventKind = XWORK_EVENT_NONE;
+        pQuery->eLastCheckpointKind = XWORK_CHECKPOINT_MANUAL;
         pQuery->eSort = XWORK_RUN_INDEX_SORT_RUN_ID_ASC;
     }
 }
@@ -692,6 +695,366 @@ void xwork_session_policy_init(xwork_session_policy *pPolicy)
         pPolicy->fCompactTriggerRatio = 0.85;
         pPolicy->iCompactTriggerTurns = 16u;
     }
+}
+
+void xwork_xllm_transport_options_init(xwork_xllm_transport_options *pOptions)
+{
+    if ( pOptions ) {
+        memset(pOptions, 0, sizeof(*pOptions));
+        pOptions->eProxyKind = XWORK_XLLM_PROXY_UNSPECIFIED;
+    }
+}
+
+void xwork_xllm_profile_options_init(xwork_xllm_profile_options *pOptions)
+{
+    if ( pOptions ) {
+        memset(pOptions, 0, sizeof(*pOptions));
+    }
+}
+
+void xwork_xllm_bootstrap_options_init(xwork_xllm_bootstrap_options *pOptions)
+{
+    if ( pOptions ) {
+        memset(pOptions, 0, sizeof(*pOptions));
+        pOptions->eDebugMode = XWORK_XLLM_DEBUG_NONE;
+        pOptions->eRedactMode = XWORK_XLLM_REDACT_DEFAULT;
+        xwork_xllm_transport_options_init(&pOptions->tTransportDefaults);
+    }
+}
+
+static bool xwork__same_cstr(const char *sLeft, const char *sRight)
+{
+    if ( sLeft == sRight ) {
+        return true;
+    }
+    if ( !sLeft || !sRight ) {
+        return false;
+    }
+    return strcmp(sLeft, sRight) == 0;
+}
+
+static int xwork__register_builtin_xllm_adapter(
+    xllm_runtime *pLlmRuntime,
+    const char *sAdapter
+)
+{
+    if ( !pLlmRuntime || !sAdapter || !sAdapter[0] ) {
+        return XRT_NET_ERROR;
+    }
+
+    if ( strcmp(sAdapter, XWORK_XLLM_ADAPTER_OPENAI_COMPAT) == 0 ) {
+        return xllm_register_openai_compat_adapter(pLlmRuntime);
+    }
+    if ( strcmp(sAdapter, XWORK_XLLM_ADAPTER_GLM_NATIVE) == 0 ) {
+        return xllm_register_glm_native_adapter(pLlmRuntime);
+    }
+    if ( strcmp(sAdapter, XWORK_XLLM_ADAPTER_MINIMAX_NATIVE) == 0 ) {
+        return xllm_register_minimax_native_adapter(pLlmRuntime);
+    }
+    if ( strcmp(sAdapter, XWORK_XLLM_ADAPTER_KIMI_NATIVE) == 0 ) {
+        return xllm_register_kimi_native_adapter(pLlmRuntime);
+    }
+    if ( strcmp(sAdapter, XWORK_XLLM_ADAPTER_GEMINI_NATIVE) == 0 ) {
+        return xllm_register_gemini_native_adapter(pLlmRuntime);
+    }
+    if ( strcmp(sAdapter, XWORK_XLLM_ADAPTER_VERTEX_GEMINI_NATIVE) == 0 ) {
+        return xllm_register_vertex_gemini_native_adapter(pLlmRuntime);
+    }
+    if ( strcmp(sAdapter, XWORK_XLLM_ADAPTER_QWEN_NATIVE) == 0 ) {
+        return xllm_register_qwen_native_adapter(pLlmRuntime);
+    }
+    if ( strcmp(sAdapter, XWORK_XLLM_ADAPTER_DOUBAO_NATIVE) == 0 ) {
+        return xllm_register_doubao_native_adapter(pLlmRuntime);
+    }
+    if ( strcmp(sAdapter, XWORK_XLLM_ADAPTER_ANTHROPIC_NATIVE) == 0 ) {
+        return xllm_register_anthropic_native_adapter(pLlmRuntime);
+    }
+    if ( strcmp(sAdapter, XWORK_XLLM_ADAPTER_OLLAMA_NATIVE) == 0 ) {
+        return xllm_register_ollama_native_adapter(pLlmRuntime);
+    }
+
+    return XRT_NET_ERROR;
+}
+
+static bool xwork__bootstrap_has_duplicate_profile_id(
+    const xwork_xllm_bootstrap_options *pBootstrap,
+    size_t iIndex
+)
+{
+    size_t i;
+
+    if ( !pBootstrap || !pBootstrap->pProfiles ||
+         iIndex >= pBootstrap->iProfileCount ) {
+        return false;
+    }
+
+    for ( i = 0u; i < iIndex; ++i ) {
+        if ( xwork__same_cstr(
+                 pBootstrap->pProfiles[i].sProfileId,
+                 pBootstrap->pProfiles[iIndex].sProfileId
+             ) ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool xwork__bootstrap_has_adapter_before(
+    const xwork_xllm_bootstrap_options *pBootstrap,
+    size_t iIndex
+)
+{
+    size_t i;
+
+    if ( !pBootstrap || !pBootstrap->pProfiles ||
+         iIndex >= pBootstrap->iProfileCount ) {
+        return false;
+    }
+
+    for ( i = 0u; i < iIndex; ++i ) {
+        if ( xwork__same_cstr(
+                 pBootstrap->pProfiles[i].sAdapter,
+                 pBootstrap->pProfiles[iIndex].sAdapter
+             ) ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static xwork_status xwork__fill_bootstrap_transport_defaults(
+    const xwork_xllm_transport_options *pOptions,
+    xllm_runtime_options *pRuntimeOptions
+)
+{
+    if ( !pOptions || !pRuntimeOptions ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    if ( pOptions->bSetConnectTimeoutMs ) {
+        pRuntimeOptions->tTransportDefaults.tConnectTimeoutMs.bSet = true;
+        if ( pOptions->iConnectTimeoutMs > 0xFFFFFFFFu ) {
+            pRuntimeOptions->tTransportDefaults.tConnectTimeoutMs.iValue = 0xFFFFFFFFu;
+        } else {
+            pRuntimeOptions->tTransportDefaults.tConnectTimeoutMs.iValue =
+                (uint32)pOptions->iConnectTimeoutMs;
+        }
+    }
+    if ( pOptions->bSetReadTimeoutMs ) {
+        pRuntimeOptions->tTransportDefaults.tReadTimeoutMs.bSet = true;
+        if ( pOptions->iReadTimeoutMs > 0xFFFFFFFFu ) {
+            pRuntimeOptions->tTransportDefaults.tReadTimeoutMs.iValue = 0xFFFFFFFFu;
+        } else {
+            pRuntimeOptions->tTransportDefaults.tReadTimeoutMs.iValue =
+                (uint32)pOptions->iReadTimeoutMs;
+        }
+    }
+    if ( pOptions->bSetVerifyPeer ) {
+        pRuntimeOptions->tTransportDefaults.tVerifyPeer.bSet = true;
+        pRuntimeOptions->tTransportDefaults.tVerifyPeer.bValue = pOptions->bVerifyPeer;
+    }
+
+    switch ( pOptions->eProxyKind ) {
+    case XWORK_XLLM_PROXY_UNSPECIFIED:
+        pRuntimeOptions->tTransportDefaults.eProxyKind = XLLM_PROXY_UNSPECIFIED;
+        break;
+    case XWORK_XLLM_PROXY_NONE:
+        pRuntimeOptions->tTransportDefaults.eProxyKind = XLLM_PROXY_NONE;
+        break;
+    case XWORK_XLLM_PROXY_SOCKS5:
+        pRuntimeOptions->tTransportDefaults.eProxyKind = XLLM_PROXY_SOCKS5;
+        break;
+    case XWORK_XLLM_PROXY_HTTP_CONNECT:
+        pRuntimeOptions->tTransportDefaults.eProxyKind = XLLM_PROXY_HTTP_CONNECT;
+        break;
+    default:
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    pRuntimeOptions->tTransportDefaults.sProxyHost = pOptions->sProxyHost;
+    if ( pOptions->bSetProxyPort ) {
+        pRuntimeOptions->tTransportDefaults.tProxyPort.bSet = true;
+        if ( pOptions->iProxyPort > 0xFFFFFFFFu ) {
+            pRuntimeOptions->tTransportDefaults.tProxyPort.iValue = 0xFFFFFFFFu;
+        } else {
+            pRuntimeOptions->tTransportDefaults.tProxyPort.iValue =
+                (uint32)pOptions->iProxyPort;
+        }
+    }
+    pRuntimeOptions->tTransportDefaults.sProxyUser = pOptions->sProxyUser;
+    pRuntimeOptions->tTransportDefaults.sProxyPass = pOptions->sProxyPass;
+    pRuntimeOptions->tTransportDefaults.sCaBundlePath = pOptions->sCaBundlePath;
+    pRuntimeOptions->tTransportDefaults.sClientCertPath = pOptions->sClientCertPath;
+    pRuntimeOptions->tTransportDefaults.sClientKeyPath = pOptions->sClientKeyPath;
+    return XWORK_OK;
+}
+
+static xwork_status xwork__fill_bootstrap_runtime_defaults(
+    const xwork_xllm_bootstrap_options *pBootstrap,
+    xllm_runtime_options *pRuntimeOptions
+)
+{
+    if ( !pBootstrap || !pRuntimeOptions ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    switch ( pBootstrap->eDebugMode ) {
+    case XWORK_XLLM_DEBUG_NONE:
+        pRuntimeOptions->eDebugMode = XLLM_DEBUG_NONE;
+        break;
+    case XWORK_XLLM_DEBUG_HEADERS:
+        pRuntimeOptions->eDebugMode = XLLM_DEBUG_HEADERS;
+        break;
+    case XWORK_XLLM_DEBUG_BODY:
+        pRuntimeOptions->eDebugMode = XLLM_DEBUG_BODY;
+        break;
+    case XWORK_XLLM_DEBUG_WIRE:
+        pRuntimeOptions->eDebugMode = XLLM_DEBUG_WIRE;
+        break;
+    default:
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    switch ( pBootstrap->eRedactMode ) {
+    case XWORK_XLLM_REDACT_DEFAULT:
+        pRuntimeOptions->eRedactMode = XLLM_REDACT_DEFAULT;
+        break;
+    case XWORK_XLLM_REDACT_OFF:
+        pRuntimeOptions->eRedactMode = XLLM_REDACT_OFF;
+        break;
+    case XWORK_XLLM_REDACT_STRICT:
+        pRuntimeOptions->eRedactMode = XLLM_REDACT_STRICT;
+        break;
+    default:
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    return xwork__fill_bootstrap_transport_defaults(
+        &pBootstrap->tTransportDefaults,
+        pRuntimeOptions
+    );
+}
+
+static void xwork__fill_bootstrap_auth(
+    const xwork_xllm_profile_options *pOptions,
+    xllm_profile *pProfile
+)
+{
+    if ( !pOptions || !pProfile || !pOptions->sApiKey || !pOptions->sApiKey[0] ) {
+        return;
+    }
+
+    if ( xwork__same_cstr(pOptions->sAdapter, XWORK_XLLM_ADAPTER_ANTHROPIC_NATIVE) ||
+         xwork__same_cstr(pOptions->sAdapter, XWORK_XLLM_ADAPTER_GEMINI_NATIVE) ||
+         xwork__same_cstr(pOptions->sAdapter, XWORK_XLLM_ADAPTER_VERTEX_GEMINI_NATIVE) ) {
+        pProfile->tAuth.eKind = XLLM_AUTH_API_KEY_HEADER;
+        pProfile->tAuth.sSecret = pOptions->sApiKey;
+        return;
+    }
+
+    pProfile->tAuth.eKind = XLLM_AUTH_BEARER;
+    pProfile->tAuth.sSecret = pOptions->sApiKey;
+    pProfile->tAuth.sScheme = "Bearer";
+}
+
+static void xwork__fill_bootstrap_profile(
+    const xwork_xllm_profile_options *pOptions,
+    xllm_profile *pProfile
+)
+{
+    xllm_profile_init(pProfile);
+    pProfile->sId = pOptions->sProfileId;
+    pProfile->sName = pOptions->sDisplayName ? pOptions->sDisplayName : pOptions->sProfileId;
+    pProfile->sProvider = pOptions->sProvider ? pOptions->sProvider : pOptions->sAdapter;
+    pProfile->sAdapter = pOptions->sAdapter;
+    pProfile->sBaseUrl = pOptions->sBaseUrl;
+    pProfile->tProviderOptions.sOpenAIOrganizationId = pOptions->sOpenAIOrganizationId;
+    pProfile->tProviderOptions.sOpenAIProjectId = pOptions->sOpenAIProjectId;
+    pProfile->tProviderOptions.sAnthropicApiVersion = pOptions->sAnthropicApiVersion;
+    pProfile->tProviderOptions.psAnthropicBetaHeaders = pOptions->psAnthropicBetaHeaders;
+    pProfile->tProviderOptions.iAnthropicBetaHeaderCount =
+        pOptions->iAnthropicBetaHeaderCount;
+    pProfile->tModels.tText.sModelId = pOptions->sModelId;
+    pProfile->tModels.tText.eCapMode = XLLM_CAP_MODE_EXACT;
+    pProfile->tModels.tText.tCaps.uFlags =
+        XLLM_CAP_TEXT_IN |
+        XLLM_CAP_TEXT_OUT |
+        XLLM_CAP_TOOL_CALL_OUT |
+        XLLM_CAP_TOOL_RESULT_IN;
+    if ( pOptions->iMaxOutputTokens > 0u ) {
+        pProfile->tDefaults.tGeneration.tMaxOutputTokens.bSet = true;
+        if ( pOptions->iMaxOutputTokens > 0xFFFFFFFFu ) {
+            pProfile->tDefaults.tGeneration.tMaxOutputTokens.iValue = 0xFFFFFFFFu;
+        } else {
+            pProfile->tDefaults.tGeneration.tMaxOutputTokens.iValue =
+                (uint32)pOptions->iMaxOutputTokens;
+        }
+    }
+    xwork__fill_bootstrap_auth(pOptions, pProfile);
+}
+
+static xwork_status xwork__bootstrap_llm_runtime(
+    const xwork_xllm_bootstrap_options *pBootstrap,
+    xllm_runtime **ppLlmRuntime
+)
+{
+    xllm_runtime_options tLlmRuntimeOptions;
+    xllm_runtime *pLlmRuntime = NULL;
+    xwork_status iStatus;
+    size_t i;
+
+    if ( !pBootstrap || !ppLlmRuntime ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    *ppLlmRuntime = NULL;
+    xllm_runtime_options_init(&tLlmRuntimeOptions);
+    iStatus = xwork__fill_bootstrap_runtime_defaults(
+        pBootstrap,
+        &tLlmRuntimeOptions
+    );
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+    if ( xllm_runtime_create(&tLlmRuntimeOptions, &pLlmRuntime) != XRT_NET_OK ||
+         !pLlmRuntime ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+    for ( i = 0u; i < pBootstrap->iProfileCount; ++i ) {
+        const xwork_xllm_profile_options *pProfileOptions = &pBootstrap->pProfiles[i];
+        xllm_profile tProfile;
+
+        if ( !pProfileOptions->sProfileId || !pProfileOptions->sProfileId[0] ||
+             !pProfileOptions->sAdapter || !pProfileOptions->sAdapter[0] ||
+             !pProfileOptions->sModelId || !pProfileOptions->sModelId[0] ) {
+            xllm_runtime_destroy(pLlmRuntime);
+            return XWORK_ERROR_INVALID_ARGUMENT;
+        }
+        if ( xwork__bootstrap_has_duplicate_profile_id(pBootstrap, i) ) {
+            xllm_runtime_destroy(pLlmRuntime);
+            return XWORK_ERROR_ALREADY_EXISTS;
+        }
+        if ( !xwork__bootstrap_has_adapter_before(pBootstrap, i) &&
+             xwork__register_builtin_xllm_adapter(
+                 pLlmRuntime,
+                 pProfileOptions->sAdapter
+             ) != XRT_NET_OK ) {
+            xllm_runtime_destroy(pLlmRuntime);
+            return XWORK_ERROR_UNSUPPORTED;
+        }
+
+        xwork__fill_bootstrap_profile(pProfileOptions, &tProfile);
+        if ( xllm_register_profile(pLlmRuntime, &tProfile) != XRT_NET_OK ) {
+            xllm_runtime_destroy(pLlmRuntime);
+            return XWORK_ERROR_EXTERNAL_FAILURE;
+        }
+    }
+
+    *ppLlmRuntime = pLlmRuntime;
+    return XWORK_OK;
 }
 
 void xwork_event_init(xwork_event *pEvent)
@@ -1063,8 +1426,12 @@ xwork_status xwork_runtime_create(
 )
 {
     xwork_runtime *pRuntime;
+    xwork_status iStatus;
 
     if ( !ppRuntime ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( pOptions && pOptions->pLlmRuntime && pOptions->pLlmBootstrap ) {
         return XWORK_ERROR_INVALID_ARGUMENT;
     }
 
@@ -1079,7 +1446,19 @@ xwork_status xwork_runtime_create(
     xwork_policy_options_init(&pRuntime->tPolicy);
 
     if ( pOptions ) {
-        pRuntime->pLlmRuntime = pOptions->pLlmRuntime;
+        if ( pOptions->pLlmBootstrap ) {
+            iStatus = xwork__bootstrap_llm_runtime(
+                pOptions->pLlmBootstrap,
+                &pRuntime->pLlmRuntime
+            );
+            if ( iStatus != XWORK_OK ) {
+                free(pRuntime);
+                return iStatus;
+            }
+            pRuntime->bOwnLlmRuntime = true;
+        } else {
+            pRuntime->pLlmRuntime = pOptions->pLlmRuntime;
+        }
         if ( pOptions->pHostServices ) {
             pRuntime->tHostServices = *pOptions->pHostServices;
         }
@@ -1122,6 +1501,11 @@ void xwork_runtime_destroy(xwork_runtime *pRuntime)
         xwork__free_tool_record(pTool);
     }
 
+    if ( pRuntime->bOwnLlmRuntime && pRuntime->pLlmRuntime ) {
+        xllm_runtime_destroy(pRuntime->pLlmRuntime);
+        pRuntime->pLlmRuntime = NULL;
+    }
+
     free(pRuntime);
 }
 
@@ -1150,6 +1534,41 @@ xwork_status xwork_runtime_list_persisted_runs(
     return xwork__runtime_list_runs(pRuntime, pList);
 }
 
+xwork_status xwork_runtime_list_persisted_checkpoints(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_string_list *pList
+)
+{
+    return xwork__runtime_list_checkpoints(pRuntime, sRunId, pList);
+}
+
+xwork_status xwork_runtime_list_persisted_events(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_string_list *pList
+)
+{
+    return xwork__runtime_list_events(pRuntime, sRunId, pList);
+}
+
+xwork_status xwork_runtime_list_persisted_artifacts(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_string_list *pList
+)
+{
+    return xwork__runtime_list_artifacts(pRuntime, sRunId, pList);
+}
+
+xwork_status xwork_runtime_list_persisted_run_summaries(
+    const xwork_runtime *pRuntime,
+    xwork_run_summary_list *pList
+)
+{
+    return xwork__runtime_list_run_summaries(pRuntime, pList);
+}
+
 xwork_status xwork_runtime_list_persisted_run_index(
     const xwork_runtime *pRuntime,
     xwork_run_index_list *pList
@@ -1165,6 +1584,91 @@ xwork_status xwork_runtime_query_persisted_run_index(
 )
 {
     return xwork__runtime_query_run_index(pRuntime, pQuery, pList);
+}
+
+xwork_status xwork_runtime_load_persisted_run_summary(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_run_summary *pSummary
+)
+{
+    return xwork__runtime_load_run_summary(pRuntime, sRunId, pSummary);
+}
+
+xwork_status xwork_runtime_load_persisted_last_event(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_event *pEvent
+)
+{
+    return xwork__runtime_load_last_event(pRuntime, sRunId, pEvent);
+}
+
+xwork_status xwork_runtime_load_persisted_last_approval_request(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_approval_request *pRequest
+)
+{
+    return xwork__runtime_load_last_approval_request(pRuntime, sRunId, pRequest);
+}
+
+xwork_status xwork_runtime_load_persisted_last_checkpoint(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_checkpoint *pCheckpoint
+)
+{
+    return xwork__runtime_load_last_checkpoint(pRuntime, sRunId, pCheckpoint);
+}
+
+xwork_status xwork_runtime_load_persisted_last_artifact(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_artifact *pArtifact
+)
+{
+    return xwork__runtime_load_last_artifact(pRuntime, sRunId, pArtifact);
+}
+
+xwork_status xwork_runtime_load_persisted_event(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sEventId,
+    xwork_event *pEvent
+)
+{
+    return xwork__runtime_load_event(pRuntime, sRunId, sEventId, pEvent);
+}
+
+xwork_status xwork_runtime_load_persisted_checkpoint(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sCheckpointId,
+    xwork_checkpoint *pCheckpoint
+)
+{
+    return xwork__runtime_load_checkpoint(
+        pRuntime,
+        sRunId,
+        sCheckpointId,
+        pCheckpoint
+    );
+}
+
+xwork_status xwork_runtime_load_persisted_artifact(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sArtifactId,
+    xwork_artifact *pArtifact
+)
+{
+    return xwork__runtime_load_artifact(
+        pRuntime,
+        sRunId,
+        sArtifactId,
+        pArtifact
+    );
 }
 
 xwork_status xwork_runtime_get_policy_options(

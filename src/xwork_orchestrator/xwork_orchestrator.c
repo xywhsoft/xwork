@@ -936,6 +936,181 @@ static bool xwork__orchestrator_has_pending_tool_call(const xwork_run *pRun)
            pRun->sLastToolId[0];
 }
 
+static bool xwork__parse_json_table(const char *sJson, xvalue *ptTable)
+{
+    xvalue tValue;
+
+    if ( !ptTable ) {
+        return false;
+    }
+
+    *ptTable = NULL;
+    if ( !sJson || !sJson[0] ) {
+        return true;
+    }
+
+    tValue = xrtParseJSON((str)sJson, strlen(sJson));
+    if ( !tValue || xvoType(tValue) != XVO_DT_TABLE ) {
+        if ( tValue ) {
+            xvoUnref(tValue);
+        }
+        return false;
+    }
+
+    *ptTable = tValue;
+    return true;
+}
+
+static const char *xwork__json_table_get_text(xvalue tTable, const char *sKey)
+{
+    xvalue tValue;
+
+    if ( !tTable || !sKey ) {
+        return NULL;
+    }
+
+    tValue = xvoTableGetValue(tTable, sKey, (uint32)strlen(sKey));
+    if ( !tValue || xvoType(tValue) != XVO_DT_TEXT ) {
+        return NULL;
+    }
+
+    return (const char *)xvoGetText(tValue);
+}
+
+static bool xwork__json_table_get_int(xvalue tTable, const char *sKey, int *piValue)
+{
+    xvalue tValue;
+
+    if ( piValue ) {
+        *piValue = 0;
+    }
+    if ( !tTable || !sKey || !piValue ) {
+        return false;
+    }
+
+    tValue = xvoTableGetValue(tTable, sKey, (uint32)strlen(sKey));
+    if ( !tValue || xvoType(tValue) != XVO_DT_INT ) {
+        return false;
+    }
+
+    *piValue = (int)xvoGetInt(tValue);
+    return true;
+}
+
+static const char *xwork__path_leaf_name(const char *sPath)
+{
+    const char *sLeaf;
+
+    if ( !sPath || !sPath[0] ) {
+        return NULL;
+    }
+
+    sLeaf = strrchr(sPath, '/');
+    if ( !sLeaf ) {
+        sLeaf = strrchr(sPath, '\\');
+    }
+    return (sLeaf && sLeaf[1]) ? (sLeaf + 1) : sPath;
+}
+
+static xwork_status xwork__emit_builtin_tool_artifact(
+    xwork_run *pRun,
+    const xwork_tool_def *pToolDef,
+    const xwork_tool_call *pToolCall,
+    const xwork_tool_result *pToolResult
+)
+{
+    xvalue tArguments = NULL;
+    xvalue tResult = NULL;
+    xwork_status iStatus = XWORK_OK;
+
+    if ( !pRun || !pToolDef || !pToolCall || !pToolResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    if ( !xwork__parse_json_table(pToolCall->sArgumentsJson, &tArguments) ||
+         !xwork__parse_json_table(pToolResult->sOutputText, &tResult) ) {
+        return XWORK_OK;
+    }
+
+    if ( strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_READ_TEXT) == 0 ) {
+        xwork_output_artifact_options tOptions;
+        const char *sText = xwork__json_table_get_text(tResult, "text");
+        const char *sPath = xwork__json_table_get_text(tResult, "resolved_path");
+
+        if ( !sPath ) {
+            sPath = xwork__json_table_get_text(tArguments, "path");
+        }
+        if ( sText ) {
+            xwork_output_artifact_options_init(&tOptions);
+            tOptions.sName = xwork__path_leaf_name(sPath);
+            tOptions.sStorageRef = sPath;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.sOutputText = sText;
+            iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
+        }
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_WRITE_TEXT) == 0 ) {
+        xwork_output_artifact_options tOptions;
+        const char *sText = xwork__json_table_get_text(tArguments, "text");
+        const char *sPath = xwork__json_table_get_text(tResult, "resolved_path");
+
+        if ( !sPath ) {
+            sPath = xwork__json_table_get_text(tArguments, "path");
+        }
+        if ( sText ) {
+            xwork_output_artifact_options_init(&tOptions);
+            tOptions.sName = xwork__path_leaf_name(sPath);
+            tOptions.sStorageRef = sPath;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.sOutputText = sText;
+            iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
+        }
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_EXEC) == 0 ) {
+        xwork_command_artifact_options tOptions;
+        const char *sCommand = xwork__json_table_get_text(tArguments, "command");
+        const char *sOutput = xwork__json_table_get_text(tResult, "stdout");
+        const char *sCwd = xwork__json_table_get_text(tResult, "cwd");
+        int iExitCode = 0;
+        bool bHasExitCode = xwork__json_table_get_int(tResult, "exit_code", &iExitCode);
+
+        if ( sCommand && sOutput ) {
+            xwork_command_artifact_options_init(&tOptions);
+            tOptions.sName = "process.exec.txt";
+            tOptions.sStorageRef = sCwd;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.sCommandText = sCommand;
+            tOptions.sOutputText = sOutput;
+            tOptions.bHasExitCode = bHasExitCode;
+            tOptions.iExitCode = iExitCode;
+            iStatus = xwork_run_emit_command_artifact(pRun, &tOptions, NULL);
+        }
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_VCS_STATUS) == 0 ) {
+        xwork_command_artifact_options tOptions;
+        const char *sStatusText = xwork__json_table_get_text(tResult, "status");
+        const char *sPath = xwork__json_table_get_text(tResult, "resolved_path");
+
+        if ( !sPath ) {
+            sPath = xwork__json_table_get_text(tArguments, "path");
+        }
+        if ( sStatusText ) {
+            xwork_command_artifact_options_init(&tOptions);
+            tOptions.sName = "git-status.txt";
+            tOptions.sStorageRef = sPath;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.sCommandText = "git status --short --branch";
+            tOptions.sOutputText = sStatusText;
+            iStatus = xwork_run_emit_command_artifact(pRun, &tOptions, NULL);
+        }
+    }
+
+    if ( tArguments ) {
+        xvoUnref(tArguments);
+    }
+    if ( tResult ) {
+        xvoUnref(tResult);
+    }
+    return iStatus;
+}
+
 static xwork_status xwork__execute_tool(
     xwork_run *pRun,
     const xwork_tool_def *pToolDef,
@@ -1047,6 +1222,16 @@ static xwork_status xwork__resume_pending_tool(
     }
 
     iStatus = xwork__store_tool_result(pRun, &tToolResult);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    iStatus = xwork__emit_builtin_tool_artifact(
+        pRun,
+        pToolDef,
+        &tToolCall,
+        &tToolResult
+    );
     if ( iStatus != XWORK_OK ) {
         return iStatus;
     }
@@ -1536,6 +1721,17 @@ xwork_status xwork_run_execute(
             }
 
             iStatus = xwork__store_tool_result(pRun, &tToolResult);
+            if ( iStatus != XWORK_OK ) {
+                xllm_response_free(pResponse);
+                return iStatus;
+            }
+
+            iStatus = xwork__emit_builtin_tool_artifact(
+                pRun,
+                pToolDef,
+                &tToolCall,
+                &tToolResult
+            );
             if ( iStatus != XWORK_OK ) {
                 xllm_response_free(pResponse);
                 return iStatus;

@@ -67,8 +67,18 @@ static xwork_status xwork__artifact_copy(
     if ( iStatus != XWORK_OK ) {
         return iStatus;
     }
+    iStatus = xwork__artifact_snapshot_replace_cstr(&pTarget->sContentText, pSource->sContentText);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+    iStatus = xwork__artifact_snapshot_replace_cstr(&pTarget->sCommandText, pSource->sCommandText);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
 
     pTarget->eKind = pSource->eKind;
+    pTarget->bHasExitCode = pSource->bHasExitCode;
+    pTarget->iExitCode = pSource->iExitCode;
     pTarget->iSequence = pSource->iSequence;
     return XWORK_OK;
 }
@@ -84,6 +94,8 @@ static void xwork__artifact_record_reset(xwork_artifact_record *pRecord)
     xwork__free_cstr(&pRecord->sMimeType);
     xwork__free_cstr(&pRecord->sStorageRef);
     xwork__free_cstr(&pRecord->sSummary);
+    xwork__free_cstr(&pRecord->sContentText);
+    xwork__free_cstr(&pRecord->sCommandText);
     memset(&pRecord->tArtifact, 0, sizeof(pRecord->tArtifact));
 }
 
@@ -126,6 +138,10 @@ static xwork_status xwork__append_artifact_record_owned(
     char *sMimeType,
     char *sStorageRef,
     char *sSummary,
+    char *sContentText,
+    char *sCommandText,
+    bool bHasExitCode,
+    int iExitCode,
     size_t iSequence,
     xwork_artifact *pArtifact
 )
@@ -139,6 +155,8 @@ static xwork_status xwork__append_artifact_record_owned(
         free(sMimeType);
         free(sStorageRef);
         free(sSummary);
+        free(sContentText);
+        free(sCommandText);
         return XWORK_ERROR_INVALID_ARGUMENT;
     }
 
@@ -149,6 +167,8 @@ static xwork_status xwork__append_artifact_record_owned(
         free(sMimeType);
         free(sStorageRef);
         free(sSummary);
+        free(sContentText);
+        free(sCommandText);
         return iStatus;
     }
 
@@ -160,6 +180,10 @@ static xwork_status xwork__append_artifact_record_owned(
     pRecord->sMimeType = sMimeType;
     pRecord->sStorageRef = sStorageRef;
     pRecord->sSummary = sSummary;
+    pRecord->sContentText = sContentText;
+    pRecord->sCommandText = sCommandText;
+    pRecord->bHasExitCode = bHasExitCode;
+    pRecord->iExitCode = iExitCode;
     pRecord->tArtifact.sArtifactId = pRecord->sArtifactId;
     pRecord->tArtifact.sRunId = pRun->sRunId;
     pRecord->tArtifact.eKind = eKind;
@@ -167,6 +191,10 @@ static xwork_status xwork__append_artifact_record_owned(
     pRecord->tArtifact.sMimeType = pRecord->sMimeType;
     pRecord->tArtifact.sStorageRef = pRecord->sStorageRef;
     pRecord->tArtifact.sSummary = pRecord->sSummary;
+    pRecord->tArtifact.sContentText = pRecord->sContentText;
+    pRecord->tArtifact.sCommandText = pRecord->sCommandText;
+    pRecord->tArtifact.bHasExitCode = pRecord->bHasExitCode;
+    pRecord->tArtifact.iExitCode = pRecord->iExitCode;
     pRecord->tArtifact.iSequence = iSequence;
 
     ++pRun->iArtifactCount;
@@ -186,6 +214,37 @@ void xwork_artifact_options_init(xwork_artifact_options *pOptions)
     if ( pOptions ) {
         memset(pOptions, 0, sizeof(*pOptions));
         pOptions->eKind = XWORK_ARTIFACT_OUTPUT;
+    }
+}
+
+void xwork_patch_artifact_options_init(xwork_patch_artifact_options *pOptions)
+{
+    if ( pOptions ) {
+        memset(pOptions, 0, sizeof(*pOptions));
+    }
+}
+
+void xwork_report_artifact_options_init(xwork_report_artifact_options *pOptions)
+{
+    if ( pOptions ) {
+        memset(pOptions, 0, sizeof(*pOptions));
+        pOptions->sMimeType = "text/markdown";
+    }
+}
+
+void xwork_output_artifact_options_init(xwork_output_artifact_options *pOptions)
+{
+    if ( pOptions ) {
+        memset(pOptions, 0, sizeof(*pOptions));
+        pOptions->sMimeType = "text/plain";
+    }
+}
+
+void xwork_command_artifact_options_init(xwork_command_artifact_options *pOptions)
+{
+    if ( pOptions ) {
+        memset(pOptions, 0, sizeof(*pOptions));
+        pOptions->sMimeType = "text/plain";
     }
 }
 
@@ -209,6 +268,8 @@ void xwork_artifact_reset(xwork_artifact *pArtifact)
     xwork__free_cstr((char **)&pArtifact->sMimeType);
     xwork__free_cstr((char **)&pArtifact->sStorageRef);
     xwork__free_cstr((char **)&pArtifact->sSummary);
+    xwork__free_cstr((char **)&pArtifact->sContentText);
+    xwork__free_cstr((char **)&pArtifact->sCommandText);
     xwork_artifact_init(pArtifact);
 }
 
@@ -241,6 +302,8 @@ xwork_status xwork__run_append_artifact_record(
     char *sMimeType = NULL;
     char *sStorageRef = NULL;
     char *sSummary = NULL;
+    char *sContentText = NULL;
+    char *sCommandText = NULL;
     size_t i;
     size_t iSequence;
 
@@ -301,6 +364,29 @@ xwork_status xwork__run_append_artifact_record(
             return XWORK_ERROR_NO_MEMORY;
         }
     }
+    if ( pOptions->sContentText ) {
+        sContentText = xwork__dup_cstr(pOptions->sContentText);
+        if ( !sContentText ) {
+            free(sSummary);
+            free(sStorageRef);
+            free(sMimeType);
+            free(sName);
+            free(sArtifactId);
+            return XWORK_ERROR_NO_MEMORY;
+        }
+    }
+    if ( pOptions->sCommandText ) {
+        sCommandText = xwork__dup_cstr(pOptions->sCommandText);
+        if ( !sCommandText ) {
+            free(sContentText);
+            free(sSummary);
+            free(sStorageRef);
+            free(sMimeType);
+            free(sName);
+            free(sArtifactId);
+            return XWORK_ERROR_NO_MEMORY;
+        }
+    }
 
     return xwork__append_artifact_record_owned(
         pRun,
@@ -310,6 +396,10 @@ xwork_status xwork__run_append_artifact_record(
         sMimeType,
         sStorageRef,
         sSummary,
+        sContentText,
+        sCommandText,
+        pOptions->bHasExitCode,
+        pOptions->iExitCode,
         iSequence,
         pArtifact
     );
@@ -334,6 +424,8 @@ void xwork__run_snapshot_reset_artifacts(xwork_run_snapshot *pSnapshot)
         xwork__artifact_snapshot_free_cstr(&pArtifacts[i].sMimeType);
         xwork__artifact_snapshot_free_cstr(&pArtifacts[i].sStorageRef);
         xwork__artifact_snapshot_free_cstr(&pArtifacts[i].sSummary);
+        xwork__artifact_snapshot_free_cstr(&pArtifacts[i].sContentText);
+        xwork__artifact_snapshot_free_cstr(&pArtifacts[i].sCommandText);
     }
     free(pArtifacts);
     pSnapshot->pArtifacts = NULL;
@@ -403,9 +495,25 @@ xwork_status xwork__run_snapshot_copy_artifacts(
             xwork__run_snapshot_reset_artifacts(pSnapshot);
             return iStatus;
         }
+        iStatus = xwork__artifact_snapshot_replace_cstr(&pArtifacts[i].sContentText, pSource->sContentText);
+        if ( iStatus != XWORK_OK ) {
+            pSnapshot->pArtifacts = pArtifacts;
+            pSnapshot->iArtifactCount = i + 1u;
+            xwork__run_snapshot_reset_artifacts(pSnapshot);
+            return iStatus;
+        }
+        iStatus = xwork__artifact_snapshot_replace_cstr(&pArtifacts[i].sCommandText, pSource->sCommandText);
+        if ( iStatus != XWORK_OK ) {
+            pSnapshot->pArtifacts = pArtifacts;
+            pSnapshot->iArtifactCount = i + 1u;
+            xwork__run_snapshot_reset_artifacts(pSnapshot);
+            return iStatus;
+        }
 
         pArtifacts[i].sRunId = pSnapshot->sRunId;
         pArtifacts[i].eKind = pSource->eKind;
+        pArtifacts[i].bHasExitCode = pSource->bHasExitCode;
+        pArtifacts[i].iExitCode = pSource->iExitCode;
         pArtifacts[i].iSequence = pSource->iSequence;
     }
 
@@ -435,12 +543,18 @@ xwork_status xwork__run_apply_snapshot_artifacts(
         char *sMimeType = xwork__dup_cstr(pSource->sMimeType);
         char *sStorageRef = xwork__dup_cstr(pSource->sStorageRef);
         char *sSummary = xwork__dup_cstr(pSource->sSummary);
+        char *sContentText = xwork__dup_cstr(pSource->sContentText);
+        char *sCommandText = xwork__dup_cstr(pSource->sCommandText);
 
         if ( (pSource->sArtifactId && !sArtifactId) ||
              (pSource->sName && !sName) ||
              (pSource->sMimeType && !sMimeType) ||
              (pSource->sStorageRef && !sStorageRef) ||
-             (pSource->sSummary && !sSummary) ) {
+             (pSource->sSummary && !sSummary) ||
+             (pSource->sContentText && !sContentText) ||
+             (pSource->sCommandText && !sCommandText) ) {
+            free(sCommandText);
+            free(sContentText);
             free(sSummary);
             free(sStorageRef);
             free(sMimeType);
@@ -458,6 +572,10 @@ xwork_status xwork__run_apply_snapshot_artifacts(
             sMimeType,
             sStorageRef,
             sSummary,
+            sContentText,
+            sCommandText,
+            pSource->bHasExitCode,
+            pSource->iExitCode,
             pSource->iSequence,
             NULL
         );
@@ -563,6 +681,101 @@ xwork_status xwork_run_emit_artifact(
         }
     }
     return XWORK_OK;
+}
+
+xwork_status xwork_run_emit_patch_artifact(
+    xwork_run *pRun,
+    const xwork_patch_artifact_options *pOptions,
+    xwork_artifact *pArtifact
+)
+{
+    xwork_artifact_options tOptions;
+
+    if ( !pOptions ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    xwork_artifact_options_init(&tOptions);
+    tOptions.sArtifactId = pOptions->sArtifactId;
+    tOptions.eKind = XWORK_ARTIFACT_PATCH;
+    tOptions.sName = pOptions->sName;
+    tOptions.sMimeType = "text/x-diff";
+    tOptions.sStorageRef = pOptions->sTargetRef;
+    tOptions.sSummary = pOptions->sSummary;
+    tOptions.sContentText = pOptions->sPatchText;
+    return xwork_run_emit_artifact(pRun, &tOptions, pArtifact);
+}
+
+xwork_status xwork_run_emit_report_artifact(
+    xwork_run *pRun,
+    const xwork_report_artifact_options *pOptions,
+    xwork_artifact *pArtifact
+)
+{
+    xwork_artifact_options tOptions;
+
+    if ( !pOptions ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    xwork_artifact_options_init(&tOptions);
+    tOptions.sArtifactId = pOptions->sArtifactId;
+    tOptions.eKind = XWORK_ARTIFACT_REPORT;
+    tOptions.sName = pOptions->sName;
+    tOptions.sMimeType = pOptions->sMimeType ? pOptions->sMimeType : "text/markdown";
+    tOptions.sStorageRef = pOptions->sStorageRef;
+    tOptions.sSummary = pOptions->sSummary;
+    tOptions.sContentText = pOptions->sReportText;
+    return xwork_run_emit_artifact(pRun, &tOptions, pArtifact);
+}
+
+xwork_status xwork_run_emit_output_artifact(
+    xwork_run *pRun,
+    const xwork_output_artifact_options *pOptions,
+    xwork_artifact *pArtifact
+)
+{
+    xwork_artifact_options tOptions;
+
+    if ( !pOptions ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    xwork_artifact_options_init(&tOptions);
+    tOptions.sArtifactId = pOptions->sArtifactId;
+    tOptions.eKind = XWORK_ARTIFACT_OUTPUT;
+    tOptions.sName = pOptions->sName;
+    tOptions.sMimeType = pOptions->sMimeType ? pOptions->sMimeType : "text/plain";
+    tOptions.sStorageRef = pOptions->sStorageRef;
+    tOptions.sSummary = pOptions->sSummary;
+    tOptions.sContentText = pOptions->sOutputText;
+    return xwork_run_emit_artifact(pRun, &tOptions, pArtifact);
+}
+
+xwork_status xwork_run_emit_command_artifact(
+    xwork_run *pRun,
+    const xwork_command_artifact_options *pOptions,
+    xwork_artifact *pArtifact
+)
+{
+    xwork_artifact_options tOptions;
+
+    if ( !pOptions ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    xwork_artifact_options_init(&tOptions);
+    tOptions.sArtifactId = pOptions->sArtifactId;
+    tOptions.eKind = XWORK_ARTIFACT_COMMAND;
+    tOptions.sName = pOptions->sName;
+    tOptions.sMimeType = pOptions->sMimeType ? pOptions->sMimeType : "text/plain";
+    tOptions.sStorageRef = pOptions->sStorageRef;
+    tOptions.sSummary = pOptions->sSummary;
+    tOptions.sContentText = pOptions->sOutputText;
+    tOptions.sCommandText = pOptions->sCommandText;
+    tOptions.bHasExitCode = pOptions->bHasExitCode;
+    tOptions.iExitCode = pOptions->iExitCode;
+    return xwork_run_emit_artifact(pRun, &tOptions, pArtifact);
 }
 
 size_t xwork_run_get_artifact_count(const xwork_run *pRun)

@@ -4,8 +4,8 @@ static const xwork_profile xwork__builtin_xcode_profile = {
     XWORK_PROFILE_XCODE,
     "xcode interactive",
     "Interactive coding profile for user-driven runs.",
-    NULL,
-    NULL,
+    XWORK_PROFILE_XCODE,
+    XWORK_PROFILE_XCODE,
     XWORK_AUTONOMY_SEMI_AUTO,
     { XWORK_RISK_LOW },
     { true, 0.75, 8u },
@@ -18,8 +18,8 @@ static const xwork_profile xwork__builtin_xclaw_profile = {
     XWORK_PROFILE_XCLAW,
     "xclaw autonomous",
     "Autonomous task profile for longer-running background work.",
-    NULL,
-    NULL,
+    XWORK_PROFILE_XCLAW,
+    XWORK_PROFILE_XCLAW,
     XWORK_AUTONOMY_AUTO,
     { XWORK_RISK_HIGH },
     { true, 0.90, 24u },
@@ -82,6 +82,54 @@ xwork_status xwork_profile_apply_runtime_options(
     }
 
     pOptions->tPolicy = pProfile->tPolicy;
+    return XWORK_OK;
+}
+
+xwork_status xwork_profile_apply_xllm_profile_options(
+    const xwork_profile *pProfile,
+    xwork_xllm_profile_options *pOptions
+)
+{
+    if ( !pProfile || !pOptions ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    if ( (!pOptions->sProfileId || !pOptions->sProfileId[0]) &&
+         pProfile->sDefaultLlmProfileId && pProfile->sDefaultLlmProfileId[0] ) {
+        pOptions->sProfileId = pProfile->sDefaultLlmProfileId;
+    }
+    if ( (!pOptions->sDisplayName || !pOptions->sDisplayName[0]) &&
+         pProfile->sDisplayName && pProfile->sDisplayName[0] ) {
+        pOptions->sDisplayName = pProfile->sDisplayName;
+    }
+
+    return XWORK_OK;
+}
+
+xwork_status xwork_profile_apply_xllm_bootstrap_options(
+    const xwork_profile *pProfile,
+    xwork_xllm_profile_options *pProfileOptions,
+    xwork_xllm_bootstrap_options *pBootstrapOptions
+)
+{
+    xwork_status iStatus;
+
+    if ( !pProfile || !pProfileOptions || !pBootstrapOptions ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    iStatus = xwork_profile_apply_xllm_profile_options(pProfile, pProfileOptions);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    if ( !pBootstrapOptions->pProfiles ) {
+        pBootstrapOptions->pProfiles = pProfileOptions;
+    }
+    if ( pBootstrapOptions->iProfileCount == 0u ) {
+        pBootstrapOptions->iProfileCount = 1u;
+    }
+
     return XWORK_OK;
 }
 

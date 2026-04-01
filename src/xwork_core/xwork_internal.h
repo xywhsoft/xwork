@@ -58,10 +58,15 @@ struct xwork_artifact_record {
     char *sMimeType;
     char *sStorageRef;
     char *sSummary;
+    char *sContentText;
+    char *sCommandText;
+    bool bHasExitCode;
+    int iExitCode;
 };
 
 struct xwork_runtime {
     xllm_runtime *pLlmRuntime;
+    bool bOwnLlmRuntime;
     xwork_host_services tHostServices;
     xwork_persistence_backend tPersistenceBackend;
     xwork_policy_options tPolicy;
@@ -243,10 +248,72 @@ xwork_status xwork__runtime_list_runs(
     const xwork_runtime *pRuntime,
     xwork_string_list *pList
 );
+xwork_status xwork__runtime_list_checkpoints(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_string_list *pList
+);
+xwork_status xwork__runtime_list_events(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_string_list *pList
+);
+xwork_status xwork__runtime_list_artifacts(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_string_list *pList
+);
+xwork_status xwork__runtime_list_run_summaries(
+    const xwork_runtime *pRuntime,
+    xwork_run_summary_list *pList
+);
 xwork_status xwork__runtime_query_run_index(
     const xwork_runtime *pRuntime,
     const xwork_run_index_query *pQuery,
     xwork_run_index_list *pList
+);
+xwork_status xwork__runtime_load_run_summary(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_run_summary *pSummary
+);
+xwork_status xwork__runtime_load_last_event(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_event *pEvent
+);
+xwork_status xwork__runtime_load_last_approval_request(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_approval_request *pRequest
+);
+xwork_status xwork__runtime_load_last_checkpoint(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_checkpoint *pCheckpoint
+);
+xwork_status xwork__runtime_load_last_artifact(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_artifact *pArtifact
+);
+xwork_status xwork__runtime_load_event(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sEventId,
+    xwork_event *pEvent
+);
+xwork_status xwork__runtime_load_checkpoint(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sCheckpointId,
+    xwork_checkpoint *pCheckpoint
+);
+xwork_status xwork__runtime_load_artifact(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sArtifactId,
+    xwork_artifact *pArtifact
 );
 xwork_status xwork__run_restore_checkpoint_snapshot(
     xwork_run *pRun,

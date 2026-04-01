@@ -36,7 +36,8 @@ Layering:
 
 ## Current Status
 
-This repository is at the initial bootstrap stage.
+This repository is past the initial bootstrap stage and now has a working
+minimum shared runtime baseline.
 
 What exists now:
 
@@ -44,9 +45,25 @@ What exists now:
 - development plan: [DEVELOPMENT_SPEC.md](/D:/git/xwork/DEVELOPMENT_SPEC.md)
 - public API draft: [xwork.h](/D:/git/xwork/xwork.h)
 - aggregate implementation entry: [xwork.c](/D:/git/xwork/xwork.c)
-- internal module skeleton under [src](/D:/git/xwork/src)
+- runtime / workspace / tool registry / run lifecycle
+- event / approval request / checkpoint / artifact object model
+- `xllm`-backed orchestrator loop with tool execution and approval pause/resume
+- minimal local host helper for filesystem/process/vcs host services
+- built-in host tool defs for `filesystem.read_text` / `filesystem.write_text` / `process.exec` / `vcs.status`
+- builtin host tool execution now auto-synthesizes output/command artifacts for read/write/process/vcs flows
+- local `filesystem.write_text` host contract now supports `mode=append`
+- local `process.exec` host contract now supports request-level `cwd` override
+- local `process.exec` host contract now supports request-level `max_output_bytes` truncation
+- local `process.exec` host contract now supports request-level `env:["KEY=VALUE"]`
+- typed artifact emit helpers for patch / report / command / output
+- workspace memory attach and tool/artifact memory ingest hooks
+- in-memory and file-backed checkpoint / snapshot persistence
+- persisted run / event / checkpoint / artifact query surface
+- built-in `xcode` / `xclaw` profiles
+- smoke tests under [tests](/D:/git/xwork/tests)
 
-The current implementation is intentionally minimal. It is not yet a production runtime.
+The implementation is still intentionally minimal. It is a reusable baseline,
+not yet a production runtime.
 
 ## Repository Layout
 
@@ -75,12 +92,16 @@ xwork/
 
 ## Public API Draft
 
-The current API draft focuses on the minimum shared object model:
+The current API draft now covers the minimum reusable workflow runtime surface:
 
 - `xwork_runtime`
 - `xwork_workspace`
 - `xwork_run`
 - `xwork_tool_def`
+- `xwork_event`
+- `xwork_approval_request`
+- `xwork_checkpoint`
+- `xwork_artifact`
 
 The draft currently exposes:
 
@@ -88,8 +109,17 @@ The draft currently exposes:
 - workspace registration and lookup
 - tool registration and lookup
 - run creation and lifecycle state transitions
+- orchestrator execution on top of `xllm`
+- approval pause/resume and checkpoint load/recover
+- artifact emission
+- typed patch/report/command/output artifact helpers
+- in-memory and file-backed persistence/query helpers
+- built-in profile application helpers
+- built-in host tool lookup/registration helpers
+- local host service bootstrap helpers
 
-This is enough to anchor the initial object model before the full orchestrator is implemented.
+This is enough to anchor a minimum end-to-end runtime loop before more
+production-grade host integration is added.
 
 ## Minimal Example
 
@@ -138,11 +168,32 @@ int main(void)
 
 ## Near-Term Milestones
 
-1. Stabilize the core object model and event model.
-2. Add host service abstractions for filesystem/process/vcs.
-3. Add the first orchestrator loop on top of `xllm`.
-4. Add checkpoint persistence and run resume.
-5. Add product profiles for `xcode` and `xclaw`.
+1. Expand the built-in host tool surface and harden request/response contracts.
+2. Tighten persistence format/versioning and durable query coverage.
+3. Expand real-provider `xllm` smoke coverage beyond the offline stub baseline.
+4. Add richer artifact semantics around patch/report/command outputs.
+5. Add streaming/interruption-aware orchestration paths on top of the current loop.
+
+## Smoke Tests
+
+Primary smoke coverage currently lives in:
+
+- [tests/xwork_orchestrator_smoke.c](/D:/git/xwork/tests/xwork_orchestrator_smoke.c)
+- [tests/xwork_orchestrator_provider_smoke.c](/D:/git/xwork/tests/xwork_orchestrator_provider_smoke.c)
+
+Typical compile/run commands:
+
+```powershell
+gcc -std=c11 -Wall -Wextra -pedantic -c xwork.c
+gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_orchestrator_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_orchestrator_smoke.exe -lws2_32 -liphlpapi
+gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_orchestrator_provider_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_orchestrator_provider_smoke.exe -lws2_32 -liphlpapi
+tests\xwork_orchestrator_smoke.exe
+tests\xwork_orchestrator_provider_smoke.exe
+```
+
+The provider smoke now runs offline by default with a local OpenAI-compatible
+HTTP stub, and can optionally hit a real provider when the relevant
+environment variables are set.
 
 ## Non-Goals For This Stage
 
