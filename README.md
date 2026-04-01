@@ -56,6 +56,7 @@ What exists now:
 - local `filesystem.write_text` host contract now supports request-level `create_dirs:true`
 - local `filesystem.read_text` host contract now supports request-level `offset_bytes`
 - local `filesystem.read_text` host contract now returns explicit `file_size_bytes` / `remaining_bytes` / `eof` / `next_offset_bytes`
+- local filesystem `read_text` / `write_text` failure paths now preserve structured result payloads for not-found / already-exists / parent-missing cases
 - local `process.exec` host contract now supports request-level `cwd` override
 - local `process.exec` host contract now supports request-level `max_output_bytes` truncation
 - local `process.exec` host contract now supports request-level `env:["KEY=VALUE"]`

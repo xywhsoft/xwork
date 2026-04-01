@@ -235,6 +235,7 @@
 - `filesystem.write_text` 最小 request contract 已支持 `create_dirs:true`
 - `filesystem.read_text` 最小 request contract 已支持 `offset_bytes`
 - `filesystem.read_text` 最小 response contract 已显式返回 `file_size_bytes` / `remaining_bytes` / `eof` / `next_offset_bytes`
+- `filesystem.read_text/write_text` 失败路径已保留最小结构化结果，可区分 not_found / already_exists / parent_not_found
 - `process.exec` 最小 request contract 已支持 `cwd` 覆盖
 - `process.exec` 最小 request contract 已支持 `max_output_bytes` 截断
 - `process.exec` 最小 request contract 已支持 `env:["KEY=VALUE"]`

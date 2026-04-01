@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #ifdef _WIN32
@@ -469,6 +470,31 @@ static bool xwork__local_host_text_file_exists(const char *sPath)
 
     (void)fclose(pFile);
     return true;
+}
+
+static bool xwork__local_host_directory_exists(const char *sPath)
+{
+#ifdef _WIN32
+    struct _stat tStat;
+
+    if ( !sPath || !sPath[0] ) {
+        return false;
+    }
+    if ( _stat(sPath, &tStat) != 0 ) {
+        return false;
+    }
+    return (tStat.st_mode & _S_IFDIR) != 0;
+#else
+    struct stat tStat;
+
+    if ( !sPath || !sPath[0] ) {
+        return false;
+    }
+    if ( stat(sPath, &tStat) != 0 ) {
+        return false;
+    }
+    return S_ISDIR(tStat.st_mode);
+#endif
 }
 
 static xwork_status xwork__local_host_create_temp_text_file(
@@ -1139,6 +1165,214 @@ cleanup:
     return iStatus;
 }
 
+static xwork_status xwork__local_host_set_filesystem_read_result(
+    xwork_local_host *pHost,
+    const char *sPath,
+    const char *sResolvedPath,
+    const char *sText,
+    size_t iOffsetBytes,
+    size_t iFileSizeBytes,
+    size_t iBytesRead,
+    bool bTruncated,
+    bool bEof,
+    bool bOk,
+    const char *sVisibleSummary,
+    const char *sErrorKind,
+    const char *sErrorMessage,
+    xwork_tool_result *pResult
+)
+{
+    char *sEscapedPath = NULL;
+    char *sEscapedResolvedPath = NULL;
+    char *sEscapedText = NULL;
+    char *sEscapedErrorKind = NULL;
+    char *sEscapedErrorMessage = NULL;
+    char *sOutputText = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    iStatus = xwork__local_host_json_escape(sPath ? sPath : "", &sEscapedPath);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(
+        sResolvedPath ? sResolvedPath : "",
+        &sEscapedResolvedPath
+    );
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(sText ? sText : "", &sEscapedText);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+
+    if ( bOk ) {
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":true,\"path\":\"%s\",\"resolved_path\":\"%s\",\"text\":\"%s\","
+            "\"offset_bytes\":%zu,\"file_size_bytes\":%zu,\"bytes_read\":%zu,"
+            "\"next_offset_bytes\":%zu,\"remaining_bytes\":%zu,"
+            "\"truncated\":%s,\"eof\":%s}",
+            sEscapedPath,
+            sEscapedResolvedPath,
+            sEscapedText,
+            iOffsetBytes,
+            iFileSizeBytes,
+            iBytesRead,
+            iOffsetBytes + iBytesRead,
+            (iOffsetBytes + iBytesRead <= iFileSizeBytes)
+                ? (iFileSizeBytes - (iOffsetBytes + iBytesRead))
+                : 0u,
+            bTruncated ? "true" : "false",
+            bEof ? "true" : "false"
+        );
+    } else {
+        iStatus = xwork__local_host_json_escape(
+            sErrorKind ? sErrorKind : "external_failure",
+            &sEscapedErrorKind
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        iStatus = xwork__local_host_json_escape(
+            sErrorMessage ? sErrorMessage : "filesystem.read_text failed",
+            &sEscapedErrorMessage
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":false,\"path\":\"%s\",\"resolved_path\":\"%s\",\"text\":\"%s\","
+            "\"offset_bytes\":%zu,\"file_size_bytes\":%zu,\"bytes_read\":%zu,"
+            "\"next_offset_bytes\":%zu,\"remaining_bytes\":%zu,"
+            "\"truncated\":%s,\"eof\":%s,"
+            "\"error_kind\":\"%s\",\"error\":\"%s\"}",
+            sEscapedPath,
+            sEscapedResolvedPath,
+            sEscapedText,
+            iOffsetBytes,
+            iFileSizeBytes,
+            iBytesRead,
+            iOffsetBytes + iBytesRead,
+            (iOffsetBytes + iBytesRead <= iFileSizeBytes)
+                ? (iFileSizeBytes - (iOffsetBytes + iBytesRead))
+                : 0u,
+            bTruncated ? "true" : "false",
+            bEof ? "true" : "false",
+            sEscapedErrorKind,
+            sEscapedErrorMessage
+        );
+    }
+    if ( !sOutputText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_set_result(
+        pHost,
+        sOutputText,
+        sVisibleSummary ? sVisibleSummary : (bOk ? "filesystem.read_text ok" : "filesystem.read_text failed"),
+        pResult
+    );
+
+cleanup:
+    free(sEscapedPath);
+    free(sEscapedResolvedPath);
+    free(sEscapedText);
+    free(sEscapedErrorKind);
+    free(sEscapedErrorMessage);
+    free(sOutputText);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_set_filesystem_write_result(
+    xwork_local_host *pHost,
+    const char *sPath,
+    const char *sResolvedPath,
+    const char *sMode,
+    bool bCreateDirs,
+    size_t iBytesWritten,
+    bool bOk,
+    const char *sVisibleSummary,
+    const char *sErrorKind,
+    const char *sErrorMessage,
+    xwork_tool_result *pResult
+)
+{
+    char *sEscapedPath = NULL;
+    char *sEscapedResolvedPath = NULL;
+    char *sEscapedMode = NULL;
+    char *sEscapedErrorKind = NULL;
+    char *sEscapedErrorMessage = NULL;
+    char *sOutputText = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    iStatus = xwork__local_host_json_escape(sPath ? sPath : "", &sEscapedPath);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(
+        sResolvedPath ? sResolvedPath : "",
+        &sEscapedResolvedPath
+    );
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(
+        sMode ? sMode : "overwrite",
+        &sEscapedMode
+    );
+    if ( iStatus != XWORK_OK ) goto cleanup;
+
+    if ( bOk ) {
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":true,\"path\":\"%s\",\"resolved_path\":\"%s\",\"mode\":\"%s\","
+            "\"create_dirs\":%s,\"bytes_written\":%llu}",
+            sEscapedPath,
+            sEscapedResolvedPath,
+            sEscapedMode,
+            bCreateDirs ? "true" : "false",
+            (unsigned long long)iBytesWritten
+        );
+    } else {
+        iStatus = xwork__local_host_json_escape(
+            sErrorKind ? sErrorKind : "external_failure",
+            &sEscapedErrorKind
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        iStatus = xwork__local_host_json_escape(
+            sErrorMessage ? sErrorMessage : "filesystem.write_text failed",
+            &sEscapedErrorMessage
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":false,\"path\":\"%s\",\"resolved_path\":\"%s\",\"mode\":\"%s\","
+            "\"create_dirs\":%s,\"bytes_written\":%llu,"
+            "\"error_kind\":\"%s\",\"error\":\"%s\"}",
+            sEscapedPath,
+            sEscapedResolvedPath,
+            sEscapedMode,
+            bCreateDirs ? "true" : "false",
+            (unsigned long long)iBytesWritten,
+            sEscapedErrorKind,
+            sEscapedErrorMessage
+        );
+    }
+    if ( !sOutputText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_set_result(
+        pHost,
+        sOutputText,
+        sVisibleSummary ? sVisibleSummary : (bOk ? "filesystem.write_text ok" : "filesystem.write_text failed"),
+        pResult
+    );
+
+cleanup:
+    free(sEscapedPath);
+    free(sEscapedResolvedPath);
+    free(sEscapedMode);
+    free(sEscapedErrorKind);
+    free(sEscapedErrorMessage);
+    free(sOutputText);
+    return iStatus;
+}
+
 static xwork_status xwork__local_host_invoke_filesystem(
     xwork_local_host *pHost,
     const char *sRequestJson,
@@ -1149,10 +1383,6 @@ static xwork_status xwork__local_host_invoke_filesystem(
     const char *sPath;
     char *sResolvedPath = NULL;
     char *sText = NULL;
-    char *sEscapedPath = NULL;
-    char *sEscapedResolvedPath = NULL;
-    char *sEscapedText = NULL;
-    char *sOutputText = NULL;
     bool bTruncated = false;
     bool bEof = false;
     size_t iFileSizeBytes = 0u;
@@ -1160,6 +1390,9 @@ static xwork_status xwork__local_host_invoke_filesystem(
     size_t iRequestMaxBytes = 0u;
     size_t iBytesRead = 0u;
     size_t iReadLimit;
+    const char *sFailureKind = NULL;
+    const char *sFailureSummary = NULL;
+    const char *sFailureMessage = NULL;
     xwork_status iStatus;
 
     if ( !pHost || !pResult ) {
@@ -1177,6 +1410,9 @@ static xwork_status xwork__local_host_invoke_filesystem(
     sPath = xwork__local_host_request_get_text(tRequest, "path");
     if ( !sPath || !sPath[0] ) {
         iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.read_text invalid request";
+        sFailureMessage = "path is required";
         goto cleanup;
     }
 
@@ -1204,56 +1440,59 @@ static xwork_status xwork__local_host_invoke_filesystem(
         &bEof
     );
     if ( iStatus != XWORK_OK ) {
+        if ( iStatus == XWORK_ERROR_NOT_FOUND ) {
+            sFailureKind = "not_found";
+            sFailureSummary = "filesystem.read_text not found";
+            sFailureMessage = "path does not exist";
+        } else if ( iStatus == XWORK_ERROR_EXTERNAL_FAILURE ) {
+            sFailureKind = "read_failed";
+            sFailureSummary = "filesystem.read_text failed";
+            sFailureMessage = "failed to read file";
+        }
         goto cleanup;
     }
 
-    iStatus = xwork__local_host_json_escape(sPath, &sEscapedPath);
-    if ( iStatus != XWORK_OK ) goto cleanup;
-    iStatus = xwork__local_host_json_escape(sResolvedPath, &sEscapedResolvedPath);
-    if ( iStatus != XWORK_OK ) goto cleanup;
-    iStatus = xwork__local_host_json_escape(sText, &sEscapedText);
-    if ( iStatus != XWORK_OK ) goto cleanup;
-
-    sOutputText = xwork__dup_printf(
-        "{\"ok\":true,\"path\":\"%s\",\"resolved_path\":\"%s\",\"text\":\"%s\","
-        "\"offset_bytes\":%zu,\"file_size_bytes\":%zu,\"bytes_read\":%zu,"
-        "\"next_offset_bytes\":%zu,\"remaining_bytes\":%zu,"
-        "\"truncated\":%s,\"eof\":%s}",
-        sEscapedPath,
-        sEscapedResolvedPath,
-        sEscapedText,
+    iStatus = xwork__local_host_set_filesystem_read_result(
+        pHost,
+        sPath,
+        sResolvedPath,
+        sText,
         iRequestOffsetBytes,
         iFileSizeBytes,
         iBytesRead,
-        iRequestOffsetBytes + iBytesRead,
-        (iRequestOffsetBytes + iBytesRead <= iFileSizeBytes)
-            ? (iFileSizeBytes - (iRequestOffsetBytes + iBytesRead))
-            : 0u,
-        bTruncated ? "true" : "false",
-        bEof ? "true" : "false"
-    );
-    if ( !sOutputText ) {
-        iStatus = XWORK_ERROR_NO_MEMORY;
-        goto cleanup;
-    }
-
-    iStatus = xwork__local_host_set_result(
-        pHost,
-        sOutputText,
+        bTruncated,
+        bEof,
+        true,
         "filesystem.read_text ok",
+        NULL,
+        NULL,
         pResult
     );
 
 cleanup:
+    if ( iStatus != XWORK_OK && sFailureKind ) {
+        (void)xwork__local_host_set_filesystem_read_result(
+            pHost,
+            sPath ? sPath : "",
+            sResolvedPath ? sResolvedPath : sPath,
+            "",
+            iRequestOffsetBytes,
+            iFileSizeBytes,
+            iBytesRead,
+            bTruncated,
+            bEof,
+            false,
+            sFailureSummary,
+            sFailureKind,
+            sFailureMessage,
+            pResult
+        );
+    }
     if ( tRequest ) {
         xvoUnref(tRequest);
     }
     free(sResolvedPath);
     free(sText);
-    free(sEscapedPath);
-    free(sEscapedResolvedPath);
-    free(sEscapedText);
-    free(sOutputText);
     return iStatus;
 }
 
@@ -1268,15 +1507,15 @@ static xwork_status xwork__local_host_invoke_filesystem_write_text(
     const char *sText;
     const char *sMode;
     char *sResolvedPath = NULL;
-    char *sEscapedPath = NULL;
-    char *sEscapedResolvedPath = NULL;
-    char *sEscapedMode = NULL;
-    char *sOutputText = NULL;
     size_t iBytesWritten = 0u;
     bool bAppend = false;
     bool bCreate = false;
     bool bHasCreateDirs = false;
     bool bCreateDirs = false;
+    const char *sModeText = "overwrite";
+    const char *sFailureKind = NULL;
+    const char *sFailureSummary = NULL;
+    const char *sFailureMessage = NULL;
     xwork_status iStatus;
 
     if ( !pHost || !pResult ) {
@@ -1296,15 +1535,23 @@ static xwork_status xwork__local_host_invoke_filesystem_write_text(
     sMode = xwork__local_host_request_get_text(tRequest, "mode");
     if ( !sPath || !sPath[0] || !sText ) {
         iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.write_text invalid request";
+        sFailureMessage = "path and text are required";
         goto cleanup;
     }
     if ( sMode && sMode[0] ) {
         if ( strcmp(sMode, "append") == 0 ) {
             bAppend = true;
+            sModeText = "append";
         } else if ( strcmp(sMode, "create") == 0 ) {
             bCreate = true;
+            sModeText = "create";
         } else if ( strcmp(sMode, "overwrite") != 0 ) {
             iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+            sFailureKind = "invalid_request";
+            sFailureSummary = "filesystem.write_text invalid request";
+            sFailureMessage = "mode must be overwrite, append, or create";
             goto cleanup;
         }
     }
@@ -1315,6 +1562,9 @@ static xwork_status xwork__local_host_invoke_filesystem_write_text(
         &bCreateDirs
     );
     if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.write_text invalid request";
+        sFailureMessage = "create_dirs must be boolean";
         goto cleanup;
     }
 
@@ -1326,11 +1576,31 @@ static xwork_status xwork__local_host_invoke_filesystem_write_text(
     if ( bHasCreateDirs && bCreateDirs ) {
         iStatus = xwork__local_host_ensure_parent_directories(sResolvedPath);
         if ( iStatus != XWORK_OK ) {
+            sFailureKind = "create_dirs_failed";
+            sFailureSummary = "filesystem.write_text failed (create_dirs)";
+            sFailureMessage = "failed to create parent directories";
             goto cleanup;
+        }
+    } else {
+        char *sParentDirectory = xwork__local_host_parent_directory(sResolvedPath);
+
+        if ( sParentDirectory ) {
+            if ( !xwork__local_host_directory_exists(sParentDirectory) ) {
+                free(sParentDirectory);
+                iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
+                sFailureKind = "parent_not_found";
+                sFailureSummary = "filesystem.write_text failed (parent directory not found)";
+                sFailureMessage = "parent directory does not exist";
+                goto cleanup;
+            }
+            free(sParentDirectory);
         }
     }
     if ( bCreate && xwork__local_host_text_file_exists(sResolvedPath) ) {
         iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
+        sFailureKind = "already_exists";
+        sFailureSummary = "filesystem.write_text failed (target exists)";
+        sFailureMessage = "path already exists";
         goto cleanup;
     }
 
@@ -1341,49 +1611,48 @@ static xwork_status xwork__local_host_invoke_filesystem_write_text(
         &iBytesWritten
     );
     if ( iStatus != XWORK_OK ) {
+        if ( iStatus == XWORK_ERROR_EXTERNAL_FAILURE ) {
+            sFailureKind = "write_failed";
+            sFailureSummary = "filesystem.write_text failed";
+            sFailureMessage = "failed to write file";
+        }
         goto cleanup;
     }
 
-    iStatus = xwork__local_host_json_escape(sPath, &sEscapedPath);
-    if ( iStatus != XWORK_OK ) goto cleanup;
-    iStatus = xwork__local_host_json_escape(sResolvedPath, &sEscapedResolvedPath);
-    if ( iStatus != XWORK_OK ) goto cleanup;
-    iStatus = xwork__local_host_json_escape(
-        bAppend ? "append" : (bCreate ? "create" : "overwrite"),
-        &sEscapedMode
-    );
-    if ( iStatus != XWORK_OK ) goto cleanup;
-
-    sOutputText = xwork__dup_printf(
-        "{\"ok\":true,\"path\":\"%s\",\"resolved_path\":\"%s\",\"mode\":\"%s\","
-        "\"create_dirs\":%s,\"bytes_written\":%llu}",
-        sEscapedPath,
-        sEscapedResolvedPath,
-        sEscapedMode,
-        (bHasCreateDirs && bCreateDirs) ? "true" : "false",
-        (unsigned long long)iBytesWritten
-    );
-    if ( !sOutputText ) {
-        iStatus = XWORK_ERROR_NO_MEMORY;
-        goto cleanup;
-    }
-
-    iStatus = xwork__local_host_set_result(
+    iStatus = xwork__local_host_set_filesystem_write_result(
         pHost,
-        sOutputText,
+        sPath,
+        sResolvedPath,
+        sModeText,
+        bHasCreateDirs && bCreateDirs,
+        iBytesWritten,
+        true,
         "filesystem.write_text ok",
+        NULL,
+        NULL,
         pResult
     );
 
 cleanup:
+    if ( iStatus != XWORK_OK && sFailureKind ) {
+        (void)xwork__local_host_set_filesystem_write_result(
+            pHost,
+            sPath ? sPath : "",
+            sResolvedPath ? sResolvedPath : sPath,
+            sModeText,
+            bHasCreateDirs && bCreateDirs,
+            iBytesWritten,
+            false,
+            sFailureSummary,
+            sFailureKind,
+            sFailureMessage,
+            pResult
+        );
+    }
     if ( tRequest ) {
         xvoUnref(tRequest);
     }
     free(sResolvedPath);
-    free(sEscapedPath);
-    free(sEscapedResolvedPath);
-    free(sEscapedMode);
-    free(sOutputText);
     return iStatus;
 }
 

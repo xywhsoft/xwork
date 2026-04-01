@@ -777,6 +777,14 @@ static int32 xwork_mock_adapter_chat(
                 "{\"path\":\"README.md\"}"
             );
         } else if ( sInstruction &&
+                    strstr(sInstruction, "Read a missing local note through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-host-missing",
+                "filesystem.read_text",
+                "{\"path\":\"tests/local_host_missing_smoke.txt\"}"
+            );
+        } else if ( sInstruction &&
                     strstr(sInstruction, "Read part of a local note through host service.") != NULL ) {
             *ppResponse = xwork_mock_build_tool_call_response(
                 pProfile->sId,
@@ -1235,6 +1243,7 @@ int main(void)
     size_t iSavedMaxProcessEnvEntries = 0u;
     char sFilePersistenceRoot[256];
     const char *asWorkspaceIds[1];
+    const char *sLocalHostMissingPath = "tests/local_host_missing_smoke.txt";
     const char *sLocalHostWritePath = "tests/local_host_write_smoke.txt";
     const char *sLocalHostAppendPath = "tests/local_host_append_smoke.txt";
     const char *sLocalHostCreatePath = "tests/local_host_create_smoke.txt";
@@ -1278,6 +1287,7 @@ int main(void)
     xwork_run_snapshot_init(&tPersistenceCtx.tSnapshot);
     xwork_memory_context_init(&tObservedMemoryContext);
     xwork_tool_result_init(&tLocalHostResult);
+    (void)remove(sLocalHostMissingPath);
     (void)remove(sLocalHostWritePath);
     (void)remove(sLocalHostAppendPath);
     (void)remove(sLocalHostCreatePath);
@@ -1952,6 +1962,25 @@ int main(void)
     assert(strstr(tLocalHostResult.sOutputText, "\"ok\":true") != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "\"text\":\"") != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "xwork") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_READ_TEXT,
+            "{\"path\":\"tests/local_host_missing_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_NOT_FOUND
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.read_text not found") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"ok\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"not_found\"") != NULL);
+    assert(
+        strstr(
+            tLocalHostResult.sOutputText,
+            "\"error\":\"path does not exist\""
+        ) != NULL
+    );
 
     assert(
         xwork_runtime_invoke_host_service(
@@ -2079,6 +2108,17 @@ int main(void)
             &tLocalHostResult
         ) == XWORK_ERROR_EXTERNAL_FAILURE
     );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.write_text failed (target exists)") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"ok\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"mode\":\"create\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"already_exists\"") != NULL);
+    assert(
+        strstr(
+            tLocalHostResult.sOutputText,
+            "\"error\":\"path already exists\""
+        ) != NULL
+    );
 
     assert(
         xwork_runtime_invoke_host_service(
@@ -2090,6 +2130,21 @@ int main(void)
             "\"text\":\"xwork-create-dirs-note\"}",
             &tLocalHostResult
         ) == XWORK_ERROR_EXTERNAL_FAILURE
+    );
+    assert(
+        strcmp(
+            tLocalHostResult.sVisibleSummary,
+            "filesystem.write_text failed (parent directory not found)"
+        ) == 0
+    );
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"ok\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"parent_not_found\"") != NULL);
+    assert(
+        strstr(
+            tLocalHostResult.sOutputText,
+            "\"error\":\"parent directory does not exist\""
+        ) != NULL
     );
     assert(
         xwork_runtime_invoke_host_service(
@@ -2423,6 +2478,48 @@ int main(void)
     pLocalHostRun = NULL;
 
     tAdapterCtx.iTurnCount = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-read-missing-tool";
+    tRunOptions.sInstruction = "Read a missing local note through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_ERROR_NOT_FOUND);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_FAILED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "filesystem.read_text not found"
+        ) == 0
+    );
+    assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+    assert(tRunSnapshot.sLastToolResultText != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"ok\":false") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"error_kind\":\"not_found\"") != NULL);
+    assert(
+        strstr(
+            tRunSnapshot.sLastToolResultText,
+            "\"error\":\"path does not exist\""
+        ) != NULL
+    );
+    xwork_run_snapshot_reset(&tRunSnapshot);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
     assert(
         xwork_runtime_invoke_host_service(
             pLocalHostRuntime,
@@ -2529,6 +2626,49 @@ int main(void)
     );
     assert(strstr(tLocalHostResult.sOutputText, "xwork-create-note") != NULL);
     xwork_artifact_reset(&tArtifact);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-create-existing-tool";
+    tRunOptions.sInstruction = "Create a fresh note through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_ERROR_EXTERNAL_FAILURE);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_FAILED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "filesystem.write_text failed (target exists)"
+        ) == 0
+    );
+    assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+    assert(tRunSnapshot.sLastToolResultText != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"ok\":false") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"mode\":\"create\"") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"error_kind\":\"already_exists\"") != NULL);
+    assert(
+        strstr(
+            tRunSnapshot.sLastToolResultText,
+            "\"error\":\"path already exists\""
+        ) != NULL
+    );
+    xwork_run_snapshot_reset(&tRunSnapshot);
     xwork_run_destroy(pLocalHostRun);
     pLocalHostRun = NULL;
 
@@ -4094,6 +4234,7 @@ int main(void)
     xwork_string_list_reset(&tPersistedRunIds);
     xwork_file_persistence_reset(&tFilePersistenceRecoverStore);
     xwork_file_persistence_reset(&tFilePersistenceStore);
+    (void)remove(sLocalHostMissingPath);
     (void)remove(sLocalHostWritePath);
     (void)remove(sLocalHostAppendPath);
     (void)remove(sLocalHostCreatePath);
