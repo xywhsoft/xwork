@@ -1035,6 +1035,101 @@ static bool xwork__json_table_get_int(xvalue tTable, const char *sKey, int *piVa
     return true;
 }
 
+static xvalue xwork__json_table_get_array(xvalue tTable, const char *sKey)
+{
+    xvalue tValue;
+
+    if ( !tTable || !sKey ) {
+        return NULL;
+    }
+
+    tValue = xvoTableGetValue(tTable, sKey, (uint32)strlen(sKey));
+    if ( !tValue || xvoType(tValue) != XVO_DT_ARRAY ) {
+        return NULL;
+    }
+
+    return tValue;
+}
+
+static xwork_status xwork__append_text(char **psTarget, size_t *piLength, const char *sText)
+{
+    char *sNext;
+    size_t iAppendLength;
+
+    if ( !psTarget || !piLength ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !sText || !sText[0] ) {
+        return XWORK_OK;
+    }
+
+    iAppendLength = strlen(sText);
+    sNext = (char *)realloc(*psTarget, *piLength + iAppendLength + 1u);
+    if ( !sNext ) {
+        return XWORK_ERROR_NO_MEMORY;
+    }
+
+    memcpy(sNext + *piLength, sText, iAppendLength);
+    *piLength += iAppendLength;
+    sNext[*piLength] = '\0';
+    *psTarget = sNext;
+    return XWORK_OK;
+}
+
+static xwork_status xwork__build_terminal_event_output(
+    xvalue tResult,
+    char **psOutputText
+)
+{
+    xvalue tEvents;
+    char *sOutputText = NULL;
+    size_t iOutputLength = 0u;
+    uint32 i;
+    xwork_status iStatus = XWORK_OK;
+
+    if ( !psOutputText ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    *psOutputText = NULL;
+    if ( !tResult ) {
+        return XWORK_OK;
+    }
+
+    tEvents = xwork__json_table_get_array(tResult, "events");
+    if ( !tEvents ) {
+        return XWORK_OK;
+    }
+
+    for ( i = 0u; i < xvoArrayItemCount(tEvents); ++i ) {
+        xvalue tEvent = xvoArrayGetValue(tEvents, i);
+        const char *sKind;
+        const char *sText;
+
+        if ( !tEvent || xvoType(tEvent) != XVO_DT_TABLE ) {
+            continue;
+        }
+
+        sKind = xwork__json_table_get_text(tEvent, "kind");
+        if ( !sKind || strcmp(sKind, "output") != 0 ) {
+            continue;
+        }
+
+        sText = xwork__json_table_get_text(tEvent, "text");
+        iStatus = xwork__append_text(&sOutputText, &iOutputLength, sText);
+        if ( iStatus != XWORK_OK ) {
+            goto cleanup;
+        }
+    }
+
+    *psOutputText = sOutputText;
+    sOutputText = NULL;
+
+cleanup:
+    free(sOutputText);
+    return iStatus;
+}
+
 static const char *xwork__path_leaf_name(const char *sPath)
 {
     const char *sLeaf;
@@ -1059,6 +1154,8 @@ static xwork_status xwork__emit_builtin_tool_artifact(
 {
     xvalue tArguments = NULL;
     xvalue tResult = NULL;
+    char *sCombinedOutput = NULL;
+    char *sTerminalOutput = NULL;
     xwork_status iStatus = XWORK_OK;
 
     if ( !pRun || !pToolDef || !pToolCall || !pToolResult ) {
@@ -1105,12 +1202,30 @@ static xwork_status xwork__emit_builtin_tool_artifact(
     } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_EXEC) == 0 ) {
         xwork_command_artifact_options tOptions;
         const char *sCommand = xwork__json_table_get_text(tArguments, "command");
-        const char *sOutput = xwork__json_table_get_text(tResult, "stdout");
+        const char *sStdout = xwork__json_table_get_text(tResult, "stdout");
+        const char *sStderr = xwork__json_table_get_text(tResult, "stderr");
+        const char *sOutput = sStdout ? sStdout : "";
         const char *sCwd = xwork__json_table_get_text(tResult, "cwd");
         int iExitCode = 0;
         bool bHasExitCode = xwork__json_table_get_int(tResult, "exit_code", &iExitCode);
 
-        if ( sCommand && sOutput ) {
+        if ( sStderr && sStderr[0] ) {
+            if ( sStdout && sStdout[0] ) {
+                sCombinedOutput = xwork__dup_printf(
+                    "STDOUT:\n%s\n\nSTDERR:\n%s",
+                    sStdout,
+                    sStderr
+                );
+            } else {
+                sCombinedOutput = xwork__dup_printf("STDERR:\n%s", sStderr);
+            }
+            if ( !sCombinedOutput ) {
+                iStatus = XWORK_ERROR_NO_MEMORY;
+                goto cleanup;
+            }
+            sOutput = sCombinedOutput;
+        }
+        if ( sCommand ) {
             xwork_command_artifact_options_init(&tOptions);
             tOptions.sName = "process.exec.txt";
             tOptions.sStorageRef = sCwd;
@@ -1120,6 +1235,63 @@ static xwork_status xwork__emit_builtin_tool_artifact(
             tOptions.bHasExitCode = bHasExitCode;
             tOptions.iExitCode = iExitCode;
             iStatus = xwork_run_emit_command_artifact(pRun, &tOptions, NULL);
+        }
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_START_TERMINAL) == 0 ) {
+        xwork_command_artifact_options tOptions;
+        const char *sCommand = xwork__json_table_get_text(tResult, "command");
+        const char *sSessionId = xwork__json_table_get_text(tResult, "session_id");
+
+        if ( !sCommand ) {
+            sCommand = xwork__json_table_get_text(tArguments, "command");
+        }
+        if ( sCommand ) {
+            xwork_command_artifact_options_init(&tOptions);
+            tOptions.sName = "process.start_terminal.txt";
+            tOptions.sStorageRef = sSessionId;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.sCommandText = sCommand;
+            tOptions.sOutputText = "";
+            iStatus = xwork_run_emit_command_artifact(pRun, &tOptions, NULL);
+        }
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_TERMINAL_WRITE) == 0 ) {
+        xwork_command_artifact_options tOptions;
+        const char *sInputText = xwork__json_table_get_text(tArguments, "input_text");
+        const char *sSessionId = xwork__json_table_get_text(tResult, "session_id");
+
+        if ( !sSessionId ) {
+            sSessionId = xwork__json_table_get_text(tArguments, "session_id");
+        }
+        if ( sInputText ) {
+            xwork_command_artifact_options_init(&tOptions);
+            tOptions.sName = "process.terminal_write.txt";
+            tOptions.sStorageRef = sSessionId;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.sCommandText = sInputText;
+            tOptions.sOutputText = "";
+            iStatus = xwork_run_emit_command_artifact(pRun, &tOptions, NULL);
+        }
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_TERMINAL_STOP) == 0 ) {
+        xwork_output_artifact_options tOptions;
+        const char *sSessionId = xwork__json_table_get_text(tResult, "session_id");
+        const char *sOutputText = xwork__json_table_get_text(tResult, "output_text");
+
+        if ( !sOutputText ) {
+            iStatus = xwork__build_terminal_event_output(tResult, &sTerminalOutput);
+            if ( iStatus != XWORK_OK ) {
+                goto cleanup;
+            }
+            sOutputText = sTerminalOutput;
+        }
+        if ( !sSessionId ) {
+            sSessionId = xwork__json_table_get_text(tArguments, "session_id");
+        }
+        if ( sOutputText && sOutputText[0] ) {
+            xwork_output_artifact_options_init(&tOptions);
+            tOptions.sName = "process.terminal_session.txt";
+            tOptions.sStorageRef = sSessionId;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.sOutputText = sOutputText;
+            iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
         }
     } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_VCS_STATUS) == 0 ) {
         xwork_command_artifact_options tOptions;
@@ -1140,6 +1312,9 @@ static xwork_status xwork__emit_builtin_tool_artifact(
         }
     }
 
+cleanup:
+    free(sCombinedOutput);
+    free(sTerminalOutput);
     if ( tArguments ) {
         xvoUnref(tArguments);
     }

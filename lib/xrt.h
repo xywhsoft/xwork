@@ -1,7 +1,7 @@
 /*
 
     XRT Single Header File
-    Generated: 2026-04-01 20:39:19
+    Generated: 2026-04-02 17:14:20
 
     MIT License
 
@@ -307,6 +307,7 @@
 #if defined(XRT_MINIMAL)
 	#define XRT_NO_TIME
 	#define XRT_NO_FILE
+	#define XRT_NO_FILE_ASYNC
 	#define XRT_NO_THREAD
 	#define XRT_NO_QUEUE
 	#define XRT_NO_COROUTINE
@@ -327,11 +328,16 @@
 	#define XRT_NO_VALUE
 	#define XRT_NO_JNUM
 	#define XRT_NO_JSON
+	#define XRT_NO_XSON
 	#define XRT_NO_TEMPLATE
 	#define XRT_NO_REGEX		// 禁用正则表达式模块
+	#define XRT_NO_SUBPROCESS
 #endif
 // 网络根模块裁剪时，同步裁剪全部网络子库
 #if defined(XRT_NO_NETWORK)
+	#ifndef XRT_NO_FILE_ASYNC
+		#define XRT_NO_FILE_ASYNC
+	#endif
 	#ifndef XRT_NO_XURL
 		#define XRT_NO_XURL
 	#endif
@@ -354,6 +360,16 @@
 #if defined(XRT_NO_QUEUE)
 	#ifndef XRT_NO_QUEUE_WAIT
 		#define XRT_NO_QUEUE_WAIT
+	#endif
+#endif
+#if defined(XRT_NO_FILE)
+	#ifndef XRT_NO_FILE_ASYNC
+		#define XRT_NO_FILE_ASYNC
+	#endif
+#endif
+#if defined(XRT_NO_JSON)
+	#ifndef XRT_NO_XSON
+		#define XRT_NO_XSON
 	#endif
 #endif
 // 裁剪依赖警告辅助
@@ -868,6 +884,11 @@
 		xrtMemDebugObject* pObjects;
 		xrtMemDebugEvent arrEvents[XRT_MEMDEBUG_EVENT_CAPACITY];
 	} xrtMemDebugState;
+	typedef struct {
+		xrtThreadData* pThreadData;
+		const char* sPrevFile;
+		uint32 iPrevLine;
+	} xrtMemDebugSiteScope;
 	#define XRT_CO_RUNTIME_FIBER_CONVERTED	0x00000001u
 	#define XRT_CO_RUNTIME_FIBER_HOSTED		0x00000002u
 	typedef struct {
@@ -962,6 +983,10 @@
 		ptr pFutureDeferredHead;
 		ptr pFutureDeferredTail;
 		bool bFutureDeferredCleanupRegistered;
+		#ifdef XRT_MEM_DEBUG
+			const char* sMemDebugFile;
+			uint32 iMemDebugLine;
+		#endif
 	};
 	
 	// 全局数据
@@ -1575,6 +1600,7 @@
 	
 	// 运行程序并等待程序运行结束
 	XXAPI int xrtChain(str sPath, size_t iSize);
+#ifndef XRT_NO_SUBPROCESS
 	#define XPROC_STATE_FAILED		-1
 	#define XPROC_STATE_INIT		0
 	#define XPROC_STATE_RUNNING		1
@@ -1741,6 +1767,7 @@
 	XXAPI bool xrtExecCapture(const xprocessconfig* pConfig, xprocessresult* pResult, uint32 iTimeoutMs);
 	// 释放进程结果
 	XXAPI void xrtProcessResultUnit(xprocessresult* pResult);
+#endif
 	
 	
 	
@@ -4720,6 +4747,7 @@
 	XXAPI xfuture* xTaskRunDelayed(xnetengine* pEngine, uint32 iAffinityKey, uint32 iDelayMs, xtask_engine_fn pfnTask, ptr pArg);
 	// 在独立线程中运行任务
 	XXAPI xfuture* xTaskRunThread(xtask_thread_fn pfnTask, ptr pArg, size_t iStackSize);
+	#if !defined(XRT_NO_FILE_ASYNC)
 	// 异步读取文件
 	XXAPI xfuture* xrtAsyncFileReadAt(xasyncfile* pFile, uint64 iOffset, size_t iSize);
 	// 异步写入文件
@@ -4756,8 +4784,11 @@
 	XXAPI xfuture* xrtDirMoveAsync(str sSrc, str sDst, bool bReWrite);
 	// 异步删除目录
 	XXAPI xfuture* xrtDirDeleteAsync(str sPath);
+	#endif
+	#ifndef XRT_NO_SUBPROCESS
 	// 等待进程 Future
 	XXAPI xfuture* xrtProcessWaitFuture(xprocess* pProcess);
+	#endif
 	#if !defined(XRT_NO_COROUTINE)
 	// 在协程调度器中运行任务
 	XXAPI xfuture* xTaskRunCo(xcosched* pSched, xtask_co_fn pfnTask, ptr pArg, size_t iStackSize);
@@ -7007,6 +7038,7 @@
 	
 	
 	
+	#if !defined(XRT_NO_XSON)
 	/* ------------------------------------ XSON 函数库 ------------------------------------ */
 	/*
 		依赖项：
@@ -7033,6 +7065,7 @@
 	XXAPI str xrtStringifyXSON(xvalue varVal, int bFormat, uint32 iFlags, size_t* pRetSize);
 	// 将 xvalue 格式化为 XSON 并写入文件
 	XXAPI int xrtStringifyXSON_File(str sFile, xvalue varVal, int bFormat, uint32 iFlags);
+	#endif
 	
 	
 	
@@ -7518,6 +7551,10 @@
 	XXAPI void xrtDictDestroyDbg(xdict objHT, const char* sFile, uint32 iLine);
 	// 释放字典调试
 	XXAPI void xrtDictUnitDbg(xdict objHT, const char* sFile, uint32 iLine);
+	XXAPI ptr xrtDictSetDbg(xdict objHT, ptr sKey, uint32 iKeyLen, bool* bNewRet, const char* sFile, uint32 iLine);
+	XXAPI bool xrtDictSetPtrDbg(xdict objHT, ptr sKey, uint32 iKeyLen, ptr pVal, ptr* ppOldVal, const char* sFile, uint32 iLine);
+	XXAPI bool xrtDictRemoveDbg(xdict objHT, ptr sKey, uint32 iKeyLen, const char* sFile, uint32 iLine);
+	XXAPI ptr xrtDictRemovePtrDbg(xdict objHT, ptr sKey, uint32 iKeyLen, const char* sFile, uint32 iLine);
 	// 创建列表调试
 	XXAPI xlist xrtListCreateDbg(uint32 iItemLength, uint32 iMode, const char* sFile, uint32 iLine);
 	// 初始化列表调试
@@ -7526,6 +7563,10 @@
 	XXAPI void xrtListDestroyDbg(xlist objList, const char* sFile, uint32 iLine);
 	// 释放列表调试
 	XXAPI void xrtListUnitDbg(xlist objList, const char* sFile, uint32 iLine);
+	XXAPI ptr xrtListSetDbg(xlist objList, int64 iKey, bool* bNewRet, const char* sFile, uint32 iLine);
+	XXAPI bool xrtListSetPtrDbg(xlist objList, int64 iKey, ptr pVal, ptr* ppOldVal, const char* sFile, uint32 iLine);
+	XXAPI bool xrtListRemoveDbg(xlist objList, int64 iKey, const char* sFile, uint32 iLine);
+	XXAPI ptr xrtListRemovePtrDbg(xlist objList, int64 iKey, const char* sFile, uint32 iLine);
 	// 创建 AVL 树调试
 	XXAPI xavltree xrtAVLTreeCreateDbg(unsigned int iItemLength, AVLTree_CompProc procComp, uint32 iMode, const char* sFile, uint32 iLine);
 	// 初始化 AVL 树调试
@@ -7569,10 +7610,18 @@
 	#define xrtDictInit(objHT, iItemLength, iMode) xrtDictInitDbg((objHT), (iItemLength), (iMode), __FILE__, __LINE__)
 	#define xrtDictDestroy(objHT) xrtDictDestroyDbg((objHT), __FILE__, __LINE__)
 	#define xrtDictUnit(objHT) xrtDictUnitDbg((objHT), __FILE__, __LINE__)
+	#define xrtDictSet(objHT, sKey, iKeyLen, bNewRet) xrtDictSetDbg((objHT), (sKey), (iKeyLen), (bNewRet), __FILE__, __LINE__)
+	#define xrtDictSetPtr(objHT, sKey, iKeyLen, pVal, ppOldVal) xrtDictSetPtrDbg((objHT), (sKey), (iKeyLen), (pVal), (ppOldVal), __FILE__, __LINE__)
+	#define xrtDictRemove(objHT, sKey, iKeyLen) xrtDictRemoveDbg((objHT), (sKey), (iKeyLen), __FILE__, __LINE__)
+	#define xrtDictRemovePtr(objHT, sKey, iKeyLen) xrtDictRemovePtrDbg((objHT), (sKey), (iKeyLen), __FILE__, __LINE__)
 	#define xrtListCreate(iItemLength, iMode) xrtListCreateDbg((iItemLength), (iMode), __FILE__, __LINE__)
 	#define xrtListInit(objList, iItemLength, iMode) xrtListInitDbg((objList), (iItemLength), (iMode), __FILE__, __LINE__)
 	#define xrtListDestroy(objList) xrtListDestroyDbg((objList), __FILE__, __LINE__)
 	#define xrtListUnit(objList) xrtListUnitDbg((objList), __FILE__, __LINE__)
+	#define xrtListSet(objList, iKey, bNewRet) xrtListSetDbg((objList), (iKey), (bNewRet), __FILE__, __LINE__)
+	#define xrtListSetPtr(objList, iKey, pVal, ppOldVal) xrtListSetPtrDbg((objList), (iKey), (pVal), (ppOldVal), __FILE__, __LINE__)
+	#define xrtListRemove(objList, iKey) xrtListRemoveDbg((objList), (iKey), __FILE__, __LINE__)
+	#define xrtListRemovePtr(objList, iKey) xrtListRemovePtrDbg((objList), (iKey), __FILE__, __LINE__)
 	#define xrtAVLTreeCreate(iItemLength, procComp, iMode) xrtAVLTreeCreateDbg((iItemLength), (procComp), (iMode), __FILE__, __LINE__)
 	#define xrtAVLTreeInit(objAVLT, iItemLength, procComp, iMode) xrtAVLTreeInitDbg((objAVLT), (iItemLength), (procComp), (iMode), __FILE__, __LINE__)
 	#define xrtAVLTreeDestroy(objAVLT) xrtAVLTreeDestroyDbg((objAVLT), __FILE__, __LINE__)
@@ -7605,6 +7654,136 @@
 
 
 #define XRT_BUILD_CORE
+#if defined(XRT_MEM_DEBUG)
+
+// ========================================
+// File: D:/git/xrt/lib/memdebug_site_macros_undef.h
+// ========================================
+
+#ifndef XRT_MEMDEBUG_SITE_MACROS_UNDEF_H
+#define XRT_MEMDEBUG_SITE_MACROS_UNDEF_H
+#ifdef xrtMalloc
+	#undef xrtMalloc
+#endif
+#ifdef xrtCalloc
+	#undef xrtCalloc
+#endif
+#ifdef xrtRealloc
+	#undef xrtRealloc
+#endif
+#ifdef xrtFree
+	#undef xrtFree
+#endif
+#ifdef xrtArrayCreate
+	#undef xrtArrayCreate
+#endif
+#ifdef xrtArrayInit
+	#undef xrtArrayInit
+#endif
+#ifdef xrtArrayDestroy
+	#undef xrtArrayDestroy
+#endif
+#ifdef xrtArrayUnit
+	#undef xrtArrayUnit
+#endif
+#ifdef xrtDictCreate
+	#undef xrtDictCreate
+#endif
+#ifdef xrtDictInit
+	#undef xrtDictInit
+#endif
+#ifdef xrtDictDestroy
+	#undef xrtDictDestroy
+#endif
+#ifdef xrtDictUnit
+	#undef xrtDictUnit
+#endif
+#ifdef xrtDictSet
+	#undef xrtDictSet
+#endif
+#ifdef xrtDictSetPtr
+	#undef xrtDictSetPtr
+#endif
+#ifdef xrtDictRemove
+	#undef xrtDictRemove
+#endif
+#ifdef xrtDictRemovePtr
+	#undef xrtDictRemovePtr
+#endif
+#ifdef xrtListCreate
+	#undef xrtListCreate
+#endif
+#ifdef xrtListInit
+	#undef xrtListInit
+#endif
+#ifdef xrtListDestroy
+	#undef xrtListDestroy
+#endif
+#ifdef xrtListUnit
+	#undef xrtListUnit
+#endif
+#ifdef xrtListSet
+	#undef xrtListSet
+#endif
+#ifdef xrtListSetPtr
+	#undef xrtListSetPtr
+#endif
+#ifdef xrtListRemove
+	#undef xrtListRemove
+#endif
+#ifdef xrtListRemovePtr
+	#undef xrtListRemovePtr
+#endif
+#ifdef xrtAVLTreeCreate
+	#undef xrtAVLTreeCreate
+#endif
+#ifdef xrtAVLTreeInit
+	#undef xrtAVLTreeInit
+#endif
+#ifdef xrtAVLTreeDestroy
+	#undef xrtAVLTreeDestroy
+#endif
+#ifdef xrtAVLTreeUnit
+	#undef xrtAVLTreeUnit
+#endif
+#ifdef xrtDynStackCreate
+	#undef xrtDynStackCreate
+#endif
+#ifdef xrtDynStackInit
+	#undef xrtDynStackInit
+#endif
+#ifdef xrtDynStackDestroy
+	#undef xrtDynStackDestroy
+#endif
+#ifdef xrtDynStackUnit
+	#undef xrtDynStackUnit
+#endif
+#ifdef xrtMemPoolCreate
+	#undef xrtMemPoolCreate
+#endif
+#ifdef xrtMemPoolInit
+	#undef xrtMemPoolInit
+#endif
+#ifdef xrtMemPoolDestroy
+	#undef xrtMemPoolDestroy
+#endif
+#ifdef xrtMemPoolUnit
+	#undef xrtMemPoolUnit
+#endif
+#ifdef xrtFSMemPoolCreate
+	#undef xrtFSMemPoolCreate
+#endif
+#ifdef xrtFSMemPoolInit
+	#undef xrtFSMemPoolInit
+#endif
+#ifdef xrtFSMemPoolDestroy
+	#undef xrtFSMemPoolDestroy
+#endif
+#ifdef xrtFSMemPoolUnit
+	#undef xrtFSMemPoolUnit
+#endif
+#endif
+#endif
 // (skipped include: #include "xrt.h")
 #if defined(_WIN32) || defined(_WIN64)
 	#ifdef __TINYC__
@@ -8218,12 +8397,115 @@ static inline const char* __xrtMemDebugAllocatorName(uint32 iAllocatorKind)
 			return "unknown";
 	}
 }
+// 鍐呴儴鍑芥暟锛氬垽鏂枃浠跺悕鏄惁鐩哥瓑
+static inline bool __xrtMemDebugFileEquals(const char* sLeft, const char* sRight)
+{
+	if ( sLeft == sRight ) {
+		return TRUE;
+	}
+	if ( sLeft == NULL || sRight == NULL ) {
+		return FALSE;
+	}
+	return strcmp(sLeft, sRight) == 0;
+}
+// 鍐呴儴鍑芥暟锛氬鍒舵枃浠跺悕
+static inline const char* __xrtMemDebugDupFile(const char* sFile)
+{
+	size_t iLen;
+	char* sCopy;
+	if ( sFile == NULL ) {
+		return NULL;
+	}
+	iLen = strlen(sFile);
+	sCopy = __xrtMemGlobalProcMalloc()(iLen + 1);
+	if ( sCopy == NULL ) {
+		return NULL;
+	}
+	memcpy(sCopy, sFile, iLen + 1);
+	return sCopy;
+}
+// 鍐呴儴鍑芥暟锛氭竻鐞嗘枃浠跺悕鎸囬拡
+static inline void __xrtMemDebugClearFile(const char** psSlot)
+{
+	if ( psSlot == NULL || *psSlot == NULL ) {
+		return;
+	}
+	__xrtMemGlobalProcFree()((ptr)*psSlot);
+	*psSlot = NULL;
+}
+// 鍐呴儴鍑芥暟锛氭浛鎹㈡枃浠跺悕鎸囬拡
+static inline void __xrtMemDebugReplaceFile(const char** psSlot, const char* sFile)
+{
+	if ( psSlot == NULL ) {
+		return;
+	}
+	__xrtMemDebugClearFile(psSlot);
+	if ( sFile != NULL ) {
+		*psSlot = __xrtMemDebugDupFile(sFile);
+	}
+}
+// 鍐呴儴鍑芥暟锛氳В鏋愬唴瀛樿皟璇曡皟鐢ㄤ綅缃?
+static inline void __xrtMemDebugResolveSite(const char** psFile, uint32* piLine)
+{
+	xrtThreadData* pThreadData;
+	if ( psFile == NULL || piLine == NULL ) {
+		return;
+	}
+	if ( *psFile != NULL || *piLine != 0 ) {
+		return;
+	}
+	pThreadData = xrtThreadGetCurrent();
+	if ( pThreadData == NULL || pThreadData->sMemDebugFile == NULL || pThreadData->iMemDebugLine == 0 ) {
+		return;
+	}
+	*psFile = pThreadData->sMemDebugFile;
+	*piLine = pThreadData->iMemDebugLine;
+}
+static inline void __xrtMemDebugPreferSite(const char** psFile, uint32* piLine)
+{
+	xrtThreadData* pThreadData;
+	if ( psFile == NULL || piLine == NULL ) {
+		return;
+	}
+	pThreadData = xrtThreadGetCurrent();
+	if ( pThreadData == NULL || pThreadData->sMemDebugFile == NULL || pThreadData->iMemDebugLine == 0 ) {
+		return;
+	}
+	*psFile = pThreadData->sMemDebugFile;
+	*piLine = pThreadData->iMemDebugLine;
+}
+// 鍐呴儴鍑芥暟锛氳繘鍏ヨ皟璇曡皟鐢ㄤ綅缃綔鐢ㄥ煙
+static inline xrtMemDebugSiteScope __xrtMemDebugEnterSiteScope(const char* sFile, uint32 iLine)
+{
+	xrtMemDebugSiteScope tScope = {0};
+	if ( sFile == NULL || iLine == 0 ) {
+		return tScope;
+	}
+	tScope.pThreadData = xrtThreadGetCurrent();
+	if ( tScope.pThreadData == NULL ) {
+		return tScope;
+	}
+	tScope.sPrevFile = tScope.pThreadData->sMemDebugFile;
+	tScope.iPrevLine = tScope.pThreadData->iMemDebugLine;
+	tScope.pThreadData->sMemDebugFile = sFile;
+	tScope.pThreadData->iMemDebugLine = iLine;
+	return tScope;
+}
+// 鍐呴儴鍑芥暟锛氱寮€璋冭瘯璋冪敤浣嶇疆浣滅敤鍩?
+static inline void __xrtMemDebugLeaveSiteScope(xrtMemDebugSiteScope* pScope)
+{
+	if ( pScope == NULL || pScope->pThreadData == NULL ) {
+		return;
+	}
+	pScope->pThreadData->sMemDebugFile = pScope->sPrevFile;
+	pScope->pThreadData->iMemDebugLine = pScope->iPrevLine;
+}
 // 内部函数：__xrtMemDebugFindSiteStatNoLock
 static inline xrtMemDebugSiteStat* __xrtMemDebugFindSiteStatNoLock(const char* sFile, uint32 iLine, uint32 iAllocatorKind)
 {
 	xrtMemDebugSiteStat* pNode = xCore.MemDebug.pSiteStats;
 	while ( pNode ) {
-		if ( pNode->sFile == sFile && pNode->iLine == iLine && pNode->iAllocatorKind == iAllocatorKind ) {
+		if ( __xrtMemDebugFileEquals(pNode->sFile, sFile) && pNode->iLine == iLine && pNode->iAllocatorKind == iAllocatorKind ) {
 			return pNode;
 		}
 		pNode = pNode->pNext;
@@ -8241,7 +8523,7 @@ static inline xrtMemDebugSiteStat* __xrtMemDebugEnsureSiteStatNoLock(const char*
 	if ( pNode == NULL ) {
 		return NULL;
 	}
-	pNode->sFile = sFile;
+	__xrtMemDebugReplaceFile(&pNode->sFile, sFile);
 	pNode->iLine = iLine;
 	pNode->iAllocatorKind = iAllocatorKind;
 	pNode->pNext = xCore.MemDebug.pSiteStats;
@@ -8288,6 +8570,8 @@ static inline void __xrtMemDebugSiteOnFreeNoLock(const char* sFile, uint32 iLine
 static inline void __xrtMemDebugRecordEventNoLock(uint32 iType, ptr pAddress, size_t iSize, uint32 iAllocatorKind, const char* sFile, uint32 iLine)
 {
 	xrtMemDebugEvent* pEvent = &xCore.MemDebug.arrEvents[xCore.MemDebug.iEventCursor];
+	__xrtMemDebugPreferSite(&sFile, &iLine);
+	__xrtMemDebugClearFile(&pEvent->sFile);
 	memset(pEvent, 0, sizeof(xrtMemDebugEvent));
 	pEvent->iType = iType;
 	pEvent->iLine = iLine;
@@ -8296,7 +8580,7 @@ static inline void __xrtMemDebugRecordEventNoLock(uint32 iType, ptr pAddress, si
 	pEvent->iTimeMs = __xrtMemDebugNowMs();
 	pEvent->iSize = (uint64)iSize;
 	pEvent->pAddress = pAddress;
-	pEvent->sFile = sFile;
+	__xrtMemDebugReplaceFile(&pEvent->sFile, sFile);
 	xCore.MemDebug.iEventCursor = (xCore.MemDebug.iEventCursor + 1) % XRT_MEMDEBUG_EVENT_CAPACITY;
 	if ( xCore.MemDebug.iEventCount < XRT_MEMDEBUG_EVENT_CAPACITY ) {
 		xCore.MemDebug.iEventCount++;
@@ -8373,6 +8657,7 @@ static inline void __xrtMemDebugRegisterForeignAlloc(ptr pAddress, size_t iSize,
 	if ( pAddress == NULL || !__xrtMemDebugEnabled() ) {
 		return;
 	}
+	__xrtMemDebugPreferSite(&sFile, &iLine);
 	__xrtMemDebugLock();
 	if ( __xrtMemDebugFindForeignNoLock(pAddress, NULL) != NULL ) {
 		__xrtMemDebugUnlock();
@@ -8386,7 +8671,7 @@ static inline void __xrtMemDebugRegisterForeignAlloc(ptr pAddress, size_t iSize,
 	pNode->pAddress = pAddress;
 	pNode->iSize = (uint32)iSize;
 	pNode->iAllocatorKind = iAllocatorKind;
-	pNode->sAllocFile = sFile;
+	__xrtMemDebugReplaceFile(&pNode->sAllocFile, sFile);
 	pNode->iAllocLine = iLine;
 	pNode->iAllocThreadId = xrtThreadGetCurrentId();
 	pNode->iAllocTimeMs = __xrtMemDebugNowMs();
@@ -8412,6 +8697,7 @@ static inline bool __xrtMemDebugUnregisterForeignAlloc(ptr pAddress, uint32 iAll
 	if ( pAddress == NULL || !__xrtMemDebugEnabled() ) {
 		return FALSE;
 	}
+	__xrtMemDebugPreferSite(&sFile, &iLine);
 	__xrtMemDebugLock();
 	pNode = __xrtMemDebugFindForeignNoLock(pAddress, &pPrev);
 	if ( pNode == NULL ) {
@@ -8436,6 +8722,7 @@ static inline bool __xrtMemDebugUnregisterForeignAlloc(ptr pAddress, uint32 iAll
 	}
 	__xrtMemDebugSiteOnFreeNoLock(pNode->sAllocFile, pNode->iAllocLine, pNode->iAllocatorKind, pNode->iSize);
 	__xrtMemDebugRecordEventNoLock(XRT_MEMDEBUG_EVENT_FREE, pAddress, pNode->iSize, pNode->iAllocatorKind, sFile, iLine);
+	__xrtMemDebugClearFile(&pNode->sAllocFile);
 	__xrtMemGlobalProcFree()(pNode);
 	__xrtMemDebugUnlock();
 	return TRUE;
@@ -8487,6 +8774,7 @@ static inline void __xrtMemDebugRegisterObject(ptr pAddress, uint32 iObjectType,
 	if ( pAddress == NULL || !__xrtMemDebugEnabled() ) {
 		return;
 	}
+	__xrtMemDebugPreferSite(&sFile, &iLine);
 	__xrtMemDebugLock();
 	pNode = __xrtMemDebugFindObjectNoLock(pAddress);
 	if ( pNode == NULL ) {
@@ -8508,11 +8796,11 @@ static inline void __xrtMemDebugRegisterObject(ptr pAddress, uint32 iObjectType,
 	pNode->iObjectType = iObjectType;
 	pNode->iOrigin = iOrigin;
 	pNode->iState = XRT_MEMDEBUG_OBJECT_STATE_LIVE;
-	pNode->sAllocFile = sFile;
+	__xrtMemDebugReplaceFile(&pNode->sAllocFile, sFile);
 	pNode->iAllocLine = iLine;
 	pNode->iAllocThreadId = xrtThreadGetCurrentId();
 	pNode->iAllocTimeMs = __xrtMemDebugNowMs();
-	pNode->sFreeFile = NULL;
+	__xrtMemDebugClearFile(&pNode->sFreeFile);
 	pNode->iFreeLine = 0;
 	pNode->iFreeThreadId = 0;
 	pNode->iFreeTimeMs = 0;
@@ -8526,6 +8814,7 @@ static inline bool __xrtMemDebugObjectGuardDestroy(ptr pAddress, uint32 iObjectT
 	if ( pAddress == NULL || !__xrtMemDebugEnabled() ) {
 		return TRUE;
 	}
+	__xrtMemDebugPreferSite(&sFile, &iLine);
 	__xrtMemDebugLock();
 	pNode = __xrtMemDebugFindObjectNoLock(pAddress);
 	if ( pNode && pNode->iState != XRT_MEMDEBUG_OBJECT_STATE_LIVE ) {
@@ -8545,6 +8834,7 @@ static inline bool __xrtMemDebugUnregisterObject(ptr pAddress, uint32 iObjectTyp
 	if ( pAddress == NULL || !__xrtMemDebugEnabled() ) {
 		return TRUE;
 	}
+	__xrtMemDebugPreferSite(&sFile, &iLine);
 	__xrtMemDebugLock();
 	pNode = __xrtMemDebugFindObjectNoLock(pAddress);
 	if ( pNode == NULL || pNode->iState != XRT_MEMDEBUG_OBJECT_STATE_LIVE ) {
@@ -8555,7 +8845,7 @@ static inline bool __xrtMemDebugUnregisterObject(ptr pAddress, uint32 iObjectTyp
 		return FALSE;
 	}
 	pNode->iState = XRT_MEMDEBUG_OBJECT_STATE_DESTROYED;
-	pNode->sFreeFile = sFile;
+	__xrtMemDebugReplaceFile(&pNode->sFreeFile, sFile);
 	pNode->iFreeLine = iLine;
 	pNode->iFreeThreadId = xrtThreadGetCurrentId();
 	pNode->iFreeTimeMs = __xrtMemDebugNowMs();
@@ -8572,10 +8862,11 @@ static inline void __xrtMemDebugTrackAlloc(xrtMemBlockHeader* pHeader, const cha
 	if ( pHeader == NULL || !__xrtMemDebugEnabled() ) {
 		return;
 	}
+	__xrtMemDebugPreferSite(&sFile, &iLine);
 	__xrtMemDebugLock();
-	pHeader->sAllocFile = sFile;
+	__xrtMemDebugReplaceFile(&pHeader->sAllocFile, sFile);
 	pHeader->iAllocLine = iLine;
-	pHeader->sFreeFile = NULL;
+	__xrtMemDebugClearFile(&pHeader->sFreeFile);
 	pHeader->iFreeLine = 0;
 	pHeader->iAllocThreadId = xrtThreadGetCurrentId();
 	pHeader->iAllocTimeMs = __xrtMemDebugNowMs();
@@ -8593,12 +8884,13 @@ static inline void __xrtMemDebugTrackFree(xrtMemBlockHeader* pHeader, const char
 	if ( pHeader == NULL || !__xrtMemDebugEnabled() ) {
 		return;
 	}
+	__xrtMemDebugPreferSite(&sFile, &iLine);
 	__xrtMemDebugLock();
 	if ( pHeader->iDebugState == XRT_MEMDEBUG_STATE_LIVE ) {
 		__xrtMemDebugDetachLiveNoLock(pHeader);
 		__xrtMemDebugSiteOnFreeNoLock(pHeader->sAllocFile, pHeader->iAllocLine, XRT_MEMDEBUG_ALLOCATOR_GLOBAL, pHeader->iRequestSize);
 	}
-	pHeader->sFreeFile = sFile;
+	__xrtMemDebugReplaceFile(&pHeader->sFreeFile, sFile);
 	pHeader->iFreeLine = iLine;
 	pHeader->iFreeTimeMs = __xrtMemDebugNowMs();
 	pHeader->iDebugState = XRT_MEMDEBUG_STATE_FREED;
@@ -8611,12 +8903,16 @@ static inline void __xrtMemDebugTrackReallocInPlace(xrtMemBlockHeader* pHeader, 
 	if ( pHeader == NULL || !__xrtMemDebugEnabled() ) {
 		return;
 	}
+	__xrtMemDebugPreferSite(&sFile, &iLine);
 	__xrtMemDebugLock();
 	__xrtMemDebugSiteOnFreeNoLock(pHeader->sAllocFile, pHeader->iAllocLine, XRT_MEMDEBUG_ALLOCATOR_GLOBAL, iOldSize);
-	pHeader->sAllocFile = sFile;
+	__xrtMemDebugReplaceFile(&pHeader->sAllocFile, sFile);
 	pHeader->iAllocLine = iLine;
 	pHeader->iAllocThreadId = xrtThreadGetCurrentId();
 	pHeader->iAllocTimeMs = __xrtMemDebugNowMs();
+	__xrtMemDebugClearFile(&pHeader->sFreeFile);
+	pHeader->iFreeLine = 0;
+	pHeader->iFreeTimeMs = 0;
 	__xrtMemDebugSiteOnAllocNoLock(sFile, iLine, XRT_MEMDEBUG_ALLOCATOR_GLOBAL, pHeader->iRequestSize);
 	__xrtMemDebugRecordEventNoLock(XRT_MEMDEBUG_EVENT_REALLOC, __xrtMemGlobalUserFromHeader(pHeader), pHeader->iRequestSize, XRT_MEMDEBUG_ALLOCATOR_GLOBAL, sFile, iLine);
 	__xrtMemDebugUnlock();
@@ -8627,6 +8923,7 @@ static inline void __xrtMemDebugRecordSimpleEvent(uint32 iType, ptr pAddress, si
 	if ( !__xrtMemDebugEnabled() ) {
 		return;
 	}
+	__xrtMemDebugPreferSite(&sFile, &iLine);
 	__xrtMemDebugLock();
 	__xrtMemDebugRecordEventNoLock(iType, pAddress, iSize, iAllocatorKind, sFile, iLine);
 	if ( iType == XRT_MEMDEBUG_EVENT_DOUBLE_FREE ) {
@@ -8646,47 +8943,67 @@ static inline void __xrtMemDebugRecordSimpleEvent(uint32 iType, ptr pAddress, si
 // 内部函数：重置内存调试状态
 static inline void __xrtMemDebugResetState(xrtMemDebugState* pState)
 {
+	xrtMemBlockHeader* pLiveHead;
 	xrtMemBlockHeader* pQuarantineHead;
 	xrtMemDebugSiteStat* pSiteHead;
 	xrtMemDebugForeignAlloc* pForeignHead;
 	xrtMemDebugObject* pObjectHead;
+	xrtMemBlockHeader* pLive;
 	xrtMemDebugSiteStat* pSite;
 	xrtMemDebugForeignAlloc* pForeign;
 	xrtMemDebugObject* pObject;
 	xrtMemBlockHeader* pQuarantine;
+	uint32 i;
 	if ( pState == NULL ) {
 		return;
 	}
 	__xrtMemGlobalLock(&pState->iLock);
+	pLiveHead = pState->pLiveHead;
 	pQuarantineHead = pState->pQuarantineHead;
 	pSiteHead = pState->pSiteStats;
 	pForeignHead = pState->pForeignAllocs;
 	pObjectHead = pState->pObjects;
+	for ( i = 0; i < XRT_MEMDEBUG_EVENT_CAPACITY; i++ ) {
+		__xrtMemDebugClearFile(&pState->arrEvents[i].sFile);
+	}
 	memset(pState, 0, sizeof(xrtMemDebugState));
 	pState->iLock = 1;
 	pState->bEnabled = 1;
 	__xrtMemGlobalUnlock(&pState->iLock);
+	pLive = pLiveHead;
+	while ( pLive ) {
+		xrtMemBlockHeader* pNext = pLive->pDebugNext;
+		__xrtMemDebugClearFile(&pLive->sAllocFile);
+		__xrtMemDebugClearFile(&pLive->sFreeFile);
+		pLive = pNext;
+	}
 	pQuarantine = pQuarantineHead;
 	while ( pQuarantine ) {
 		xrtMemBlockHeader* pNext = pQuarantine->pDebugNext;
+		__xrtMemDebugClearFile(&pQuarantine->sAllocFile);
+		__xrtMemDebugClearFile(&pQuarantine->sFreeFile);
 		__xrtMemGlobalProcFree()(pQuarantine);
 		pQuarantine = pNext;
 	}
 	pSite = pSiteHead;
 	while ( pSite ) {
 		xrtMemDebugSiteStat* pNext = pSite->pNext;
+		__xrtMemDebugClearFile(&pSite->sFile);
 		__xrtMemGlobalProcFree()(pSite);
 		pSite = pNext;
 	}
 	pForeign = pForeignHead;
 	while ( pForeign ) {
 		xrtMemDebugForeignAlloc* pNext = pForeign->pNext;
+		__xrtMemDebugClearFile(&pForeign->sAllocFile);
 		__xrtMemGlobalProcFree()(pForeign);
 		pForeign = pNext;
 	}
 	pObject = pObjectHead;
 	while ( pObject ) {
 		xrtMemDebugObject* pNext = pObject->pNext;
+		__xrtMemDebugClearFile(&pObject->sAllocFile);
+		__xrtMemDebugClearFile(&pObject->sFreeFile);
 		__xrtMemGlobalProcFree()(pObject);
 		pObject = pNext;
 	}
@@ -9222,6 +9539,10 @@ static inline void __xrtMemGlobalFreeRelease(ptr pMem)
 		uint32 iClass = pHeader->iClassIndex;
 		xrtMemThreadCache* pCache = __xrtMemGlobalGetThreadCache();
 		xrtMemFreeNode* pNode = (xrtMemFreeNode*)pMem;
+		#ifdef XRT_MEM_DEBUG
+			__xrtMemDebugClearFile(&pHeader->sAllocFile);
+			__xrtMemDebugClearFile(&pHeader->sFreeFile);
+		#endif
 		if ( pCache && iClass < pCache->iClassCount ) {
 			if ( pCache->arrFreeCount[iClass] >= pCache->iCacheLimit ) {
 				__xrtMemGlobalDrainThreadCache(pCache, iClass, pCache->iCacheLimit / 2);
@@ -9236,9 +9557,17 @@ static inline void __xrtMemGlobalFreeRelease(ptr pMem)
 		return;
 	}
 	if ( pHeader->iFlags & XRT_MEMBLOCK_FLAG_BACKING ) {
+		#ifdef XRT_MEM_DEBUG
+			__xrtMemDebugClearFile(&pHeader->sAllocFile);
+			__xrtMemDebugClearFile(&pHeader->sFreeFile);
+		#endif
 		__xrtMemGlobalProcFree()(pHeader);
 		return;
 	}
+	#ifdef XRT_MEM_DEBUG
+		__xrtMemDebugClearFile(&pHeader->sAllocFile);
+		__xrtMemDebugClearFile(&pHeader->sFreeFile);
+	#endif
 	__xrtMemGlobalProcFree()(pHeader);
 }
 // 内部函数：释放内存全局位置
@@ -9248,6 +9577,9 @@ static inline void __xrtMemGlobalFreeSite(ptr pMem, const char* sFile, uint32 iL
 	if ( pMem == NULL ) {
 		return;
 	}
+	#ifdef XRT_MEM_DEBUG
+	__xrtMemDebugPreferSite(&sFile, &iLine);
+	#endif
 	pHeader = __xrtMemGlobalHeaderFromUser(pMem);
 	if ( !__xrtMemGlobalHeaderValid(pHeader) ) {
 		uint32 iAllocatorKind = 0;
@@ -9313,6 +9645,8 @@ static inline void __xrtMemGlobalFreeSite(ptr pMem, const char* sFile, uint32 iL
 				} else {
 					xCore.MemDebug.iQuarantineBytes = 0;
 				}
+				__xrtMemDebugClearFile(&pOld->sAllocFile);
+				__xrtMemDebugClearFile(&pOld->sFreeFile);
 				__xrtMemGlobalProcFree()(pOld);
 			}
 			__xrtMemDebugUnlock();
@@ -9420,6 +9754,9 @@ static inline void __xrtMemTelemetryRecordTemp(size_t iSize);
 // 内部函数：分配位置
 static inline ptr __xrtMallocSite(size_t iSize, const char* sFile, uint32 iLine)
 {
+	#ifdef XRT_MEM_DEBUG
+		__xrtMemDebugPreferSite(&sFile, &iLine);
+	#endif
 	ptr mem = __xrtMemGlobalAllocSite(iSize, FALSE, sFile, iLine);
 	if ( mem == NULL ) {
 		xrtSetError("memory allocate failed.", FALSE);
@@ -9432,6 +9769,9 @@ static inline ptr __xrtMallocSite(size_t iSize, const char* sFile, uint32 iLine)
 static inline ptr __xrtCallocSite(size_t iNum, size_t iSize, const char* sFile, uint32 iLine)
 {
 	size_t iTotal = __xrtMemTelemetryMulClamp(iNum, iSize);
+	#ifdef XRT_MEM_DEBUG
+		__xrtMemDebugPreferSite(&sFile, &iLine);
+	#endif
 	ptr mem = __xrtMemGlobalAllocSite(iTotal, TRUE, sFile, iLine);
 	if ( mem == NULL ) {
 		xrtSetError("class memory allocate failed.", FALSE);
@@ -9447,6 +9787,9 @@ static inline ptr __xrtReallocSite(ptr pMem, size_t iSize, const char* sFile, ui
 	if ( pMem == xCore.sNull ) {
 		pMem = NULL;
 	}
+	#ifdef XRT_MEM_DEBUG
+		__xrtMemDebugPreferSite(&sFile, &iLine);
+	#endif
 	mem = __xrtMemGlobalReallocSite(pMem, iSize, sFile, iLine);
 	if ( mem == NULL ) {
 		str sError = xrtGetError();
@@ -9462,6 +9805,9 @@ static inline ptr __xrtReallocSite(ptr pMem, size_t iSize, const char* sFile, ui
 static inline void __xrtFreeSite(ptr pmem, const char* sFile, uint32 iLine)
 {
 	if ( pmem && (pmem != xCore.sNull) ) {
+		#ifdef XRT_MEM_DEBUG
+			__xrtMemDebugPreferSite(&sFile, &iLine);
+		#endif
 		__xrtMemTelemetryRecordFree();
 		__xrtMemGlobalFreeSite(pmem, sFile, iLine);
 	}
@@ -9476,7 +9822,11 @@ XXAPI ptr xrtMallocDbg(size_t iSize, const char* sFile, uint32 iLine)
 // 分配
 XXAPI ptr xrtMalloc(size_t iSize)
 {
-	return __xrtMallocSite(iSize, NULL, 0);
+	#ifdef XRT_MEM_DEBUG
+		return __xrtMallocSite(iSize, __FILE__, __LINE__);
+	#else
+		return __xrtMallocSite(iSize, NULL, 0);
+	#endif
 }
 // 申请类内存
 #ifdef XRT_MEM_DEBUG
@@ -9489,7 +9839,11 @@ XXAPI ptr xrtCallocDbg(size_t iNum, size_t iSize, const char* sFile, uint32 iLin
 // 分配
 XXAPI ptr xrtCalloc(size_t iNum, size_t iSize)
 {
-	return __xrtCallocSite(iNum, iSize, NULL, 0);
+	#ifdef XRT_MEM_DEBUG
+		return __xrtCallocSite(iNum, iSize, __FILE__, __LINE__);
+	#else
+		return __xrtCallocSite(iNum, iSize, NULL, 0);
+	#endif
 }
 // 重新申请内存
 #ifdef XRT_MEM_DEBUG
@@ -9502,7 +9856,11 @@ XXAPI ptr xrtReallocDbg(ptr pMem, size_t iSize, const char* sFile, uint32 iLine)
 // 重新分配
 XXAPI ptr xrtRealloc(ptr pMem, size_t iSize)
 {
-	return __xrtReallocSite(pMem, iSize, NULL, 0);
+	#ifdef XRT_MEM_DEBUG
+		return __xrtReallocSite(pMem, iSize, __FILE__, __LINE__);
+	#else
+		return __xrtReallocSite(pMem, iSize, NULL, 0);
+	#endif
 }
 // 释放内存（ 会先判断是否为 null ）
 #ifdef XRT_MEM_DEBUG
@@ -9515,7 +9873,11 @@ XXAPI void xrtFreeDbg(ptr pmem, const char* sFile, uint32 iLine)
 // 释放
 XXAPI void xrtFree(ptr pmem)
 {
-	__xrtFreeSite(pmem, NULL, 0);
+	#ifdef XRT_MEM_DEBUG
+		__xrtFreeSite(pmem, __FILE__, __LINE__);
+	#else
+		__xrtFreeSite(pmem, NULL, 0);
+	#endif
 }
 // 内部函数：获取临时内存区块头部大小
 static inline size_t __xrtTempArenaBlockHeaderSize()
@@ -9554,9 +9916,12 @@ static inline xrtTempArenaBlock* __xrtTempArenaAllocBlock(size_t iCapacity)
 static inline void __xrtTempArenaDebugOnAlloc(xrtThreadData* pThreadData, size_t iSize, bool bSpill)
 {
 	#ifdef XRT_MEM_DEBUG
+		const char* sFile = __FILE__;
+		uint32 iLine = __LINE__;
 		if ( pThreadData == NULL || !__xrtMemDebugEnabled() ) {
 			return;
 		}
+		__xrtMemDebugPreferSite(&sFile, &iLine);
 		__xrtMemDebugLock();
 		pThreadData->tTemp.iCurrentBytes += iSize;
 		if ( pThreadData->tTemp.iCurrentBytes > pThreadData->tTemp.iPeakBytes ) {
@@ -9566,7 +9931,7 @@ static inline void __xrtTempArenaDebugOnAlloc(xrtThreadData* pThreadData, size_t
 		if ( xCore.MemDebug.iTempCurrentBytes > xCore.MemDebug.iTempPeakBytes ) {
 			xCore.MemDebug.iTempPeakBytes = xCore.MemDebug.iTempCurrentBytes;
 		}
-		__xrtMemDebugRecordEventNoLock(XRT_MEMDEBUG_EVENT_TEMP_ALLOC, NULL, iSize, bSpill ? XRT_MEMDEBUG_ALLOCATOR_FSMEMPOOL : XRT_MEMDEBUG_ALLOCATOR_GLOBAL, NULL, 0);
+		__xrtMemDebugRecordEventNoLock(XRT_MEMDEBUG_EVENT_TEMP_ALLOC, NULL, iSize, bSpill ? XRT_MEMDEBUG_ALLOCATOR_FSMEMPOOL : XRT_MEMDEBUG_ALLOCATOR_GLOBAL, sFile, iLine);
 		__xrtMemDebugUnlock();
 	#else
 		(void)pThreadData;
@@ -9578,9 +9943,12 @@ static inline void __xrtTempArenaDebugOnAlloc(xrtThreadData* pThreadData, size_t
 static inline void __xrtTempArenaDebugOnReset(xrtThreadData* pThreadData)
 {
 	#ifdef XRT_MEM_DEBUG
+		const char* sFile = __FILE__;
+		uint32 iLine = __LINE__;
 		if ( pThreadData == NULL || !__xrtMemDebugEnabled() ) {
 			return;
 		}
+		__xrtMemDebugPreferSite(&sFile, &iLine);
 		__xrtMemDebugLock();
 		if ( xCore.MemDebug.iTempCurrentBytes >= pThreadData->tTemp.iCurrentBytes ) {
 			xCore.MemDebug.iTempCurrentBytes -= pThreadData->tTemp.iCurrentBytes;
@@ -9588,7 +9956,7 @@ static inline void __xrtTempArenaDebugOnReset(xrtThreadData* pThreadData)
 			xCore.MemDebug.iTempCurrentBytes = 0;
 		}
 		xCore.MemDebug.iTempResetCount++;
-		__xrtMemDebugRecordEventNoLock(XRT_MEMDEBUG_EVENT_TEMP_RESET, NULL, pThreadData->tTemp.iCurrentBytes, XRT_MEMDEBUG_ALLOCATOR_GLOBAL, NULL, 0);
+		__xrtMemDebugRecordEventNoLock(XRT_MEMDEBUG_EVENT_TEMP_RESET, NULL, pThreadData->tTemp.iCurrentBytes, XRT_MEMDEBUG_ALLOCATOR_GLOBAL, sFile, iLine);
 		__xrtMemDebugUnlock();
 	#else
 		(void)pThreadData;
@@ -9888,6 +10256,30 @@ static inline void __xrtMemTelemetryRecordTemp(size_t iSize)
 	__xrtAtomicAddFetch64(&pState->iTempCalls, 1);
 	__xrtAtomicAddFetch64(&pState->iTempBytes, (int64)iSize);
 }
+#if defined(XRT_MEM_DEBUG)
+
+// ========================================
+// File: D:/git/xrt/lib/memdebug_site_macros_base.h
+// ========================================
+
+#ifndef XRT_MEMDEBUG_SITE_MACROS_BASE_H
+#define XRT_MEMDEBUG_SITE_MACROS_BASE_H
+#ifdef XRT_MEM_DEBUG
+	#ifndef xrtMalloc
+		#define xrtMalloc(iSize) __xrtMallocSite((iSize), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtCalloc
+		#define xrtCalloc(iNum, iSize) __xrtCallocSite((iNum), (iSize), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtRealloc
+		#define xrtRealloc(pMem, iSize) __xrtReallocSite((pMem), (iSize), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtFree
+		#define xrtFree(pMem) __xrtFreeSite((pMem), __FILE__, __LINE__)
+	#endif
+#endif
+#endif
+#endif
 
 // ========================================
 // File: D:/git/xrt/lib/string.h
@@ -9928,7 +10320,7 @@ static size_t __xrtUtf8CharLenSafe(str sText, size_t iSize, size_t iPos)
 	return iCharLen;
 }
 // 内部函数：检查字节序列是否在集合中
-static bool __xrtStrHasToken(str sText, size_t iSize, const char* sToken, size_t iTokenSize)
+static bool __xrtStrHasToken(str sText, size_t iSize, const unsigned char* sToken, size_t iTokenSize)
 {
 	if ( !sText || !sToken || (iTokenSize == 0) || (iSize < iTokenSize) ) { return FALSE; }
 	for ( size_t i = 0; (i + iTokenSize) <= iSize; i++ ) {
@@ -16669,6 +17061,7 @@ XXAPI int xrtDirDelete(str sPath)
 	#endif
 	return 0;
 }
+#if !defined(XRT_NO_FILE_ASYNC)
 
 // ========================================
 // File: D:/git/xrt/lib/file_async.h
@@ -18119,6 +18512,7 @@ XXAPI xfuture* xrtDirDeleteAsync(str sPath)
 	}
 	return __xafileStartPathTask(pTask);
 }
+#endif
 #endif
 #endif
 #endif
@@ -54333,6 +54727,7 @@ str xrtGetLocalName()
 	return xCore.sNull;
 }
 #endif
+#ifndef XRT_NO_SUBPROCESS
 
 // ========================================
 // File: D:/git/xrt/lib/subprocess.h
@@ -55532,6 +55927,7 @@ struct xprocess_struct {
 };
 static void __xprocFreeProcess(xprocess* pProcess);
 // 内部函数：增加引用
+#if !defined(XRT_NO_NETWORK)
 static xprocess* __xprocAddRef(xprocess* pProcess)
 {
 	if ( pProcess ) {
@@ -55539,6 +55935,7 @@ static xprocess* __xprocAddRef(xprocess* pProcess)
 	}
 	return pProcess;
 }
+#endif
 // 内部函数：释放引用
 static void __xprocReleaseProcess(xprocess* pProcess)
 {
@@ -55830,6 +56227,17 @@ static void __xprocPushEventLocked(xprocess* pProcess, int iKind, int iStream, u
 		procDeleteProcThreadAttributeList DeleteProcThreadAttributeList;
 	} __xproc_conpty_api;
 	static __xproc_conpty_api __gxprocConPtyApi;
+	static void __xprocAssignProcAddress(void* pTarget, size_t iTargetSize, FARPROC procAddress)
+	{
+		if ( pTarget == NULL || iTargetSize == 0 ) {
+			return;
+		}
+		memset(pTarget, 0, iTargetSize);
+		if ( iTargetSize > sizeof(procAddress) ) {
+			iTargetSize = sizeof(procAddress);
+		}
+		memcpy(pTarget, &procAddress, iTargetSize);
+	}
 	static void __xprocLoadConPtyApi(void)
 	{
 		HMODULE hKernel;
@@ -55842,12 +56250,12 @@ static void __xprocPushEventLocked(xprocess* pProcess, int iKind, int iStream, u
 		if ( hKernel == NULL ) {
 			return;
 		}
-		__gxprocConPtyApi.CreatePseudoConsole = (procCreatePseudoConsole)GetProcAddress(hKernel, "CreatePseudoConsole");
-		__gxprocConPtyApi.ClosePseudoConsole = (procClosePseudoConsole)GetProcAddress(hKernel, "ClosePseudoConsole");
-		__gxprocConPtyApi.ResizePseudoConsole = (procResizePseudoConsole)GetProcAddress(hKernel, "ResizePseudoConsole");
-		__gxprocConPtyApi.InitializeProcThreadAttributeList = (procInitializeProcThreadAttributeList)GetProcAddress(hKernel, "InitializeProcThreadAttributeList");
-		__gxprocConPtyApi.UpdateProcThreadAttribute = (procUpdateProcThreadAttribute)GetProcAddress(hKernel, "UpdateProcThreadAttribute");
-		__gxprocConPtyApi.DeleteProcThreadAttributeList = (procDeleteProcThreadAttributeList)GetProcAddress(hKernel, "DeleteProcThreadAttributeList");
+		__xprocAssignProcAddress(&__gxprocConPtyApi.CreatePseudoConsole, sizeof(__gxprocConPtyApi.CreatePseudoConsole), GetProcAddress(hKernel, "CreatePseudoConsole"));
+		__xprocAssignProcAddress(&__gxprocConPtyApi.ClosePseudoConsole, sizeof(__gxprocConPtyApi.ClosePseudoConsole), GetProcAddress(hKernel, "ClosePseudoConsole"));
+		__xprocAssignProcAddress(&__gxprocConPtyApi.ResizePseudoConsole, sizeof(__gxprocConPtyApi.ResizePseudoConsole), GetProcAddress(hKernel, "ResizePseudoConsole"));
+		__xprocAssignProcAddress(&__gxprocConPtyApi.InitializeProcThreadAttributeList, sizeof(__gxprocConPtyApi.InitializeProcThreadAttributeList), GetProcAddress(hKernel, "InitializeProcThreadAttributeList"));
+		__xprocAssignProcAddress(&__gxprocConPtyApi.UpdateProcThreadAttribute, sizeof(__gxprocConPtyApi.UpdateProcThreadAttribute), GetProcAddress(hKernel, "UpdateProcThreadAttribute"));
+		__xprocAssignProcAddress(&__gxprocConPtyApi.DeleteProcThreadAttributeList, sizeof(__gxprocConPtyApi.DeleteProcThreadAttributeList), GetProcAddress(hKernel, "DeleteProcThreadAttributeList"));
 		__gxprocConPtyApi.bSupported = __gxprocConPtyApi.CreatePseudoConsole != NULL
 			&& __gxprocConPtyApi.ClosePseudoConsole != NULL
 			&& __gxprocConPtyApi.ResizePseudoConsole != NULL
@@ -57761,6 +58169,7 @@ XXAPI xfuture* xrtProcessWaitFuture(xprocess* pProcess)
 }
 #endif
 #endif
+#endif
 #ifndef XRT_NO_XID
 
 // ========================================
@@ -57971,10 +58380,12 @@ static inline void __xrtPtrArrayUnit_NoLock(xparray pObject)
 // 内部函数：__xrtPtrArrayMalloc_NoLock
 static inline bool __xrtPtrArrayMalloc_NoLock(xparray pObject, uint32 iCount)
 {
-	size_t iBytes = (size_t)iCount * sizeof(ptr);
-	if ( iCount != 0 && (size_t)iCount > (SIZE_MAX / sizeof(ptr)) ) {
+	size_t iBytes;
+	uint64 iCount64 = iCount;
+	if ( iCount != 0 && iCount64 > (SIZE_MAX / sizeof(ptr)) ) {
 		return FALSE;
 	}
+	iBytes = (size_t)iCount * sizeof(ptr);
 	if ( iCount > pObject->AllocCount ) {
 		// 增量
 		ptr* pNew = xrtRealloc(pObject->Memory, iBytes);
@@ -58356,27 +58767,34 @@ XXAPI void xrtArrayUnit(xarray pArr)
 // 创建数组调试
 XXAPI xarray xrtArrayCreateDbg(uint32 iItemLength, uint32 iMode, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xarray pArr = xrtArrayCreate(iItemLength, iMode);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(pArr, XRT_MEMDEBUG_OBJECT_ARRAY, XRT_MEMDEBUG_OBJECT_ORIGIN_CREATE, sFile, iLine);
 	return pArr;
 }
 // 初始化数组调试
 XXAPI void xrtArrayInitDbg(xarray pArr, uint32 iItemLength, uint32 iMode, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xrtArrayInit(pArr, iItemLength, iMode);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(pArr, XRT_MEMDEBUG_OBJECT_ARRAY, XRT_MEMDEBUG_OBJECT_ORIGIN_INIT, sFile, iLine);
 }
 // 销毁数组调试
 XXAPI void xrtArrayDestroyDbg(xarray pArr, const char* sFile, uint32 iLine)
 {
 	if ( pArr ) {
+		xrtMemDebugSiteScope tScope;
 		if ( !__xrtMemDebugObjectGuardDestroy(pArr, XRT_MEMDEBUG_OBJECT_ARRAY, sFile, iLine) ) {
 			return;
 		}
 		if ( !xrtOwnerCheckMutable(&pArr->Owner, "array belongs to another thread.") ) {
 			return;
 		}
+		tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 		xrtArrayUnit(pArr);
+		__xrtMemDebugLeaveSiteScope(&tScope);
 		__xrtMemDebugUnregisterObject(pArr, XRT_MEMDEBUG_OBJECT_ARRAY, sFile, iLine);
 		xrtFreeDbg(pArr, sFile, iLine);
 	}
@@ -58384,6 +58802,7 @@ XXAPI void xrtArrayDestroyDbg(xarray pArr, const char* sFile, uint32 iLine)
 // 释放数组调试
 XXAPI void xrtArrayUnitDbg(xarray pArr, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope;
 	if ( pArr == NULL ) {
 		return;
 	}
@@ -58393,7 +58812,9 @@ XXAPI void xrtArrayUnitDbg(xarray pArr, const char* sFile, uint32 iLine)
 	if ( !xrtOwnerBeginMutable(&pArr->Owner, "array belongs to another thread.") ) {
 		return;
 	}
+	tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	__xrtArrayUnit_NoLock(pArr);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	xrtOwnerEndMutable(&pArr->Owner);
 	__xrtMemDebugUnregisterObject(pArr, XRT_MEMDEBUG_OBJECT_ARRAY, sFile, iLine);
 }
@@ -58591,10 +59012,16 @@ static inline uint32 __xrtBsmmPageMMUAppend(xbsmm objBSMM, ptr pBlock)
 {
 	if ( objBSMM->PageMMU.Count >= objBSMM->PageMMU.AllocCount ) {
 		uint32 iNewCount = objBSMM->PageMMU.Count + objBSMM->PageMMU.AllocStep;
-		if ( iNewCount < objBSMM->PageMMU.Count || (size_t)iNewCount > (SIZE_MAX / sizeof(ptr)) ) {
+		size_t iNewBytes;
+		uint64 iNewCount64 = iNewCount;
+		if ( iNewCount < objBSMM->PageMMU.Count ) {
 			return 0;
 		}
-		ptr* pNew = xrtRealloc(objBSMM->PageMMU.Memory, (size_t)iNewCount * sizeof(ptr));
+		if ( iNewCount64 > (SIZE_MAX / sizeof(ptr)) ) {
+			return 0;
+		}
+		iNewBytes = (size_t)iNewCount * sizeof(ptr);
+		ptr* pNew = xrtRealloc(objBSMM->PageMMU.Memory, iNewBytes);
 		if ( pNew == NULL ) {
 			return 0;
 		}
@@ -58985,27 +59412,34 @@ XXAPI void xrtFSMemPoolUnit(xfsmempool objMM)
 // 创建 fs 内存内存池调试
 XXAPI xfsmempool xrtFSMemPoolCreateDbg(unsigned int iItemLength, uint32 iMode, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xfsmempool objMM = xrtFSMemPoolCreate(iItemLength, iMode);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(objMM, XRT_MEMDEBUG_OBJECT_FSMEMPOOL, XRT_MEMDEBUG_OBJECT_ORIGIN_CREATE, sFile, iLine);
 	return objMM;
 }
 // 初始化 fs 内存内存池调试
 XXAPI void xrtFSMemPoolInitDbg(xfsmempool objMM, unsigned int iItemLength, uint32 iMode, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xrtFSMemPoolInit(objMM, iItemLength, iMode);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(objMM, XRT_MEMDEBUG_OBJECT_FSMEMPOOL, XRT_MEMDEBUG_OBJECT_ORIGIN_INIT, sFile, iLine);
 }
 // 销毁 fs 内存内存池调试
 XXAPI void xrtFSMemPoolDestroyDbg(xfsmempool objMM, const char* sFile, uint32 iLine)
 {
 	if ( objMM ) {
+		xrtMemDebugSiteScope tScope;
 		if ( !__xrtMemDebugObjectGuardDestroy(objMM, XRT_MEMDEBUG_OBJECT_FSMEMPOOL, sFile, iLine) ) {
 			return;
 		}
 		if ( !xrtOwnerCheckMutable(&objMM->Owner, "fixed-size memory pool belongs to another thread.") ) {
 			return;
 		}
+		tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 		xrtFSMemPoolUnit(objMM);
+		__xrtMemDebugLeaveSiteScope(&tScope);
 		__xrtMemDebugUnregisterObject(objMM, XRT_MEMDEBUG_OBJECT_FSMEMPOOL, sFile, iLine);
 		xrtFreeDbg(objMM, sFile, iLine);
 	}
@@ -59013,6 +59447,7 @@ XXAPI void xrtFSMemPoolDestroyDbg(xfsmempool objMM, const char* sFile, uint32 iL
 // 释放 fs 内存内存池调试
 XXAPI void xrtFSMemPoolUnitDbg(xfsmempool objMM, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope;
 	if ( objMM == NULL ) {
 		return;
 	}
@@ -59022,6 +59457,7 @@ XXAPI void xrtFSMemPoolUnitDbg(xfsmempool objMM, const char* sFile, uint32 iLine
 	if ( !xrtOwnerBeginMutable(&objMM->Owner, "fixed-size memory pool belongs to another thread.") ) {
 		return;
 	}
+	tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	for ( uint32 i = 0; i < objMM->arrMMU.Count; i++ ) {
 		MMU_LLNode* pNode = xrtBsmmGetPtr_Inline(&objMM->arrMMU, i);
 		if ( pNode->objMMU ) {
@@ -59034,6 +59470,7 @@ XXAPI void xrtFSMemPoolUnitDbg(xfsmempool objMM, const char* sFile, uint32 iLine
 	objMM->LL_Full = NULL;
 	objMM->LL_Null = NULL;
 	objMM->LL_Free = NULL;
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	xrtOwnerEndMutable(&objMM->Owner);
 	__xrtMemDebugUnregisterObject(objMM, XRT_MEMDEBUG_OBJECT_FSMEMPOOL, sFile, iLine);
 }
@@ -59042,6 +59479,13 @@ XXAPI void xrtFSMemPoolUnitDbg(xfsmempool objMM, const char* sFile, uint32 iLine
 XXAPI ptr xrtFSMemPoolAlloc(xfsmempool objMM)
 {
 	ptr pResult = NULL;
+	const char* sDbgFile = NULL;
+	uint32 iDbgLine = 0;
+	#ifdef XRT_MEM_DEBUG
+		sDbgFile = __FILE__;
+		iDbgLine = __LINE__;
+		__xrtMemDebugPreferSite(&sDbgFile, &iDbgLine);
+	#endif
 	if ( !xrtOwnerBeginMutable(&objMM->Owner, "fixed-size memory pool belongs to another thread.") ) {
 		return NULL;
 	}
@@ -59126,7 +59570,7 @@ XXAPI ptr xrtFSMemPoolAlloc(xfsmempool objMM)
 	}
 	// 从选定内存管理器单元中申请内存块
 	pResult = xrtMemUnitAlloc_Inline(objMMU);
-	__xrtMemDebugRegisterForeignAlloc(pResult, objMM->ItemLength, XRT_MEMDEBUG_ALLOCATOR_FSMEMPOOL, NULL, 0);
+	__xrtMemDebugRegisterForeignAlloc(pResult, objMM->ItemLength, XRT_MEMDEBUG_ALLOCATOR_FSMEMPOOL, sDbgFile, iDbgLine);
 	xrtOwnerEndMutable(&objMM->Owner);
 	return pResult;
 }
@@ -59492,24 +59936,31 @@ XXAPI void xrtDynStackUnit(xdynstack objSTK)
 // 创建 dyn 栈调试
 XXAPI xdynstack xrtDynStackCreateDbg(uint32 iItemLength, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xdynstack objSTK = xrtDynStackCreate(iItemLength);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(objSTK, XRT_MEMDEBUG_OBJECT_DYNSTACK, XRT_MEMDEBUG_OBJECT_ORIGIN_CREATE, sFile, iLine);
 	return objSTK;
 }
 // 初始化 dyn 栈调试
 XXAPI void xrtDynStackInitDbg(xdynstack objSTK, uint32 iItemLength, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xrtDynStackInit(objSTK, iItemLength);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(objSTK, XRT_MEMDEBUG_OBJECT_DYNSTACK, XRT_MEMDEBUG_OBJECT_ORIGIN_INIT, sFile, iLine);
 }
 // 销毁 dyn 栈调试
 XXAPI void xrtDynStackDestroyDbg(xdynstack objSTK, const char* sFile, uint32 iLine)
 {
 	if ( objSTK ) {
+		xrtMemDebugSiteScope tScope;
 		if ( !__xrtMemDebugObjectGuardDestroy(objSTK, XRT_MEMDEBUG_OBJECT_DYNSTACK, sFile, iLine) ) {
 			return;
 		}
+		tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 		xrtDynStackUnit(objSTK);
+		__xrtMemDebugLeaveSiteScope(&tScope);
 		__xrtMemDebugUnregisterObject(objSTK, XRT_MEMDEBUG_OBJECT_DYNSTACK, sFile, iLine);
 		xrtFreeDbg(objSTK, sFile, iLine);
 	}
@@ -59517,13 +59968,16 @@ XXAPI void xrtDynStackDestroyDbg(xdynstack objSTK, const char* sFile, uint32 iLi
 // 释放 dyn 栈调试
 XXAPI void xrtDynStackUnitDbg(xdynstack objSTK, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope;
 	if ( objSTK == NULL ) {
 		return;
 	}
 	if ( !__xrtMemDebugObjectGuardDestroy(objSTK, XRT_MEMDEBUG_OBJECT_DYNSTACK, sFile, iLine) ) {
 		return;
 	}
+	tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xrtDynStackUnit(objSTK);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugUnregisterObject(objSTK, XRT_MEMDEBUG_OBJECT_DYNSTACK, sFile, iLine);
 }
 #endif
@@ -60166,27 +60620,34 @@ XXAPI void xrtAVLTreeUnit(xavltree objAVLT)
 // 创建 AVL 树调试
 XXAPI xavltree xrtAVLTreeCreateDbg(unsigned int iItemLength, AVLTree_CompProc procComp, uint32 iMode, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xavltree objAVLT = xrtAVLTreeCreate(iItemLength, procComp, iMode);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(objAVLT, XRT_MEMDEBUG_OBJECT_AVLTREE, XRT_MEMDEBUG_OBJECT_ORIGIN_CREATE, sFile, iLine);
 	return objAVLT;
 }
 // 初始化 AVL 树调试
 XXAPI void xrtAVLTreeInitDbg(xavltree objAVLT, unsigned int iItemLength, AVLTree_CompProc procComp, uint32 iMode, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xrtAVLTreeInit(objAVLT, iItemLength, procComp, iMode);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(objAVLT, XRT_MEMDEBUG_OBJECT_AVLTREE, XRT_MEMDEBUG_OBJECT_ORIGIN_INIT, sFile, iLine);
 }
 // 销毁 AVL 树调试
 XXAPI void xrtAVLTreeDestroyDbg(xavltree objAVLT, const char* sFile, uint32 iLine)
 {
 	if ( objAVLT ) {
+		xrtMemDebugSiteScope tScope;
 		if ( !__xrtMemDebugObjectGuardDestroy(objAVLT, XRT_MEMDEBUG_OBJECT_AVLTREE, sFile, iLine) ) {
 			return;
 		}
 		if ( !xrtOwnerCheckMutable(&objAVLT->Owner, "avltree belongs to another thread.") ) {
 			return;
 		}
+		tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 		xrtAVLTreeUnit(objAVLT);
+		__xrtMemDebugLeaveSiteScope(&tScope);
 		__xrtMemDebugUnregisterObject(objAVLT, XRT_MEMDEBUG_OBJECT_AVLTREE, sFile, iLine);
 		xrtFreeDbg(objAVLT, sFile, iLine);
 	}
@@ -60194,6 +60655,7 @@ XXAPI void xrtAVLTreeDestroyDbg(xavltree objAVLT, const char* sFile, uint32 iLin
 // 释放 AVL 树调试
 XXAPI void xrtAVLTreeUnitDbg(xavltree objAVLT, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope;
 	if ( objAVLT == NULL ) {
 		return;
 	}
@@ -60203,7 +60665,9 @@ XXAPI void xrtAVLTreeUnitDbg(xavltree objAVLT, const char* sFile, uint32 iLine)
 	if ( !xrtOwnerBeginMutable(&objAVLT->Owner, "avltree belongs to another thread.") ) {
 		return;
 	}
+	tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	__xrtAVLTreeUnit_NoLock(objAVLT);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	xrtOwnerEndMutable(&objAVLT->Owner);
 	__xrtMemDebugUnregisterObject(objAVLT, XRT_MEMDEBUG_OBJECT_AVLTREE, sFile, iLine);
 }
@@ -60465,6 +60929,9 @@ static inline bool __xrtMemPoolBuildBucketPlan(xmempool objMP, uint32 iCutoff)
 	uint32 iBucketCount;
 	uint32 iBucket;
 	uint32 iSize;
+	size_t iLutCount;
+	uint64 iBucketCount64;
+	uint64 iCutoff64;
 	objMP->FSB_Memory = NULL;
 	objMP->FSB_RootNode = NULL;
 	objMP->FSB_Lut = NULL;
@@ -60475,25 +60942,31 @@ static inline bool __xrtMemPoolBuildBucketPlan(xmempool objMP, uint32 iCutoff)
 		return TRUE;
 	}
 	iBucketCount = __xrtMemPoolBucketCount(iCutoff);
-	if ( iBucketCount == 0 || (size_t)iBucketCount > (SIZE_MAX / sizeof(FSB_Item)) ) {
+	iBucketCount64 = iBucketCount;
+	iCutoff64 = iCutoff;
+	if ( iBucketCount == 0 ) {
+		return FALSE;
+	}
+	if ( iBucketCount64 > (SIZE_MAX / sizeof(FSB_Item)) ) {
 		return FALSE;
 	}
 	objMP->FSB_Memory = xrtCalloc(iBucketCount, sizeof(FSB_Item));
 	if ( objMP->FSB_Memory == NULL ) {
 		return FALSE;
 	}
-	if ( (size_t)iCutoff >= (SIZE_MAX / sizeof(uint32)) ) {
+	if ( iCutoff64 >= (SIZE_MAX / sizeof(uint32)) ) {
 		xrtFree(objMP->FSB_Memory);
 		objMP->FSB_Memory = NULL;
 		return FALSE;
 	}
-	objMP->FSB_Lut = xrtMalloc(sizeof(uint32) * (iCutoff + 1));
+	iLutCount = (size_t)iCutoff + 1u;
+	objMP->FSB_Lut = xrtMalloc(sizeof(uint32) * iLutCount);
 	if ( objMP->FSB_Lut == NULL ) {
 		xrtFree(objMP->FSB_Memory);
 		objMP->FSB_Memory = NULL;
 		return FALSE;
 	}
-	memset(objMP->FSB_Lut, 0, sizeof(uint32) * (iCutoff + 1));
+	memset(objMP->FSB_Lut, 0, sizeof(uint32) * iLutCount);
 	objMP->iBucketCount = iBucketCount;
 	objMP->FSB_RootNode = &objMP->FSB_Memory[0];
 	for ( iBucket = 0; iBucket < iBucketCount; iBucket++ ) {
@@ -60600,27 +61073,34 @@ XXAPI void xrtMemPoolUnit(xmempool objMP)
 // 创建内存内存池调试
 XXAPI xmempool xrtMemPoolCreateDbg(int iCustom, uint32 iMode, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xmempool objMP = xrtMemPoolCreate(iCustom, iMode);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(objMP, XRT_MEMDEBUG_OBJECT_MEMPOOL, XRT_MEMDEBUG_OBJECT_ORIGIN_CREATE, sFile, iLine);
 	return objMP;
 }
 // 初始化内存内存池调试
 XXAPI void xrtMemPoolInitDbg(xmempool objMP, int iCustom, uint32 iMode, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xrtMemPoolInit(objMP, iCustom, iMode);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(objMP, XRT_MEMDEBUG_OBJECT_MEMPOOL, XRT_MEMDEBUG_OBJECT_ORIGIN_INIT, sFile, iLine);
 }
 // 销毁内存内存池调试
 XXAPI void xrtMemPoolDestroyDbg(xmempool objMP, const char* sFile, uint32 iLine)
 {
 	if ( objMP ) {
+		xrtMemDebugSiteScope tScope;
 		if ( !__xrtMemDebugObjectGuardDestroy(objMP, XRT_MEMDEBUG_OBJECT_MEMPOOL, sFile, iLine) ) {
 			return;
 		}
 		if ( !xrtOwnerCheckMutable(&objMP->Owner, "memory pool belongs to another thread.") ) {
 			return;
 		}
+		tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 		xrtMemPoolUnit(objMP);
+		__xrtMemDebugLeaveSiteScope(&tScope);
 		__xrtMemDebugUnregisterObject(objMP, XRT_MEMDEBUG_OBJECT_MEMPOOL, sFile, iLine);
 		xrtFreeDbg(objMP, sFile, iLine);
 	}
@@ -60628,6 +61108,7 @@ XXAPI void xrtMemPoolDestroyDbg(xmempool objMP, const char* sFile, uint32 iLine)
 // 释放内存内存池调试
 XXAPI void xrtMemPoolUnitDbg(xmempool objMP, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope;
 	if ( objMP == NULL ) {
 		return;
 	}
@@ -60637,6 +61118,7 @@ XXAPI void xrtMemPoolUnitDbg(xmempool objMP, const char* sFile, uint32 iLine)
 	if ( !xrtOwnerBeginMutable(&objMP->Owner, "memory pool belongs to another thread.") ) {
 		return;
 	}
+	tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	for ( uint32 i = 0; i < objMP->arrMMU.Count; i++ ) {
 		MMU_LLNode* pNode = xrtBsmmGetPtr_Inline(&objMP->arrMMU, i);
 		if ( pNode->objMMU ) {
@@ -60665,6 +61147,7 @@ XXAPI void xrtMemPoolUnitDbg(xmempool objMP, const char* sFile, uint32 iLine)
 	}
 	xrtBsmmUnit(&objMP->BigMM);
 	objMP->LL_BigFree = NULL;
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	xrtOwnerEndMutable(&objMP->Owner);
 	__xrtMemDebugUnregisterObject(objMP, XRT_MEMDEBUG_OBJECT_MEMPOOL, sFile, iLine);
 }
@@ -60740,6 +61223,13 @@ static inline xmemunit __xrtMemPoolAcquireUnit(xmempool objMP, FSB_Item* objFSB)
 XXAPI void* xrtMemPoolAlloc(xmempool objMP, uint32 iSize)
 {
 	void* pRet = NULL;
+	const char* sDbgFile = NULL;
+	uint32 iDbgLine = 0;
+	#ifdef XRT_MEM_DEBUG
+		sDbgFile = __FILE__;
+		iDbgLine = __LINE__;
+		__xrtMemDebugPreferSite(&sDbgFile, &iDbgLine);
+	#endif
 	if ( !xrtOwnerBeginMutable(&objMP->Owner, "memory pool belongs to another thread.") ) {
 		return NULL;
 	}
@@ -60756,7 +61246,7 @@ XXAPI void* xrtMemPoolAlloc(xmempool objMP, uint32 iSize)
 				return NULL;
 			}
 			pRet = xrtMemUnitAlloc_Inline(objMMU);
-			__xrtMemDebugRegisterForeignAlloc(pRet, iSize, XRT_MEMDEBUG_ALLOCATOR_MEMPOOL, NULL, 0);
+			__xrtMemDebugRegisterForeignAlloc(pRet, iSize, XRT_MEMDEBUG_ALLOCATOR_MEMPOOL, sDbgFile, iDbgLine);
 			xrtOwnerEndMutable(&objMP->Owner);
 			return pRet;
 		}
@@ -60773,7 +61263,7 @@ XXAPI void* xrtMemPoolAlloc(xmempool objMP, uint32 iSize)
 				pInfo->Size = iSize;
 				pInfo->Ptr = pHead;
 				pRet = &pHead[1];
-				__xrtMemDebugRegisterForeignAlloc(pRet, iSize, XRT_MEMDEBUG_ALLOCATOR_MEMPOOL, NULL, 0);
+				__xrtMemDebugRegisterForeignAlloc(pRet, iSize, XRT_MEMDEBUG_ALLOCATOR_MEMPOOL, sDbgFile, iDbgLine);
 				xrtOwnerEndMutable(&objMP->Owner);
 				return pRet;
 			} else {
@@ -60786,7 +61276,7 @@ XXAPI void* xrtMemPoolAlloc(xmempool objMP, uint32 iSize)
 					pInfo->Size = iSize;
 					pInfo->Ptr = pHead;
 					pRet = &pHead[1];
-					__xrtMemDebugRegisterForeignAlloc(pRet, iSize, XRT_MEMDEBUG_ALLOCATOR_MEMPOOL, NULL, 0);
+					__xrtMemDebugRegisterForeignAlloc(pRet, iSize, XRT_MEMDEBUG_ALLOCATOR_MEMPOOL, sDbgFile, iDbgLine);
 					xrtOwnerEndMutable(&objMP->Owner);
 					return pRet;
 				}
@@ -61115,27 +61605,34 @@ XXAPI void xrtDictUnit(xdict objHT)
 // 创建字典调试
 XXAPI xdict xrtDictCreateDbg(uint32 iItemLength, uint32 iMode, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xdict objHT = xrtDictCreate(iItemLength, iMode);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(objHT, XRT_MEMDEBUG_OBJECT_DICT, XRT_MEMDEBUG_OBJECT_ORIGIN_CREATE, sFile, iLine);
 	return objHT;
 }
 // 初始化字典调试
 XXAPI void xrtDictInitDbg(xdict objHT, uint32 iItemLength, uint32 iMode, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xrtDictInit(objHT, iItemLength, iMode);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(objHT, XRT_MEMDEBUG_OBJECT_DICT, XRT_MEMDEBUG_OBJECT_ORIGIN_INIT, sFile, iLine);
 }
 // 销毁字典调试
 XXAPI void xrtDictDestroyDbg(xdict objHT, const char* sFile, uint32 iLine)
 {
 	if ( objHT ) {
+		xrtMemDebugSiteScope tScope;
 		if ( !__xrtMemDebugObjectGuardDestroy(objHT, XRT_MEMDEBUG_OBJECT_DICT, sFile, iLine) ) {
 			return;
 		}
 		if ( !xrtOwnerCheckMutable(&objHT->Owner, "dict belongs to another thread.") ) {
 			return;
 		}
+		tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 		xrtDictUnit(objHT);
+		__xrtMemDebugLeaveSiteScope(&tScope);
 		__xrtMemDebugUnregisterObject(objHT, XRT_MEMDEBUG_OBJECT_DICT, sFile, iLine);
 		xrtFreeDbg(objHT, sFile, iLine);
 	}
@@ -61143,6 +61640,7 @@ XXAPI void xrtDictDestroyDbg(xdict objHT, const char* sFile, uint32 iLine)
 // 释放字典调试
 XXAPI void xrtDictUnitDbg(xdict objHT, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope;
 	if ( objHT == NULL ) {
 		return;
 	}
@@ -61152,9 +61650,43 @@ XXAPI void xrtDictUnitDbg(xdict objHT, const char* sFile, uint32 iLine)
 	if ( !xrtOwnerBeginMutable(&objHT->Owner, "dict belongs to another thread.") ) {
 		return;
 	}
+	tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	__xrtDictUnit_NoLock(objHT);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	xrtOwnerEndMutable(&objHT->Owner);
 	__xrtMemDebugUnregisterObject(objHT, XRT_MEMDEBUG_OBJECT_DICT, sFile, iLine);
+}
+// 璁剧疆鍊艰皟璇?
+XXAPI ptr xrtDictSetDbg(xdict objHT, ptr sKey, uint32 iKeyLen, bool* bNewRet, const char* sFile, uint32 iLine)
+{
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
+	ptr pRet = xrtDictSet(objHT, sKey, iKeyLen, bNewRet);
+	__xrtMemDebugLeaveSiteScope(&tScope);
+	return pRet;
+}
+// 璁剧疆鎸囬拡鍊艰皟璇?
+XXAPI bool xrtDictSetPtrDbg(xdict objHT, ptr sKey, uint32 iKeyLen, ptr pVal, ptr* ppOldVal, const char* sFile, uint32 iLine)
+{
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
+	bool bRet = xrtDictSetPtr(objHT, sKey, iKeyLen, pVal, ppOldVal);
+	__xrtMemDebugLeaveSiteScope(&tScope);
+	return bRet;
+}
+// 鍒犻櫎鍊艰皟璇?
+XXAPI bool xrtDictRemoveDbg(xdict objHT, ptr sKey, uint32 iKeyLen, const char* sFile, uint32 iLine)
+{
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
+	bool bRet = xrtDictRemove(objHT, sKey, iKeyLen);
+	__xrtMemDebugLeaveSiteScope(&tScope);
+	return bRet;
+}
+// 鍒犻櫎鎸囬拡鍊艰皟璇?
+XXAPI ptr xrtDictRemovePtrDbg(xdict objHT, ptr sKey, uint32 iKeyLen, const char* sFile, uint32 iLine)
+{
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
+	ptr pRet = xrtDictRemovePtr(objHT, sKey, iKeyLen);
+	__xrtMemDebugLeaveSiteScope(&tScope);
+	return pRet;
 }
 #endif
 // 锁定字典
@@ -61414,27 +61946,34 @@ XXAPI void xrtListUnit(xlist objList)
 // 创建列表调试
 XXAPI xlist xrtListCreateDbg(uint32 iItemLength, uint32 iMode, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xlist objList = xrtListCreate(iItemLength, iMode);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(objList, XRT_MEMDEBUG_OBJECT_LIST, XRT_MEMDEBUG_OBJECT_ORIGIN_CREATE, sFile, iLine);
 	return objList;
 }
 // 初始化列表调试
 XXAPI void xrtListInitDbg(xlist objList, uint32 iItemLength, uint32 iMode, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	xrtListInit(objList, iItemLength, iMode);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	__xrtMemDebugRegisterObject(objList, XRT_MEMDEBUG_OBJECT_LIST, XRT_MEMDEBUG_OBJECT_ORIGIN_INIT, sFile, iLine);
 }
 // 销毁列表调试
 XXAPI void xrtListDestroyDbg(xlist objList, const char* sFile, uint32 iLine)
 {
 	if ( objList ) {
+		xrtMemDebugSiteScope tScope;
 		if ( !__xrtMemDebugObjectGuardDestroy(objList, XRT_MEMDEBUG_OBJECT_LIST, sFile, iLine) ) {
 			return;
 		}
 		if ( !xrtOwnerCheckMutable(&objList->Owner, "list belongs to another thread.") ) {
 			return;
 		}
+		tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 		xrtListUnit(objList);
+		__xrtMemDebugLeaveSiteScope(&tScope);
 		__xrtMemDebugUnregisterObject(objList, XRT_MEMDEBUG_OBJECT_LIST, sFile, iLine);
 		xrtFreeDbg(objList, sFile, iLine);
 	}
@@ -61442,6 +61981,7 @@ XXAPI void xrtListDestroyDbg(xlist objList, const char* sFile, uint32 iLine)
 // 释放列表调试
 XXAPI void xrtListUnitDbg(xlist objList, const char* sFile, uint32 iLine)
 {
+	xrtMemDebugSiteScope tScope;
 	if ( objList == NULL ) {
 		return;
 	}
@@ -61451,9 +61991,43 @@ XXAPI void xrtListUnitDbg(xlist objList, const char* sFile, uint32 iLine)
 	if ( !xrtOwnerBeginMutable(&objList->Owner, "list belongs to another thread.") ) {
 		return;
 	}
+	tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
 	__xrtListUnit_NoLock(objList);
+	__xrtMemDebugLeaveSiteScope(&tScope);
 	xrtOwnerEndMutable(&objList->Owner);
 	__xrtMemDebugUnregisterObject(objList, XRT_MEMDEBUG_OBJECT_LIST, sFile, iLine);
+}
+// 璁剧疆鍊艰皟璇?
+XXAPI ptr xrtListSetDbg(xlist objList, int64 iKey, bool* bNewRet, const char* sFile, uint32 iLine)
+{
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
+	ptr pRet = xrtListSet(objList, iKey, bNewRet);
+	__xrtMemDebugLeaveSiteScope(&tScope);
+	return pRet;
+}
+// 璁剧疆鎸囬拡鍊艰皟璇?
+XXAPI bool xrtListSetPtrDbg(xlist objList, int64 iKey, ptr pVal, ptr* ppOldVal, const char* sFile, uint32 iLine)
+{
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
+	bool bRet = xrtListSetPtr(objList, iKey, pVal, ppOldVal);
+	__xrtMemDebugLeaveSiteScope(&tScope);
+	return bRet;
+}
+// 鍒犻櫎鍊艰皟璇?
+XXAPI bool xrtListRemoveDbg(xlist objList, int64 iKey, const char* sFile, uint32 iLine)
+{
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
+	bool bRet = xrtListRemove(objList, iKey);
+	__xrtMemDebugLeaveSiteScope(&tScope);
+	return bRet;
+}
+// 鍒犻櫎鎸囬拡鍊艰皟璇?
+XXAPI ptr xrtListRemovePtrDbg(xlist objList, int64 iKey, const char* sFile, uint32 iLine)
+{
+	xrtMemDebugSiteScope tScope = __xrtMemDebugEnterSiteScope(sFile, iLine);
+	ptr pRet = xrtListRemovePtr(objList, iKey);
+	__xrtMemDebugLeaveSiteScope(&tScope);
+	return pRet;
 }
 #endif
 // 锁定列表
@@ -72149,6 +72723,7 @@ XXAPI int xrtStringifyJSON_File(str sFile, xvalue varVal, int bFormat)
 		return FALSE;
 	}
 }
+#if !defined(XRT_NO_XSON)
 
 // ========================================
 // File: D:/git/xrt/lib/xson.h
@@ -73451,6 +74026,7 @@ XXAPI int xrtStringifyXSON_File(str sFile, xvalue varVal, int bFormat, uint32 iF
 	xrtFree(sText);
 	return iRet;
 }
+#endif
 #endif
 #ifndef XRT_NO_TEMPLATE
 
@@ -78584,6 +79160,139 @@ XXAPI void xrtUnit()
 	
 	
 	
+#endif
+#if defined(XRT_MEM_DEBUG)
+	#undef XRT_BUILD_CORE
+
+// ========================================
+// File: D:/git/xrt/lib/memdebug_site_macros_public.h
+// ========================================
+
+#ifndef XRT_MEMDEBUG_SITE_MACROS_PUBLIC_H
+#define XRT_MEMDEBUG_SITE_MACROS_PUBLIC_H
+#ifdef XRT_MEM_DEBUG
+	#ifndef xrtMalloc
+		#define xrtMalloc(iSize) xrtMallocDbg((iSize), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtCalloc
+		#define xrtCalloc(iNum, iSize) xrtCallocDbg((iNum), (iSize), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtRealloc
+		#define xrtRealloc(pMem, iSize) xrtReallocDbg((pMem), (iSize), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtFree
+		#define xrtFree(pMem) xrtFreeDbg((pMem), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtArrayCreate
+		#define xrtArrayCreate(iItemLength, iMode) xrtArrayCreateDbg((iItemLength), (iMode), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtArrayInit
+		#define xrtArrayInit(pArr, iItemLength, iMode) xrtArrayInitDbg((pArr), (iItemLength), (iMode), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtArrayDestroy
+		#define xrtArrayDestroy(pArr) xrtArrayDestroyDbg((pArr), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtArrayUnit
+		#define xrtArrayUnit(pArr) xrtArrayUnitDbg((pArr), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtDictCreate
+		#define xrtDictCreate(iItemLength, iMode) xrtDictCreateDbg((iItemLength), (iMode), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtDictInit
+		#define xrtDictInit(objHT, iItemLength, iMode) xrtDictInitDbg((objHT), (iItemLength), (iMode), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtDictDestroy
+		#define xrtDictDestroy(objHT) xrtDictDestroyDbg((objHT), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtDictUnit
+		#define xrtDictUnit(objHT) xrtDictUnitDbg((objHT), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtDictSet
+		#define xrtDictSet(objHT, sKey, iKeyLen, bNewRet) xrtDictSetDbg((objHT), (sKey), (iKeyLen), (bNewRet), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtDictSetPtr
+		#define xrtDictSetPtr(objHT, sKey, iKeyLen, pVal, ppOldVal) xrtDictSetPtrDbg((objHT), (sKey), (iKeyLen), (pVal), (ppOldVal), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtDictRemove
+		#define xrtDictRemove(objHT, sKey, iKeyLen) xrtDictRemoveDbg((objHT), (sKey), (iKeyLen), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtDictRemovePtr
+		#define xrtDictRemovePtr(objHT, sKey, iKeyLen) xrtDictRemovePtrDbg((objHT), (sKey), (iKeyLen), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtListCreate
+		#define xrtListCreate(iItemLength, iMode) xrtListCreateDbg((iItemLength), (iMode), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtListInit
+		#define xrtListInit(objList, iItemLength, iMode) xrtListInitDbg((objList), (iItemLength), (iMode), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtListDestroy
+		#define xrtListDestroy(objList) xrtListDestroyDbg((objList), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtListUnit
+		#define xrtListUnit(objList) xrtListUnitDbg((objList), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtListSet
+		#define xrtListSet(objList, iKey, bNewRet) xrtListSetDbg((objList), (iKey), (bNewRet), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtListSetPtr
+		#define xrtListSetPtr(objList, iKey, pVal, ppOldVal) xrtListSetPtrDbg((objList), (iKey), (pVal), (ppOldVal), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtListRemove
+		#define xrtListRemove(objList, iKey) xrtListRemoveDbg((objList), (iKey), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtListRemovePtr
+		#define xrtListRemovePtr(objList, iKey) xrtListRemovePtrDbg((objList), (iKey), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtAVLTreeCreate
+		#define xrtAVLTreeCreate(iItemLength, procComp, iMode) xrtAVLTreeCreateDbg((iItemLength), (procComp), (iMode), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtAVLTreeInit
+		#define xrtAVLTreeInit(objAVLT, iItemLength, procComp, iMode) xrtAVLTreeInitDbg((objAVLT), (iItemLength), (procComp), (iMode), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtAVLTreeDestroy
+		#define xrtAVLTreeDestroy(objAVLT) xrtAVLTreeDestroyDbg((objAVLT), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtAVLTreeUnit
+		#define xrtAVLTreeUnit(objAVLT) xrtAVLTreeUnitDbg((objAVLT), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtDynStackCreate
+		#define xrtDynStackCreate(iItemLength) xrtDynStackCreateDbg((iItemLength), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtDynStackInit
+		#define xrtDynStackInit(objSTK, iItemLength) xrtDynStackInitDbg((objSTK), (iItemLength), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtDynStackDestroy
+		#define xrtDynStackDestroy(objSTK) xrtDynStackDestroyDbg((objSTK), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtDynStackUnit
+		#define xrtDynStackUnit(objSTK) xrtDynStackUnitDbg((objSTK), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtMemPoolCreate
+		#define xrtMemPoolCreate(iCustom, iMode) xrtMemPoolCreateDbg((iCustom), (iMode), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtMemPoolInit
+		#define xrtMemPoolInit(objMP, iCustom, iMode) xrtMemPoolInitDbg((objMP), (iCustom), (iMode), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtMemPoolDestroy
+		#define xrtMemPoolDestroy(objMP) xrtMemPoolDestroyDbg((objMP), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtMemPoolUnit
+		#define xrtMemPoolUnit(objMP) xrtMemPoolUnitDbg((objMP), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtFSMemPoolCreate
+		#define xrtFSMemPoolCreate(iItemLength, iMode) xrtFSMemPoolCreateDbg((iItemLength), (iMode), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtFSMemPoolInit
+		#define xrtFSMemPoolInit(objMM, iItemLength, iMode) xrtFSMemPoolInitDbg((objMM), (iItemLength), (iMode), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtFSMemPoolDestroy
+		#define xrtFSMemPoolDestroy(objMM) xrtFSMemPoolDestroyDbg((objMM), __FILE__, __LINE__)
+	#endif
+	#ifndef xrtFSMemPoolUnit
+		#define xrtFSMemPoolUnit(objMM) xrtFSMemPoolUnitDbg((objMM), __FILE__, __LINE__)
+	#endif
+#endif
+#endif
 #endif
 
 #endif // XRT_IMPLEMENTATION

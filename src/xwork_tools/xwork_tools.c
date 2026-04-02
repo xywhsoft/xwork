@@ -35,6 +35,61 @@ static const xwork_tool_def *xwork__get_builtin_tool_def(const char *sToolId)
         XWORK_APPROVAL_ALWAYS,
         false
     };
+    static const xwork_tool_def tProcessStartTerminal = {
+        XWORK_TOOL_PROCESS_START_TERMINAL,
+        "Process Start Terminal",
+        "Start an interactive terminal-backed process session.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_PROCESS,
+        XWORK_HOST_PROCESS_START_TERMINAL,
+        XWORK_SIDE_EFFECT_PROCESS_EXEC,
+        XWORK_APPROVAL_ALWAYS,
+        false
+    };
+    static const xwork_tool_def tProcessTerminalRead = {
+        XWORK_TOOL_PROCESS_TERMINAL_READ,
+        "Process Terminal Read",
+        "Read ordered events from an interactive terminal session.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_PROCESS,
+        XWORK_HOST_PROCESS_TERMINAL_READ,
+        XWORK_SIDE_EFFECT_READ_ONLY,
+        XWORK_APPROVAL_DEFAULT,
+        false
+    };
+    static const xwork_tool_def tProcessTerminalWrite = {
+        XWORK_TOOL_PROCESS_TERMINAL_WRITE,
+        "Process Terminal Write",
+        "Write text into an interactive terminal session.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_PROCESS,
+        XWORK_HOST_PROCESS_TERMINAL_WRITE,
+        XWORK_SIDE_EFFECT_PROCESS_EXEC,
+        XWORK_APPROVAL_ALWAYS,
+        false
+    };
+    static const xwork_tool_def tProcessTerminalResize = {
+        XWORK_TOOL_PROCESS_TERMINAL_RESIZE,
+        "Process Terminal Resize",
+        "Resize an interactive terminal session.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_PROCESS,
+        XWORK_HOST_PROCESS_TERMINAL_RESIZE,
+        XWORK_SIDE_EFFECT_READ_ONLY,
+        XWORK_APPROVAL_DEFAULT,
+        false
+    };
+    static const xwork_tool_def tProcessTerminalStop = {
+        XWORK_TOOL_PROCESS_TERMINAL_STOP,
+        "Process Terminal Stop",
+        "Stop and remove an interactive terminal session.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_PROCESS,
+        XWORK_HOST_PROCESS_TERMINAL_STOP,
+        XWORK_SIDE_EFFECT_PROCESS_EXEC,
+        XWORK_APPROVAL_ALWAYS,
+        false
+    };
     static const xwork_tool_def tVcsStatus = {
         XWORK_TOOL_VCS_STATUS,
         "VCS Status",
@@ -58,6 +113,21 @@ static const xwork_tool_def *xwork__get_builtin_tool_def(const char *sToolId)
     }
     if ( strcmp(sToolId, XWORK_TOOL_PROCESS_EXEC) == 0 ) {
         return &tProcessExec;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_PROCESS_START_TERMINAL) == 0 ) {
+        return &tProcessStartTerminal;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_PROCESS_TERMINAL_READ) == 0 ) {
+        return &tProcessTerminalRead;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_PROCESS_TERMINAL_WRITE) == 0 ) {
+        return &tProcessTerminalWrite;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_PROCESS_TERMINAL_RESIZE) == 0 ) {
+        return &tProcessTerminalResize;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_PROCESS_TERMINAL_STOP) == 0 ) {
+        return &tProcessTerminalStop;
     }
     if ( strcmp(sToolId, XWORK_TOOL_VCS_STATUS) == 0 ) {
         return &tVcsStatus;

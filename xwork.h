@@ -31,10 +31,20 @@ extern "C" {
 #define XWORK_TOOL_FILESYSTEM_READ_TEXT "filesystem.read_text"
 #define XWORK_TOOL_FILESYSTEM_WRITE_TEXT "filesystem.write_text"
 #define XWORK_TOOL_PROCESS_EXEC "process.exec"
+#define XWORK_TOOL_PROCESS_START_TERMINAL "process.start_terminal"
+#define XWORK_TOOL_PROCESS_TERMINAL_READ "process.terminal_read"
+#define XWORK_TOOL_PROCESS_TERMINAL_WRITE "process.terminal_write"
+#define XWORK_TOOL_PROCESS_TERMINAL_RESIZE "process.terminal_resize"
+#define XWORK_TOOL_PROCESS_TERMINAL_STOP "process.terminal_stop"
 #define XWORK_TOOL_VCS_STATUS "vcs.status"
 #define XWORK_HOST_FILESYSTEM_READ_TEXT "read_text"
 #define XWORK_HOST_FILESYSTEM_WRITE_TEXT "write_text"
 #define XWORK_HOST_PROCESS_EXEC "exec"
+#define XWORK_HOST_PROCESS_START_TERMINAL "start_terminal"
+#define XWORK_HOST_PROCESS_TERMINAL_READ "terminal_read"
+#define XWORK_HOST_PROCESS_TERMINAL_WRITE "terminal_write"
+#define XWORK_HOST_PROCESS_TERMINAL_RESIZE "terminal_resize"
+#define XWORK_HOST_PROCESS_TERMINAL_STOP "terminal_stop"
 #define XWORK_HOST_VCS_STATUS "status"
 
 typedef struct xllm_runtime xllm_runtime;
@@ -506,6 +516,8 @@ typedef struct {
     bool bEnableVcsStatus;
     char *sLastOutputText;
     char *sLastVisibleSummary;
+    void *pTerminalSessions;
+    size_t iNextTerminalSessionId;
 } xwork_local_host;
 
 typedef struct {

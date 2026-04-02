@@ -228,8 +228,9 @@
 
 - `xwork_host_service` / `xwork_host_services` 已接入 runtime
 - `xwork_local_host` 已能跑通最小 filesystem/process/vcs dispatch
-- builtin host tools 已有 `filesystem.read_text` / `filesystem.write_text` / `process.exec` / `vcs.status`
+- builtin host tools 已有 `filesystem.read_text` / `filesystem.write_text` / `process.exec` / `process.start_terminal` / `process.terminal_read` / `process.terminal_write` / `process.terminal_resize` / `process.terminal_stop` / `vcs.status`
 - builtin host tool 在 orchestrator 中已能自动落最小 output/command artifact
+- builtin terminal host tool 在 orchestrator 中已能自动落最小 session command/output artifact（start/write/stop）
 - `filesystem.write_text` 最小 request contract 已支持 `mode=append`
 - `filesystem.write_text` 最小 request contract 已支持 `mode=create`
 - `filesystem.write_text` 最小 request contract 已支持 `create_dirs:true`
@@ -240,8 +241,21 @@
 - `process.exec` 最小 request contract 已支持 `max_output_bytes` 截断
 - `process.exec` 最小 request contract 已支持 `env:["KEY=VALUE"]`
 - `process.exec` 最小 request contract 已支持 `stdin_text`
+- `process.exec` 本地 host 路径已切到 `xrt subprocess`
+- `process.exec` 最小 request contract 已支持 `timeout_ms`
+- `process.exec` 最小 request contract 已支持 `timeout_stop`（`interrupt` / `terminate` / `kill` / `kill_tree`）
 - `process.exec` 最小 request contract 已支持 `allow_nonzero_exit:true`
-- `process.exec` 失败路径已保留最小结构化结果，可区分 invalid request / non-zero exit
+- `process.exec` 最小 request contract 已支持 `merge_stderr:false`
+- `process.exec` 最小 request contract 已支持 `include_events:true`
+- `process.exec` 最小 request contract 已支持 `use_terminal:true` 与可选 `terminal_cols/terminal_rows`
+- `process.exec` 最小 response contract 已显式返回 `stdout` / `stderr` 与 per-stream truncation flags
+- `process.exec` 最小 response contract 已能返回有序 `xrt subprocess` events，带 stream/kind/text/exit metadata
+- `process.exec` terminal mode 最小 response contract 已带回 `use_terminal`、terminal size、`terminal_output_captured` 与有序 lifecycle events；terminal 文本捕获仍允许平台差异
+- 本地 host 已支持 interactive terminal session：`process.start_terminal` / `process.terminal_read` / `process.terminal_write` / `process.terminal_resize` / `process.terminal_stop`
+- `process.terminal_resize` 已显式返回 `resize_applied`，使 terminal resize 可以 best-effort 降级，而不是直接打断整个 session
+- interactive terminal session state result 已显式返回 `output_text` / `output_bytes`，并带 `event_end_seq` / `has_more_events` / `event_stream_done`，调用方不必自己拆 event 或推断是否还有后续输出
+- builtin `process.exec` artifact bridge 已保留 stderr，不再只落 stdout
+- `process.exec` 失败路径已保留最小结构化结果，可区分 invalid request / timeout / non-zero exit，并带回请求 stop policy 与观察到的 stop reason
 - `process.exec` 最小 stdin contract 已会校验 configured `iMaxProcessInputBytes`
 - `process.exec` 最小 env contract 已会校验 configured `iMaxProcessEnvEntries`
 

@@ -50,14 +50,25 @@ typedef struct {
     xwork_run_snapshot tSnapshot;
 } xwork_mock_persistence_ctx;
 
+#define XWORK_TEST_STRINGIFY_INNER(x) #x
+#define XWORK_TEST_STRINGIFY(x) XWORK_TEST_STRINGIFY_INNER(x)
+
 #ifdef _WIN32
 #define XWORK_TEST_PROCESS_ENV_COMMAND "set XWORK_TEST_PROCESS_ENV"
 #define XWORK_TEST_PROCESS_ENV_EXPECTED "XWORK_TEST_PROCESS_ENV=xwork-process-env"
 #define XWORK_TEST_PROCESS_STDIN_COMMAND "more"
 #define XWORK_TEST_PROCESS_NONZERO_COMMAND_RAW \
-    "cmd /c \"echo xwork-local-process-nonzero && exit /b 3\""
+    "echo xwork-local-process-nonzero && exit /b 3"
 #define XWORK_TEST_PROCESS_NONZERO_COMMAND \
-    "cmd /c \\\"echo xwork-local-process-nonzero && exit /b 3\\\""
+    "echo xwork-local-process-nonzero && exit /b 3"
+#define XWORK_TEST_PROCESS_STDERR_COMMAND_RAW \
+    "echo xwork-local-process-stdout && echo xwork-local-process-stderr 1>&2"
+#define XWORK_TEST_PROCESS_STDERR_COMMAND XWORK_TEST_PROCESS_STDERR_COMMAND_RAW
+#define XWORK_TEST_PROCESS_TERMINAL_COMMAND "echo xwork-local-process-terminal"
+#define XWORK_TEST_PROCESS_TERMINAL_SESSION_COMMAND XWORK_TEST_PROCESS_STDIN_COMMAND
+
+#define XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "xwork-terminal-session\r\n"
+#define XWORK_TEST_PROCESS_TIMEOUT_COMMAND "ping -n 3 127.0.0.1 >nul"
 #else
 #define XWORK_TEST_PROCESS_ENV_COMMAND "printf %s \"$XWORK_TEST_PROCESS_ENV\""
 #define XWORK_TEST_PROCESS_ENV_EXPECTED "xwork-process-env"
@@ -65,12 +76,25 @@ typedef struct {
 #define XWORK_TEST_PROCESS_NONZERO_COMMAND_RAW \
     "sh -c 'printf %s xwork-local-process-nonzero; exit 3'"
 #define XWORK_TEST_PROCESS_NONZERO_COMMAND XWORK_TEST_PROCESS_NONZERO_COMMAND_RAW
+#define XWORK_TEST_PROCESS_STDERR_COMMAND_RAW \
+    "printf %s xwork-local-process-stdout; printf %s xwork-local-process-stderr >&2"
+#define XWORK_TEST_PROCESS_STDERR_COMMAND XWORK_TEST_PROCESS_STDERR_COMMAND_RAW
+#define XWORK_TEST_PROCESS_TERMINAL_COMMAND "printf %s xwork-local-process-terminal"
+#define XWORK_TEST_PROCESS_TERMINAL_SESSION_COMMAND XWORK_TEST_PROCESS_STDIN_COMMAND
+
+#define XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "xwork-terminal-session\n"
+#define XWORK_TEST_PROCESS_TIMEOUT_COMMAND "sleep 1"
 #endif
 
 #define XWORK_TEST_PROCESS_STDIN_INPUT "xwork-process-stdin\\n"
 #define XWORK_TEST_PROCESS_STDIN_EXPECTED "xwork-process-stdin"
 #define XWORK_TEST_PROCESS_NONZERO_EXPECTED "xwork-local-process-nonzero"
+#define XWORK_TEST_PROCESS_STDOUT_EXPECTED "xwork-local-process-stdout"
+#define XWORK_TEST_PROCESS_STDERR_EXPECTED "xwork-local-process-stderr"
+#define XWORK_TEST_PROCESS_TERMINAL_EXPECTED "xwork-local-process-terminal"
+#define XWORK_TEST_PROCESS_TERMINAL_SESSION_EXPECTED "xwork-terminal-session"
 #define XWORK_TEST_PROCESS_NONZERO_EXIT_CODE 3
+#define XWORK_TEST_PROCESS_TIMEOUT_MS 50
 
 static char *xwork_test_dup_cstr(const char *sText)
 {
@@ -583,6 +607,91 @@ static const char *xwork_mock_first_context_text(const xllm_request *pRequest)
     return xwork_mock_first_text(&pRequest->pContextBlocks[0].pMessages[0]);
 }
 
+static bool xwork_test_parse_json_table(const char *sJson, xvalue *ptTable)
+{
+    xvalue tValue;
+
+    if ( !ptTable ) {
+        return false;
+    }
+
+    *ptTable = NULL;
+    if ( !sJson || !sJson[0] ) {
+        return false;
+    }
+
+    tValue = xrtParseJSON((str)sJson, strlen(sJson));
+    if ( !tValue || xvoType(tValue) != XVO_DT_TABLE ) {
+        if ( tValue ) {
+            xvoUnref(tValue);
+        }
+        return false;
+    }
+
+    *ptTable = tValue;
+    return true;
+}
+
+static const char *xwork_test_json_get_text(xvalue tTable, const char *sKey)
+{
+    xvalue tValue;
+
+    if ( !tTable || !sKey ) {
+        return NULL;
+    }
+
+    tValue = xvoTableGetValue(tTable, sKey, (uint32)strlen(sKey));
+    if ( !tValue || xvoType(tValue) != XVO_DT_TEXT ) {
+        return NULL;
+    }
+    return (const char *)xvoGetText(tValue);
+}
+
+static bool xwork_test_json_get_size(xvalue tTable, const char *sKey, size_t *piValue)
+{
+    xvalue tValue;
+    int64 iValue;
+
+    if ( piValue ) {
+        *piValue = 0u;
+    }
+    if ( !tTable || !sKey || !piValue ) {
+        return false;
+    }
+
+    tValue = xvoTableGetValue(tTable, sKey, (uint32)strlen(sKey));
+    if ( !tValue || xvoType(tValue) != XVO_DT_INT ) {
+        return false;
+    }
+    iValue = xvoGetInt(tValue);
+    if ( iValue < 0 ) {
+        return false;
+    }
+
+    *piValue = (size_t)iValue;
+    return true;
+}
+
+static bool xwork_test_json_get_bool(xvalue tTable, const char *sKey, bool *pbValue)
+{
+    xvalue tValue;
+
+    if ( pbValue ) {
+        *pbValue = false;
+    }
+    if ( !tTable || !sKey || !pbValue ) {
+        return false;
+    }
+
+    tValue = xvoTableGetValue(tTable, sKey, (uint32)strlen(sKey));
+    if ( !tValue || xvoType(tValue) != XVO_DT_BOOL ) {
+        return false;
+    }
+
+    *pbValue = xvoGetBool(tValue);
+    return true;
+}
+
 static int xwork_mock_fill_response_base(
     xllm_response *pResponse,
     const char *sId,
@@ -884,6 +993,62 @@ static int32 xwork_mock_adapter_chat(
                 "\"stdin_text\":\"" XWORK_TEST_PROCESS_STDIN_INPUT "\"}"
             );
         } else if ( sInstruction &&
+                    strstr(sInstruction, "Run the local process with timeout through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-process-timeout",
+                "process.exec",
+                "{\"command\":\"" XWORK_TEST_PROCESS_TIMEOUT_COMMAND "\","
+                "\"timeout_ms\":" XWORK_TEST_STRINGIFY(XWORK_TEST_PROCESS_TIMEOUT_MS) "}"
+            );
+        } else if ( sInstruction &&
+                    strstr(sInstruction, "Run the local process with kill-tree timeout through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-process-timeout-kill-tree",
+                "process.exec",
+                "{\"command\":\"" XWORK_TEST_PROCESS_TIMEOUT_COMMAND "\","
+                "\"timeout_ms\":" XWORK_TEST_STRINGIFY(XWORK_TEST_PROCESS_TIMEOUT_MS) ","
+                "\"timeout_stop\":\"kill_tree\"}"
+            );
+        } else if ( sInstruction &&
+                    strstr(sInstruction, "Run the local process with separate stderr through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-process-stderr",
+                "process.exec",
+                "{\"command\":\"" XWORK_TEST_PROCESS_STDERR_COMMAND "\","
+                "\"merge_stderr\":false}"
+            );
+        } else if ( sInstruction &&
+                    strstr(sInstruction, "Run the local process with ordered events through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-process-events",
+                "process.exec",
+                "{\"command\":\"" XWORK_TEST_PROCESS_STDERR_COMMAND "\","
+                "\"merge_stderr\":false,\"include_events\":true}"
+            );
+        } else if ( sInstruction &&
+                    strstr(sInstruction, "Run the local process in terminal mode through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-process-terminal",
+                "process.exec",
+                "{\"command\":\"" XWORK_TEST_PROCESS_TERMINAL_COMMAND "\","
+                "\"use_terminal\":true,\"include_events\":true,"
+                "\"terminal_cols\":100,\"terminal_rows\":32}"
+            );
+        } else if ( sInstruction &&
+                    strstr(sInstruction, "Run the local interactive terminal session through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-process-terminal-session-start",
+                XWORK_TOOL_PROCESS_START_TERMINAL,
+                "{\"command\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_COMMAND "\","
+                "\"terminal_cols\":100,\"terminal_rows\":32}"
+            );
+        } else if ( sInstruction &&
                     strstr(sInstruction, "Run the local process with non-zero exit through host service.") != NULL ) {
             *ppResponse = xwork_mock_build_tool_call_response(
                 pProfile->sId,
@@ -909,13 +1074,22 @@ static int32 xwork_mock_adapter_chat(
             );
         }
     } else {
-        iAssistantIndex = bHasInlineSystemMessage ? 2u : 1u;
-        iToolIndex = bHasInlineSystemMessage ? 3u : 2u;
-        if ( pRequest->iMessageCount != (bHasInlineSystemMessage ? 4u : 3u) ) {
+        xvalue tToolTable = NULL;
+        const char *sSessionIdText = NULL;
+        char *sNextArgsJson = NULL;
+        size_t iParsedNextAfterSeq = 0u;
+        bool bDone = false;
+
+        if ( pRequest->iMessageCount < (bHasInlineSystemMessage ? 4u : 3u) ) {
             return XRT_NET_ERROR;
         }
+        iToolIndex = pRequest->iMessageCount - 1u;
+        iAssistantIndex = iToolIndex - 1u;
         if ( pRequest->pMessages[iAssistantIndex].eRole != XLLM_ROLE_ASSISTANT ||
              pRequest->pMessages[iToolIndex].eRole != XLLM_ROLE_TOOL ) {
+            return XRT_NET_ERROR;
+        }
+        if ( pRequest->pMessages[iAssistantIndex].iToolCallCount == 0u ) {
             return XRT_NET_ERROR;
         }
         sToolId = pRequest->pMessages[iAssistantIndex].pToolCalls[0].sToolId;
@@ -970,12 +1144,227 @@ static int32 xwork_mock_adapter_chat(
                     "Host service write completed."
                 );
             }
+        } else if ( strcmp(sToolId, XWORK_TOOL_PROCESS_START_TERMINAL) == 0 ) {
+            size_t iParsedEventEndSeq = 0u;
+            bool bParsedHasMoreEvents = false;
+            bool bParsedEventStreamDone = false;
+
+            if ( !xwork_test_parse_json_table(sToolText, &tToolTable) ) {
+                return XRT_NET_ERROR;
+            }
+            sSessionIdText = xwork_test_json_get_text(tToolTable, "session_id");
+            if ( strstr(sToolText, "\"ok\":true") == NULL ||
+                 !sSessionIdText ||
+                 strstr(sToolText, "\"terminal_output_captured\":") == NULL ||
+                 strstr(sToolText, "\"output_text\":\"") == NULL ||
+                 strstr(sToolText, "\"output_bytes\":") == NULL ||
+                 strstr(sToolText, "\"event_count\":") == NULL ||
+                 strstr(sToolText, "\"events\":[") == NULL ||
+                 !xwork_test_json_get_size(tToolTable, "next_after_seq", &iParsedNextAfterSeq) ||
+                 !xwork_test_json_get_size(tToolTable, "event_end_seq", &iParsedEventEndSeq) ||
+                 !xwork_test_json_get_bool(tToolTable, "has_more_events", &bParsedHasMoreEvents) ||
+                 !xwork_test_json_get_bool(tToolTable, "event_stream_done", &bParsedEventStreamDone) ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
+            if ( iParsedEventEndSeq < iParsedNextAfterSeq || bParsedEventStreamDone ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
+            sNextArgsJson = xwork_test_dup_cstr(
+                "{\"terminal_cols\":140,\"terminal_rows\":40}"
+            );
+            free(sNextArgsJson);
+            sNextArgsJson = xwork__dup_printf(
+                "{\"session_id\":\"%s\",\"terminal_cols\":140,\"terminal_rows\":40}",
+                sSessionIdText
+            );
+            xvoUnref(tToolTable);
+            if ( !sNextArgsJson ) {
+                return XRT_NET_ERROR;
+            }
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-terminal-resize",
+                XWORK_TOOL_PROCESS_TERMINAL_RESIZE,
+                sNextArgsJson
+            );
+            free(sNextArgsJson);
+        } else if ( strcmp(sToolId, XWORK_TOOL_PROCESS_TERMINAL_RESIZE) == 0 ) {
+            if ( !xwork_test_parse_json_table(sToolText, &tToolTable) ) {
+                return XRT_NET_ERROR;
+            }
+            sSessionIdText = xwork_test_json_get_text(tToolTable, "session_id");
+            if ( strstr(sToolText, "\"ok\":true") == NULL ||
+                 !sSessionIdText ||
+                 strstr(sToolText, "\"resize_applied\":") == NULL ||
+                 strstr(sToolText, "\"terminal_cols\":140") == NULL ||
+                 strstr(sToolText, "\"terminal_rows\":40") == NULL ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
+            sNextArgsJson = xwork__dup_printf(
+                "{\"session_id\":\"%s\",\"input_text\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "\"}",
+                sSessionIdText
+            );
+            xvoUnref(tToolTable);
+            if ( !sNextArgsJson ) {
+                return XRT_NET_ERROR;
+            }
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-terminal-write",
+                XWORK_TOOL_PROCESS_TERMINAL_WRITE,
+                sNextArgsJson
+            );
+            free(sNextArgsJson);
+        } else if ( strcmp(sToolId, XWORK_TOOL_PROCESS_TERMINAL_WRITE) == 0 ) {
+            if ( !xwork_test_parse_json_table(sToolText, &tToolTable) ) {
+                return XRT_NET_ERROR;
+            }
+            sSessionIdText = xwork_test_json_get_text(tToolTable, "session_id");
+            if ( strstr(sToolText, "\"ok\":true") == NULL ||
+                 !sSessionIdText ||
+                 strstr(sToolText, "\"bytes_written\":") == NULL ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
+            sNextArgsJson = xwork__dup_printf(
+                "{\"session_id\":\"%s\"}",
+                sSessionIdText
+            );
+            xvoUnref(tToolTable);
+            if ( !sNextArgsJson ) {
+                return XRT_NET_ERROR;
+            }
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-terminal-read",
+                XWORK_TOOL_PROCESS_TERMINAL_READ,
+                sNextArgsJson
+            );
+            free(sNextArgsJson);
+        } else if ( strcmp(sToolId, XWORK_TOOL_PROCESS_TERMINAL_READ) == 0 ) {
+            size_t iParsedNextAfterSeq = 0u;
+            size_t iParsedEventEndSeq = 0u;
+            bool bParsedHasMoreEvents = false;
+            bool bParsedEventStreamDone = false;
+
+            if ( !xwork_test_parse_json_table(sToolText, &tToolTable) ) {
+                return XRT_NET_ERROR;
+            }
+            sSessionIdText = xwork_test_json_get_text(tToolTable, "session_id");
+            bDone = xwork_test_json_get_bool(tToolTable, "done", &bDone) && bDone;
+            if ( strstr(sToolText, "\"ok\":true") == NULL ||
+                 !sSessionIdText ||
+                 strstr(sToolText, "\"terminal_output_captured\":") == NULL ||
+                 strstr(sToolText, "\"output_text\":\"") == NULL ||
+                 strstr(sToolText, "\"output_bytes\":") == NULL ||
+                 strstr(sToolText, "\"event_count\":") == NULL ||
+                 strstr(sToolText, "\"events\":[") == NULL ||
+                 !xwork_test_json_get_size(tToolTable, "next_after_seq", &iParsedNextAfterSeq) ||
+                 !xwork_test_json_get_size(tToolTable, "event_end_seq", &iParsedEventEndSeq) ||
+                 !xwork_test_json_get_bool(tToolTable, "has_more_events", &bParsedHasMoreEvents) ||
+                 !xwork_test_json_get_bool(tToolTable, "event_stream_done", &bParsedEventStreamDone) ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
+            if ( iParsedEventEndSeq < iParsedNextAfterSeq ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
+            if ( bDone && !bParsedEventStreamDone ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
+            if ( bDone && strstr(sToolText, "\"kind\":\"exit\"") == NULL ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
+            sNextArgsJson = xwork__dup_printf(
+                "{\"session_id\":\"%s\"}",
+                sSessionIdText
+            );
+            xvoUnref(tToolTable);
+            if ( !sNextArgsJson ) {
+                return XRT_NET_ERROR;
+            }
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-terminal-stop",
+                XWORK_TOOL_PROCESS_TERMINAL_STOP,
+                sNextArgsJson
+            );
+            free(sNextArgsJson);
+        } else if ( strcmp(sToolId, XWORK_TOOL_PROCESS_TERMINAL_STOP) == 0 ) {
+            if ( strstr(sToolText, "\"ok\":true") == NULL ||
+                 strstr(sToolText, "\"terminal_output_captured\":") == NULL ||
+                 strstr(sToolText, "\"output_text\":\"") == NULL ||
+                 strstr(sToolText, "\"output_bytes\":") == NULL ||
+                 strstr(sToolText, "\"event_end_seq\":") == NULL ||
+                 strstr(sToolText, "\"has_more_events\":") == NULL ||
+                 strstr(sToolText, "\"event_stream_done\":true") == NULL ||
+                 strstr(sToolText, "\"removed\":true") == NULL ) {
+                return XRT_NET_ERROR;
+            }
+            *ppResponse = xwork_mock_build_final_response(
+                pProfile->sId,
+                "Host service terminal session completed."
+            );
         } else if ( strcmp(sToolId, "process.exec") == 0 ) {
             if ( strstr(sToolText, "\"ok\":true") == NULL ||
                  strstr(sToolText, "\"stdout\":\"") == NULL ) {
                 return XRT_NET_ERROR;
             }
-            if ( strstr(sToolText, "\"truncated\":true") != NULL ) {
+            if ( strstr(sToolText, "\"use_terminal\":true") != NULL ) {
+                if ( strstr(sToolText, "\"include_events\":true") == NULL ||
+                     strstr(sToolText, "\"terminal_output_captured\":") == NULL ||
+                     strstr(sToolText, "\"terminal_cols\":100") == NULL ||
+                     strstr(sToolText, "\"terminal_rows\":32") == NULL ||
+                     strstr(sToolText, "\"event_count\":") == NULL ||
+                     strstr(sToolText, "\"events\":[") == NULL ||
+                     strstr(sToolText, "\"kind\":\"start\"") == NULL ||
+                     strstr(sToolText, "\"kind\":\"exit\"") == NULL ) {
+                    return XRT_NET_ERROR;
+                }
+                if ( strstr(sToolText, "\"terminal_output_captured\":true") != NULL ) {
+                    if ( strstr(sToolText, "\"kind\":\"output\"") == NULL ||
+                         strstr(sToolText, "\"stream\":\"terminal\"") == NULL ||
+                         strstr(sToolText, XWORK_TEST_PROCESS_TERMINAL_EXPECTED) == NULL ) {
+                        return XRT_NET_ERROR;
+                    }
+                }
+                *ppResponse = xwork_mock_build_final_response(
+                    pProfile->sId,
+                    "Host service process terminal completed."
+                );
+            } else if ( strstr(sToolText, "\"include_events\":true") != NULL ) {
+                if ( strstr(sToolText, "\"event_count\":") == NULL ||
+                     strstr(sToolText, "\"events\":[") == NULL ||
+                     strstr(sToolText, "\"kind\":\"start\"") == NULL ||
+                     strstr(sToolText, "\"kind\":\"output\"") == NULL ||
+                     strstr(sToolText, "\"kind\":\"exit\"") == NULL ||
+                     strstr(sToolText, "\"stream\":\"stdout\"") == NULL ||
+                     strstr(sToolText, "\"stream\":\"stderr\"") == NULL ||
+                     strstr(sToolText, XWORK_TEST_PROCESS_STDOUT_EXPECTED) == NULL ||
+                     strstr(sToolText, XWORK_TEST_PROCESS_STDERR_EXPECTED) == NULL ) {
+                    return XRT_NET_ERROR;
+                }
+                *ppResponse = xwork_mock_build_final_response(
+                    pProfile->sId,
+                    "Host service process events completed."
+                );
+            } else if ( strstr(sToolText, XWORK_TEST_PROCESS_STDERR_EXPECTED) != NULL ) {
+                if ( strstr(sToolText, "\"merge_stderr\":false") == NULL ||
+                     strstr(sToolText, "\"stderr\":\"") == NULL ||
+                     strstr(sToolText, XWORK_TEST_PROCESS_STDOUT_EXPECTED) == NULL ) {
+                    return XRT_NET_ERROR;
+                }
+                *ppResponse = xwork_mock_build_final_response(
+                    pProfile->sId,
+                    "Host service process stderr completed."
+                );
+            } else if ( strstr(sToolText, "\"truncated\":true") != NULL ) {
                 if ( strstr(sToolText, "\"stdout\":\"xwork-local-\"") == NULL ) {
                     return XRT_NET_ERROR;
                 }
@@ -1239,6 +1628,7 @@ int main(void)
     char *sPendingBeforeToolCheckpointId = NULL;
     char *sFileBeforeToolCheckpointId = NULL;
     char *sFirstArtifactId = NULL;
+    bool bTerminalOutputCaptured = false;
     size_t iSavedMaxProcessInputBytes = 0u;
     size_t iSavedMaxProcessEnvEntries = 0u;
     char sFilePersistenceRoot[256];
@@ -1616,6 +2006,26 @@ int main(void)
     pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_PROCESS_EXEC);
     assert(pBuiltinToolDef != NULL);
     assert(pBuiltinToolDef->eSideEffect == XWORK_SIDE_EFFECT_PROCESS_EXEC);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_PROCESS_START_TERMINAL);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_PROCESS_START_TERMINAL) == 0);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_PROCESS_TERMINAL_READ);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_PROCESS_TERMINAL_READ) == 0);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_PROCESS_TERMINAL_WRITE);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_PROCESS_TERMINAL_WRITE) == 0);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_PROCESS_TERMINAL_RESIZE);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_PROCESS_TERMINAL_RESIZE) == 0);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_PROCESS_TERMINAL_STOP);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_PROCESS_TERMINAL_STOP) == 0);
     assert(
         xwork_runtime_register_builtin_tool(
             pRuntime,
@@ -1937,6 +2347,36 @@ int main(void)
     assert(
         xwork_runtime_register_builtin_tool(
             pLocalHostRuntime,
+            XWORK_TOOL_PROCESS_START_TERMINAL
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_PROCESS_TERMINAL_READ
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_PROCESS_TERMINAL_WRITE
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_PROCESS_TERMINAL_RESIZE
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_PROCESS_TERMINAL_STOP
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
             XWORK_TOOL_VCS_STATUS
         ) == XWORK_OK
     );
@@ -1947,6 +2387,13 @@ int main(void)
     assert(pBuiltinToolDef != NULL);
     assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
     assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_PROCESS_EXEC) == 0);
+    pBuiltinToolDef = xwork_runtime_find_tool(
+        pLocalHostRuntime,
+        XWORK_TOOL_PROCESS_START_TERMINAL
+    );
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_PROCESS_START_TERMINAL) == 0);
 
     assert(
         xwork_runtime_invoke_host_service(
@@ -2282,6 +2729,302 @@ int main(void)
     assert(strstr(tLocalHostResult.sOutputText, XWORK_TEST_PROCESS_STDIN_EXPECTED) != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "\"stdin_bytes\":20") != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "\"truncated\":false") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_PROCESS,
+            XWORK_HOST_PROCESS_EXEC,
+            "{\"command\":\"" XWORK_TEST_PROCESS_STDERR_COMMAND "\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "process.exec ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"merge_stderr\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"stderr\":\"\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, XWORK_TEST_PROCESS_STDOUT_EXPECTED) != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, XWORK_TEST_PROCESS_STDERR_EXPECTED) != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_PROCESS,
+            XWORK_HOST_PROCESS_EXEC,
+            "{\"command\":\"" XWORK_TEST_PROCESS_STDERR_COMMAND "\","
+            "\"merge_stderr\":false}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "process.exec ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"merge_stderr\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"stdout\":\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, XWORK_TEST_PROCESS_STDOUT_EXPECTED) != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"stderr\":\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, XWORK_TEST_PROCESS_STDERR_EXPECTED) != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"stdout_truncated\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"stderr_truncated\":false") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_PROCESS,
+            XWORK_HOST_PROCESS_EXEC,
+            "{\"command\":\"" XWORK_TEST_PROCESS_STDERR_COMMAND "\","
+            "\"merge_stderr\":false,\"include_events\":true}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "process.exec ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"include_events\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"event_count\":") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"events\":[") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"kind\":\"start\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"kind\":\"output\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"kind\":\"exit\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"stream\":\"stdout\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"stream\":\"stderr\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"text_truncated\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"exit_kind\":\"normal\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, XWORK_TEST_PROCESS_STDOUT_EXPECTED) != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, XWORK_TEST_PROCESS_STDERR_EXPECTED) != NULL);
+    if ( xrtProcessTerminalSupported() ) {
+        assert(
+            xwork_runtime_invoke_host_service(
+                pLocalHostRuntime,
+                XWORK_HOST_PROCESS,
+                XWORK_HOST_PROCESS_EXEC,
+                "{\"command\":\"" XWORK_TEST_PROCESS_TERMINAL_COMMAND "\","
+                "\"use_terminal\":true,\"include_events\":true,"
+                "\"terminal_cols\":100,\"terminal_rows\":32}",
+                &tLocalHostResult
+            ) == XWORK_OK
+        );
+        assert(strcmp(tLocalHostResult.sVisibleSummary, "process.exec ok") == 0);
+        assert(tLocalHostResult.sOutputText != NULL);
+        assert(strstr(tLocalHostResult.sOutputText, "\"use_terminal\":true") != NULL);
+        assert(strstr(tLocalHostResult.sOutputText, "\"terminal_cols\":100") != NULL);
+        assert(strstr(tLocalHostResult.sOutputText, "\"terminal_rows\":32") != NULL);
+        assert(strstr(tLocalHostResult.sOutputText, "\"terminal_output_captured\":") != NULL);
+        assert(strstr(tLocalHostResult.sOutputText, "\"include_events\":true") != NULL);
+        assert(strstr(tLocalHostResult.sOutputText, "\"event_count\":") != NULL);
+        assert(strstr(tLocalHostResult.sOutputText, "\"events\":[") != NULL);
+        assert(strstr(tLocalHostResult.sOutputText, "\"kind\":\"start\"") != NULL);
+        assert(strstr(tLocalHostResult.sOutputText, "\"kind\":\"exit\"") != NULL);
+        if ( strstr(tLocalHostResult.sOutputText, "\"terminal_output_captured\":true") != NULL ) {
+            assert(strstr(tLocalHostResult.sOutputText, "\"kind\":\"output\"") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"stream\":\"terminal\"") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, XWORK_TEST_PROCESS_TERMINAL_EXPECTED) != NULL);
+        }
+
+        {
+            xvalue tTerminalTable = NULL;
+            const char *sTerminalSessionId = NULL;
+            char *sOwnedTerminalSessionId = NULL;
+            char *sTerminalRequestJson = NULL;
+            size_t iTerminalNextAfterSeq = 0u;
+            size_t iTerminalEventEndSeq = 0u;
+            bool bTerminalHasMoreEvents = false;
+            bool bTerminalDone = false;
+            bool bTerminalEventStreamDone = false;
+            size_t iPoll;
+
+            assert(
+                xwork_runtime_invoke_host_service(
+                    pLocalHostRuntime,
+                    XWORK_HOST_PROCESS,
+                    XWORK_HOST_PROCESS_START_TERMINAL,
+                    "{\"command\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_COMMAND "\","
+                    "\"terminal_cols\":100,\"terminal_rows\":32}",
+                    &tLocalHostResult
+                ) == XWORK_OK
+            );
+            assert(strcmp(tLocalHostResult.sVisibleSummary, "process.start_terminal ok") == 0);
+            assert(tLocalHostResult.sOutputText != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"ok\":true") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"terminal_output_captured\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"output_text\":\"") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"output_bytes\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"event_count\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"events\":[") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"event_end_seq\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"has_more_events\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"event_stream_done\":") != NULL);
+            assert(xwork_test_parse_json_table(tLocalHostResult.sOutputText, &tTerminalTable));
+            sTerminalSessionId = xwork_test_json_get_text(tTerminalTable, "session_id");
+            assert(sTerminalSessionId != NULL);
+            sOwnedTerminalSessionId = xwork__dup_cstr(sTerminalSessionId);
+            assert(sOwnedTerminalSessionId != NULL);
+            sTerminalSessionId = sOwnedTerminalSessionId;
+            assert(xwork_test_json_get_size(tTerminalTable, "next_after_seq", &iTerminalNextAfterSeq));
+            assert(xwork_test_json_get_size(tTerminalTable, "event_end_seq", &iTerminalEventEndSeq));
+            assert(xwork_test_json_get_bool(tTerminalTable, "has_more_events", &bTerminalHasMoreEvents));
+            assert(xwork_test_json_get_bool(tTerminalTable, "event_stream_done", &bTerminalEventStreamDone));
+            assert(iTerminalEventEndSeq >= iTerminalNextAfterSeq);
+            assert(!bTerminalEventStreamDone);
+            xvoUnref(tTerminalTable);
+            tTerminalTable = NULL;
+
+            sTerminalRequestJson = xwork__dup_printf(
+                "{\"session_id\":\"%s\",\"terminal_cols\":140,\"terminal_rows\":40}",
+                sTerminalSessionId
+            );
+            assert(sTerminalRequestJson != NULL);
+            assert(
+                xwork_runtime_invoke_host_service(
+                    pLocalHostRuntime,
+                    XWORK_HOST_PROCESS,
+                    XWORK_HOST_PROCESS_TERMINAL_RESIZE,
+                    sTerminalRequestJson,
+                    &tLocalHostResult
+                ) == XWORK_OK
+            );
+            free(sTerminalRequestJson);
+            sTerminalRequestJson = NULL;
+            assert(strcmp(tLocalHostResult.sVisibleSummary, "process.terminal_resize ok") == 0);
+            assert(strstr(tLocalHostResult.sOutputText, "\"resize_applied\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"terminal_cols\":140") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"terminal_rows\":40") != NULL);
+
+            sTerminalRequestJson = xwork__dup_printf(
+                "{\"session_id\":\"%s\",\"input_text\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "\"}",
+                sTerminalSessionId
+            );
+            assert(sTerminalRequestJson != NULL);
+            assert(
+                xwork_runtime_invoke_host_service(
+                    pLocalHostRuntime,
+                    XWORK_HOST_PROCESS,
+                    XWORK_HOST_PROCESS_TERMINAL_WRITE,
+                    sTerminalRequestJson,
+                    &tLocalHostResult
+                ) == XWORK_OK
+            );
+            free(sTerminalRequestJson);
+            sTerminalRequestJson = NULL;
+            assert(strcmp(tLocalHostResult.sVisibleSummary, "process.terminal_write ok") == 0);
+            assert(strstr(tLocalHostResult.sOutputText, "\"bytes_written\":") != NULL);
+
+            for ( iPoll = 0u; iPoll < 5u; ++iPoll ) {
+                sTerminalRequestJson = xwork__dup_printf(
+                    iTerminalNextAfterSeq > 0u
+                        ? "{\"session_id\":\"%s\",\"after_seq\":%zu}"
+                        : "{\"session_id\":\"%s\"}",
+                    sTerminalSessionId,
+                    iTerminalNextAfterSeq
+                );
+                assert(sTerminalRequestJson != NULL);
+                assert(
+                    xwork_runtime_invoke_host_service(
+                        pLocalHostRuntime,
+                        XWORK_HOST_PROCESS,
+                        XWORK_HOST_PROCESS_TERMINAL_READ,
+                        sTerminalRequestJson,
+                        &tLocalHostResult
+                    ) == XWORK_OK
+                );
+                free(sTerminalRequestJson);
+                sTerminalRequestJson = NULL;
+                assert(strcmp(tLocalHostResult.sVisibleSummary, "process.terminal_read ok") == 0);
+                assert(strstr(tLocalHostResult.sOutputText, "\"terminal_output_captured\":") != NULL);
+                assert(strstr(tLocalHostResult.sOutputText, "\"output_text\":\"") != NULL);
+                assert(strstr(tLocalHostResult.sOutputText, "\"output_bytes\":") != NULL);
+                assert(strstr(tLocalHostResult.sOutputText, "\"event_end_seq\":") != NULL);
+                assert(strstr(tLocalHostResult.sOutputText, "\"has_more_events\":") != NULL);
+                assert(strstr(tLocalHostResult.sOutputText, "\"event_stream_done\":") != NULL);
+                assert(xwork_test_parse_json_table(tLocalHostResult.sOutputText, &tTerminalTable));
+                assert(xwork_test_json_get_bool(tTerminalTable, "done", &bTerminalDone));
+                assert(xwork_test_json_get_size(tTerminalTable, "next_after_seq", &iTerminalNextAfterSeq));
+                assert(xwork_test_json_get_size(tTerminalTable, "event_end_seq", &iTerminalEventEndSeq));
+                assert(xwork_test_json_get_bool(tTerminalTable, "has_more_events", &bTerminalHasMoreEvents));
+                assert(xwork_test_json_get_bool(tTerminalTable, "event_stream_done", &bTerminalEventStreamDone));
+                assert(iTerminalEventEndSeq >= iTerminalNextAfterSeq);
+                if ( bTerminalHasMoreEvents ) {
+                    assert(iTerminalEventEndSeq > iTerminalNextAfterSeq);
+                }
+                xvoUnref(tTerminalTable);
+                tTerminalTable = NULL;
+                if ( bTerminalDone ) {
+                    assert(bTerminalEventStreamDone);
+                    break;
+                }
+                xrtSleep(20u);
+            }
+            assert(strstr(tLocalHostResult.sOutputText, "\"event_count\":") != NULL);
+
+            sTerminalRequestJson = xwork__dup_printf(
+                "{\"session_id\":\"%s\"}",
+                sTerminalSessionId
+            );
+            assert(sTerminalRequestJson != NULL);
+            assert(
+                xwork_runtime_invoke_host_service(
+                    pLocalHostRuntime,
+                    XWORK_HOST_PROCESS,
+                    XWORK_HOST_PROCESS_TERMINAL_STOP,
+                    sTerminalRequestJson,
+                    &tLocalHostResult
+                ) == XWORK_OK
+            );
+            free(sTerminalRequestJson);
+            sTerminalRequestJson = NULL;
+            assert(strcmp(tLocalHostResult.sVisibleSummary, "process.terminal_stop ok") == 0);
+            assert(strstr(tLocalHostResult.sOutputText, "\"terminal_output_captured\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"output_text\":\"") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"output_bytes\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"event_end_seq\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"has_more_events\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"event_stream_done\":true") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"removed\":true") != NULL);
+
+            sTerminalRequestJson = xwork__dup_printf(
+                "{\"session_id\":\"%s\"}",
+                sTerminalSessionId
+            );
+            assert(sTerminalRequestJson != NULL);
+            assert(
+                xwork_runtime_invoke_host_service(
+                    pLocalHostRuntime,
+                    XWORK_HOST_PROCESS,
+                    XWORK_HOST_PROCESS_TERMINAL_READ,
+                    sTerminalRequestJson,
+                    &tLocalHostResult
+                ) == XWORK_ERROR_NOT_FOUND
+            );
+            free(sTerminalRequestJson);
+            sTerminalRequestJson = NULL;
+            assert(strcmp(tLocalHostResult.sVisibleSummary, "process.terminal_read failed") == 0);
+            assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"not_found\"") != NULL);
+            free(sOwnedTerminalSessionId);
+        }
+    } else {
+        assert(
+            xwork_runtime_invoke_host_service(
+                pLocalHostRuntime,
+                XWORK_HOST_PROCESS,
+                XWORK_HOST_PROCESS_EXEC,
+                "{\"command\":\"" XWORK_TEST_PROCESS_TERMINAL_COMMAND "\","
+                "\"use_terminal\":true,\"include_events\":true,"
+                "\"terminal_cols\":100,\"terminal_rows\":32}",
+                &tLocalHostResult
+            ) == XWORK_ERROR_UNSUPPORTED
+        );
+        assert(
+            strcmp(
+                tLocalHostResult.sVisibleSummary,
+                "process.exec terminal mode unsupported"
+            ) == 0
+        );
+        assert(tLocalHostResult.sOutputText != NULL);
+        assert(strstr(tLocalHostResult.sOutputText, "\"ok\":false") != NULL);
+        assert(strstr(tLocalHostResult.sOutputText, "\"use_terminal\":true") != NULL);
+        assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"unsupported\"") != NULL);
+        assert(
+            strstr(
+                tLocalHostResult.sOutputText,
+                "\"error\":\"terminal mode is not supported on this platform\""
+            ) != NULL
+        );
+    }
     iSavedMaxProcessInputBytes = tLocalHost.iMaxProcessInputBytes;
     tLocalHost.iMaxProcessInputBytes = 8u;
     assert(
@@ -2310,6 +3053,84 @@ int main(void)
         ) != NULL
     );
     tLocalHost.iMaxProcessInputBytes = iSavedMaxProcessInputBytes;
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_PROCESS,
+            XWORK_HOST_PROCESS_EXEC,
+            "{\"command\":\"echo xwork-local-process-stderr-flag\","
+            "\"merge_stderr\":\"bogus\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_INVALID_ARGUMENT
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "process.exec invalid request") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"invalid_request\"") != NULL);
+    assert(
+        strstr(
+            tLocalHostResult.sOutputText,
+            "\"error\":\"merge_stderr must be boolean\""
+        ) != NULL
+    );
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_PROCESS,
+            XWORK_HOST_PROCESS_EXEC,
+            "{\"command\":\"" XWORK_TEST_PROCESS_TIMEOUT_COMMAND "\","
+            "\"timeout_ms\":" XWORK_TEST_STRINGIFY(XWORK_TEST_PROCESS_TIMEOUT_MS) "}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_EXTERNAL_FAILURE
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "process.exec timed out") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"ok\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"timeout\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"timeout_ms\":50") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"timed_out\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"timeout_stop\":\"interrupt\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"stop_reason\":\"") != NULL);
+    assert(
+        strstr(
+            tLocalHostResult.sOutputText,
+            "\"error\":\"process exceeded timeout_ms\""
+        ) != NULL
+    );
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_PROCESS,
+            XWORK_HOST_PROCESS_EXEC,
+            "{\"command\":\"" XWORK_TEST_PROCESS_TIMEOUT_COMMAND "\","
+            "\"timeout_ms\":" XWORK_TEST_STRINGIFY(XWORK_TEST_PROCESS_TIMEOUT_MS) ","
+            "\"timeout_stop\":\"kill_tree\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_EXTERNAL_FAILURE
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "process.exec timed out") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"timeout_stop\":\"kill_tree\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"stop_reason\":\"") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_PROCESS,
+            XWORK_HOST_PROCESS_EXEC,
+            "{\"command\":\"echo xwork-local-process-timeout-stop\","
+            "\"timeout_ms\":" XWORK_TEST_STRINGIFY(XWORK_TEST_PROCESS_TIMEOUT_MS) ","
+            "\"timeout_stop\":\"bogus\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_INVALID_ARGUMENT
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "process.exec invalid request") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"invalid_request\"") != NULL);
+    assert(
+        strstr(
+            tLocalHostResult.sOutputText,
+            "\"error\":\"timeout_stop must be one of interrupt, terminate, kill, kill_tree\""
+        ) != NULL
+    );
     assert(
         xwork_runtime_invoke_host_service(
             pLocalHostRuntime,
@@ -2814,6 +3635,246 @@ int main(void)
     xwork_artifact_reset(&tArtifact);
     xwork_run_destroy(pLocalHostRun);
     pLocalHostRun = NULL;
+    if ( xrtProcessTerminalSupported() ) {
+        tAdapterCtx.iTurnCount = 0;
+        asWorkspaceIds[0] = "local-host-main";
+        xwork_run_options_init(&tRunOptions);
+        xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+        tRunOptions.sRunId = "run-local-process-terminal-tool";
+        tRunOptions.sInstruction = "Run the local process in terminal mode through host service.";
+        tRunOptions.sLlmProfileId = "mock-profile";
+        tRunOptions.sSessionProfileId = "mock-session";
+        tRunOptions.psWorkspaceIds = asWorkspaceIds;
+        tRunOptions.iWorkspaceCount = 1u;
+        assert(
+            xwork_run_create(
+                pLocalHostRuntime,
+                &tRunOptions,
+                &pLocalHostRun
+            ) == XWORK_OK
+        );
+        xwork_orchestrator_options_init(&tExecOptions);
+        tExecOptions.iMaxTurns = 3u;
+        tExecOptions.bAutoApprove = true;
+        assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_OK);
+        assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+        assert(
+            strcmp(
+                xwork_run_get_last_output_text(pLocalHostRun),
+                "Host service process terminal completed."
+            ) == 0
+        );
+        assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+        assert(tRunSnapshot.sLastToolResultText != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"use_terminal\":true") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"terminal_cols\":100") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"terminal_rows\":32") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"terminal_output_captured\":") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"event_count\":") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"kind\":\"start\"") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"kind\":\"exit\"") != NULL);
+        bTerminalOutputCaptured =
+            strstr(tRunSnapshot.sLastToolResultText, "\"terminal_output_captured\":true") != NULL;
+        if ( bTerminalOutputCaptured ) {
+            assert(strstr(tRunSnapshot.sLastToolResultText, "\"kind\":\"output\"") != NULL);
+            assert(strstr(tRunSnapshot.sLastToolResultText, "\"stream\":\"terminal\"") != NULL);
+            assert(strstr(tRunSnapshot.sLastToolResultText, XWORK_TEST_PROCESS_TERMINAL_EXPECTED) != NULL);
+        }
+        xwork_run_snapshot_reset(&tRunSnapshot);
+        assert(xwork_run_get_artifact_count(pLocalHostRun) == 1u);
+        xwork_artifact_reset(&tArtifact);
+        assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+        assert(tArtifact.eKind == XWORK_ARTIFACT_COMMAND);
+        assert(strcmp(tArtifact.sName, "process.exec.txt") == 0);
+        assert(strcmp(tArtifact.sCommandText, XWORK_TEST_PROCESS_TERMINAL_COMMAND) == 0);
+        assert(tArtifact.sStorageRef != NULL);
+        assert(strcmp(tArtifact.sStorageRef, ".") == 0);
+        assert(tArtifact.sContentText != NULL);
+        if ( bTerminalOutputCaptured ) {
+            assert(strstr(tArtifact.sContentText, XWORK_TEST_PROCESS_TERMINAL_EXPECTED) != NULL);
+        } else {
+            assert(strcmp(tArtifact.sContentText, "") == 0);
+        }
+        assert(tArtifact.bHasExitCode);
+        assert(tArtifact.iExitCode == 0);
+        xwork_artifact_reset(&tArtifact);
+        xwork_run_destroy(pLocalHostRun);
+        pLocalHostRun = NULL;
+
+        tAdapterCtx.iTurnCount = 0;
+        asWorkspaceIds[0] = "local-host-main";
+        xwork_run_options_init(&tRunOptions);
+        xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+        tRunOptions.sRunId = "run-local-terminal-session-tool";
+        tRunOptions.sInstruction = "Run the local interactive terminal session through host service.";
+        tRunOptions.sLlmProfileId = "mock-profile";
+        tRunOptions.sSessionProfileId = "mock-session";
+        tRunOptions.psWorkspaceIds = asWorkspaceIds;
+        tRunOptions.iWorkspaceCount = 1u;
+        assert(
+            xwork_run_create(
+                pLocalHostRuntime,
+                &tRunOptions,
+                &pLocalHostRun
+            ) == XWORK_OK
+        );
+        xwork_orchestrator_options_init(&tExecOptions);
+        tExecOptions.iMaxTurns = 8u;
+        tExecOptions.bAutoApprove = true;
+        assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_OK);
+        assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+        assert(
+            strcmp(
+                xwork_run_get_last_output_text(pLocalHostRun),
+                "Host service terminal session completed."
+            ) == 0
+        );
+        assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+        assert(tRunSnapshot.sLastToolResultText != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"ok\":true") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"removed\":true") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"terminal_output_captured\":") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"output_text\":\"") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"output_bytes\":") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"event_end_seq\":") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"has_more_events\":") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"event_stream_done\":true") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"session_id\":\"terminal-session-") != NULL);
+        bTerminalOutputCaptured =
+            strstr(
+                tRunSnapshot.sLastToolResultText,
+                "\"terminal_output_captured\":true"
+            ) != NULL;
+        xwork_run_snapshot_reset(&tRunSnapshot);
+        assert(
+            xwork_run_get_artifact_count(pLocalHostRun) ==
+            (bTerminalOutputCaptured ? 3u : 2u)
+        );
+        assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+        assert(strcmp(tArtifact.sCommandText, XWORK_TEST_PROCESS_TERMINAL_SESSION_COMMAND) == 0);
+        assert(tArtifact.sStorageRef != NULL);
+        assert(strstr(tArtifact.sStorageRef, "terminal-session-") != NULL);
+        xwork_artifact_reset(&tArtifact);
+        assert(xwork_run_get_artifact(pLocalHostRun, 1u, &tArtifact) == XWORK_OK);
+        assert(strcmp(tArtifact.sCommandText, XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT) == 0);
+        assert(tArtifact.sStorageRef != NULL);
+        assert(strstr(tArtifact.sStorageRef, "terminal-session-") != NULL);
+        xwork_artifact_reset(&tArtifact);
+        if ( bTerminalOutputCaptured ) {
+            assert(xwork_run_get_artifact(pLocalHostRun, 2u, &tArtifact) == XWORK_OK);
+            assert(tArtifact.sContentText != NULL);
+            assert(strstr(tArtifact.sContentText, XWORK_TEST_PROCESS_TERMINAL_SESSION_EXPECTED) != NULL);
+            assert(tArtifact.sStorageRef != NULL);
+            assert(strstr(tArtifact.sStorageRef, "terminal-session-") != NULL);
+            xwork_artifact_reset(&tArtifact);
+        }
+        xwork_run_destroy(pLocalHostRun);
+        pLocalHostRun = NULL;
+    }
+
+    tAdapterCtx.iTurnCount = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-process-events-tool";
+    tRunOptions.sInstruction = "Run the local process with ordered events through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "Host service process events completed."
+        ) == 0
+    );
+    assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+    assert(tRunSnapshot.sLastToolResultText != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"include_events\":true") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"event_count\":") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"kind\":\"start\"") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"kind\":\"output\"") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"kind\":\"exit\"") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"stream\":\"stdout\"") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"stream\":\"stderr\"") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, XWORK_TEST_PROCESS_STDOUT_EXPECTED) != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, XWORK_TEST_PROCESS_STDERR_EXPECTED) != NULL);
+    xwork_run_snapshot_reset(&tRunSnapshot);
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 1u);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+    assert(tArtifact.eKind == XWORK_ARTIFACT_COMMAND);
+    assert(strcmp(tArtifact.sName, "process.exec.txt") == 0);
+    assert(strcmp(tArtifact.sCommandText, XWORK_TEST_PROCESS_STDERR_COMMAND_RAW) == 0);
+    assert(tArtifact.sContentText != NULL);
+    assert(strstr(tArtifact.sContentText, XWORK_TEST_PROCESS_STDOUT_EXPECTED) != NULL);
+    assert(strstr(tArtifact.sContentText, XWORK_TEST_PROCESS_STDERR_EXPECTED) != NULL);
+    assert(tArtifact.bHasExitCode);
+    assert(tArtifact.iExitCode == 0);
+    xwork_artifact_reset(&tArtifact);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-process-stderr-tool";
+    tRunOptions.sInstruction = "Run the local process with separate stderr through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "Host service process stderr completed."
+        ) == 0
+    );
+    assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+    assert(tRunSnapshot.sLastToolResultText != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"merge_stderr\":false") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, XWORK_TEST_PROCESS_STDOUT_EXPECTED) != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, XWORK_TEST_PROCESS_STDERR_EXPECTED) != NULL);
+    xwork_run_snapshot_reset(&tRunSnapshot);
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 1u);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+    assert(tArtifact.eKind == XWORK_ARTIFACT_COMMAND);
+    assert(strcmp(tArtifact.sName, "process.exec.txt") == 0);
+    assert(strcmp(tArtifact.sCommandText, XWORK_TEST_PROCESS_STDERR_COMMAND_RAW) == 0);
+    assert(tArtifact.sContentText != NULL);
+    assert(strstr(tArtifact.sContentText, XWORK_TEST_PROCESS_STDOUT_EXPECTED) != NULL);
+    assert(strstr(tArtifact.sContentText, XWORK_TEST_PROCESS_STDERR_EXPECTED) != NULL);
+    assert(tArtifact.bHasExitCode);
+    assert(tArtifact.iExitCode == 0);
+    xwork_artifact_reset(&tArtifact);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
 
     tAdapterCtx.iTurnCount = 0;
     asWorkspaceIds[0] = "local-host-main";
@@ -2950,6 +4011,94 @@ int main(void)
     xwork_run_destroy(pLocalHostRun);
     pLocalHostRun = NULL;
     tLocalHost.iMaxProcessInputBytes = iSavedMaxProcessInputBytes;
+
+    tAdapterCtx.iTurnCount = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-process-timeout-tool";
+    tRunOptions.sInstruction = "Run the local process with timeout through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_ERROR_EXTERNAL_FAILURE);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_FAILED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "process.exec timed out"
+        ) == 0
+    );
+    assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+    assert(tRunSnapshot.sLastToolResultText != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"ok\":false") != NULL);
+    assert(
+        strstr(
+            tRunSnapshot.sLastToolResultText,
+            "\"error_kind\":\"timeout\""
+        ) != NULL
+    );
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"timeout_ms\":50") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"timed_out\":true") != NULL);
+    assert(
+        strstr(
+            tRunSnapshot.sLastToolResultText,
+            "\"error\":\"process exceeded timeout_ms\""
+        ) != NULL
+    );
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"timeout_stop\":\"interrupt\"") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"stop_reason\":\"") != NULL);
+    xwork_run_snapshot_reset(&tRunSnapshot);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-process-timeout-kill-tree-tool";
+    tRunOptions.sInstruction = "Run the local process with kill-tree timeout through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_ERROR_EXTERNAL_FAILURE);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_FAILED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "process.exec timed out"
+        ) == 0
+    );
+    assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+    assert(tRunSnapshot.sLastToolResultText != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"error_kind\":\"timeout\"") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"timeout_stop\":\"kill_tree\"") != NULL);
+    assert(strstr(tRunSnapshot.sLastToolResultText, "\"stop_reason\":\"") != NULL);
+    xwork_run_snapshot_reset(&tRunSnapshot);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
 
     tAdapterCtx.iTurnCount = 0;
     iSavedMaxProcessEnvEntries = tLocalHost.iMaxProcessEnvEntries;
@@ -4255,3 +5404,4 @@ int main(void)
     xllm_runtime_destroy(pLlmRuntime);
     return 0;
 }
+

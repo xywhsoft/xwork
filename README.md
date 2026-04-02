@@ -49,8 +49,9 @@ What exists now:
 - event / approval request / checkpoint / artifact object model
 - `xllm`-backed orchestrator loop with tool execution and approval pause/resume
 - minimal local host helper for filesystem/process/vcs host services
-- built-in host tool defs for `filesystem.read_text` / `filesystem.write_text` / `process.exec` / `vcs.status`
+- built-in host tool defs for `filesystem.read_text` / `filesystem.write_text` / `process.exec` / `process.start_terminal` / `process.terminal_read` / `process.terminal_write` / `process.terminal_resize` / `process.terminal_stop` / `vcs.status`
 - builtin host tool execution now auto-synthesizes output/command artifacts for read/write/process/vcs flows
+- builtin terminal host tool execution now auto-synthesizes session command/output artifacts for start/write/stop flows
 - local `filesystem.write_text` host contract now supports `mode=append`
 - local `filesystem.write_text` host contract now supports `mode=create`
 - local `filesystem.write_text` host contract now supports request-level `create_dirs:true`
@@ -61,8 +62,21 @@ What exists now:
 - local `process.exec` host contract now supports request-level `max_output_bytes` truncation
 - local `process.exec` host contract now supports request-level `env:["KEY=VALUE"]`
 - local `process.exec` host contract now supports request-level `stdin_text`
+- local `process.exec` host path now runs on `xrt subprocess` instead of shell `popen`
+- local `process.exec` host contract now supports request-level `timeout_ms`
+- local `process.exec` host contract now supports request-level `timeout_stop` (`interrupt` / `terminate` / `kill` / `kill_tree`)
 - local `process.exec` host contract now supports request-level `allow_nonzero_exit:true`
-- local `process.exec` failure paths now preserve structured result payloads for invalid request / non-zero exit cases
+- local `process.exec` host contract now supports request-level `merge_stderr:false`
+- local `process.exec` host contract now supports request-level `include_events:true`
+- local `process.exec` host contract now supports request-level `use_terminal:true` with optional `terminal_cols` / `terminal_rows`
+- local `process.exec` result now returns explicit `stdout` / `stderr` plus per-stream truncation flags
+- local `process.exec` result can now return ordered `xrt subprocess` events with stream/kind/text/exit metadata
+- local `process.exec` terminal mode now reports `use_terminal`, negotiated terminal size, explicit `terminal_output_captured`, and ordered lifecycle events; captured terminal text remains platform-dependent
+- local host now supports interactive terminal sessions via `process.start_terminal` / `process.terminal_read` / `process.terminal_write` / `process.terminal_resize` / `process.terminal_stop`
+- local `process.terminal_resize` now reports explicit `resize_applied` so terminal resize can degrade gracefully instead of failing the whole session
+- local terminal session state results now return explicit `output_text` / `output_bytes`, plus `event_end_seq` / `has_more_events` / `event_stream_done` alongside ordered events
+- builtin `process.exec` artifact synthesis now preserves stderr instead of dropping it from command artifacts
+- local `process.exec` failure paths now preserve structured result payloads for invalid request / timeout / non-zero exit cases, including requested stop policy and observed stop reason
 - local `process.exec` stdin_text is bounded by configured `iMaxProcessInputBytes`
 - local `process.exec` env list is bounded by configured `iMaxProcessEnvEntries`
 - typed artifact emit helpers for patch / report / command / output
