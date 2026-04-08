@@ -46,6 +46,17 @@ static const xwork_tool_def *xwork__get_builtin_tool_def(const char *sToolId)
         XWORK_APPROVAL_ALWAYS,
         false
     };
+    static const xwork_tool_def tProcessListTerminals = {
+        XWORK_TOOL_PROCESS_LIST_TERMINALS,
+        "Process List Terminals",
+        "List active interactive terminal sessions.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_PROCESS,
+        XWORK_HOST_PROCESS_LIST_TERMINALS,
+        XWORK_SIDE_EFFECT_READ_ONLY,
+        XWORK_APPROVAL_DEFAULT,
+        false
+    };
     static const xwork_tool_def tProcessTerminalRead = {
         XWORK_TOOL_PROCESS_TERMINAL_READ,
         "Process Terminal Read",
@@ -116,6 +127,9 @@ static const xwork_tool_def *xwork__get_builtin_tool_def(const char *sToolId)
     }
     if ( strcmp(sToolId, XWORK_TOOL_PROCESS_START_TERMINAL) == 0 ) {
         return &tProcessStartTerminal;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_PROCESS_LIST_TERMINALS) == 0 ) {
+        return &tProcessListTerminals;
     }
     if ( strcmp(sToolId, XWORK_TOOL_PROCESS_TERMINAL_READ) == 0 ) {
         return &tProcessTerminalRead;

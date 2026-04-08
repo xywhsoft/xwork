@@ -578,11 +578,14 @@ typedef struct {
 
 typedef struct xwork__local_host_terminal_session {
     char *sSessionId;
+    char *sSessionName;
     char *sCommand;
     char *sResolvedCwd;
     xprocess *pProcess;
+    size_t iSessionIndex;
     size_t iTerminalCols;
     size_t iTerminalRows;
+    bool bStdinClosed;
     struct xwork__local_host_terminal_session *pNext;
 } xwork__local_host_terminal_session;
 
@@ -730,6 +733,23 @@ static xwork__local_host_terminal_session *xwork__local_host_find_terminal_sessi
     return NULL;
 }
 
+static size_t xwork__local_host_terminal_session_count(const xwork_local_host *pHost)
+{
+    const xwork__local_host_terminal_session *pSession;
+    size_t iCount = 0u;
+
+    if ( !pHost ) {
+        return 0u;
+    }
+
+    for ( pSession = (const xwork__local_host_terminal_session *)pHost->pTerminalSessions;
+          pSession;
+          pSession = pSession->pNext ) {
+        ++iCount;
+    }
+    return iCount;
+}
+
 static void xwork__local_host_free_terminal_session(
     xwork__local_host_terminal_session *pSession
 )
@@ -748,6 +768,7 @@ static void xwork__local_host_free_terminal_session(
         xrtProcessDestroy(pSession->pProcess);
     }
     free(pSession->sSessionId);
+    free(pSession->sSessionName);
     free(pSession->sCommand);
     free(pSession->sResolvedCwd);
     free(pSession);
@@ -1947,12 +1968,15 @@ cleanup:
 static xwork_status xwork__local_host_set_terminal_state_result(
     xwork_local_host *pHost,
     const char *sSessionId,
+    const char *sSessionName,
     const char *sCommand,
     const char *sResolvedCwd,
+    size_t iSessionIndex,
     const char *sOutputText,
     size_t iOutputBytes,
     size_t iTerminalCols,
     size_t iTerminalRows,
+    bool bStdinClosed,
     bool bTerminalOutputCaptured,
     bool bRunning,
     bool bEventStreamDone,
@@ -1972,6 +1996,7 @@ static xwork_status xwork__local_host_set_terminal_state_result(
 {
     xprocessexitinfo tExitInfo;
     char *sEscapedSessionId = NULL;
+    char *sEscapedSessionName = NULL;
     char *sEscapedCommand = NULL;
     char *sEscapedCwd = NULL;
     char *sEscapedOutputText = NULL;
@@ -1995,6 +2020,11 @@ static xwork_status xwork__local_host_set_terminal_state_result(
     );
     if ( iStatus != XWORK_OK ) goto cleanup;
     iStatus = xwork__local_host_json_escape(
+        sSessionName ? sSessionName : "",
+        &sEscapedSessionName
+    );
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(
         sCommand ? sCommand : "",
         &sEscapedCommand
     );
@@ -2012,7 +2042,8 @@ static xwork_status xwork__local_host_set_terminal_state_result(
 
     if ( bOk ) {
         sResultText = xwork__dup_printf(
-            "{\"ok\":true,\"session_id\":\"%s\",\"command\":\"%s\",\"cwd\":\"%s\","
+            "{\"ok\":true,\"session_id\":\"%s\",\"session_name\":\"%s\",\"command\":\"%s\",\"cwd\":\"%s\","
+            "\"session_index\":%zu,\"stdin_closed\":%s,"
             "\"running\":%s,\"done\":%s,\"removed\":%s,"
             "\"terminal_cols\":%zu,\"terminal_rows\":%zu,"
             "\"terminal_output_captured\":%s,"
@@ -2023,8 +2054,11 @@ static xwork_status xwork__local_host_set_terminal_state_result(
             "\"stage\":\"%s\",\"os_error\":%d,"
             "\"stop_reason\":\"%s\",\"timed_out\":%s,\"cancelled\":%s}",
             sEscapedSessionId,
+            sEscapedSessionName,
             sEscapedCommand,
             sEscapedCwd,
+            iSessionIndex,
+            bStdinClosed ? "true" : "false",
             bRunning ? "true" : "false",
             bRunning ? "false" : "true",
             bRemoved ? "true" : "false",
@@ -2061,7 +2095,8 @@ static xwork_status xwork__local_host_set_terminal_state_result(
         );
         if ( iStatus != XWORK_OK ) goto cleanup;
         sResultText = xwork__dup_printf(
-            "{\"ok\":false,\"session_id\":\"%s\",\"command\":\"%s\",\"cwd\":\"%s\","
+            "{\"ok\":false,\"session_id\":\"%s\",\"session_name\":\"%s\",\"command\":\"%s\",\"cwd\":\"%s\","
+            "\"session_index\":%zu,\"stdin_closed\":%s,"
             "\"running\":%s,\"done\":%s,\"removed\":%s,"
             "\"terminal_cols\":%zu,\"terminal_rows\":%zu,"
             "\"terminal_output_captured\":%s,"
@@ -2073,8 +2108,11 @@ static xwork_status xwork__local_host_set_terminal_state_result(
             "\"stop_reason\":\"%s\",\"timed_out\":%s,\"cancelled\":%s,"
             "\"error_kind\":\"%s\",\"error\":\"%s\"}",
             sEscapedSessionId,
+            sEscapedSessionName,
             sEscapedCommand,
             sEscapedCwd,
+            iSessionIndex,
+            bStdinClosed ? "true" : "false",
             bRunning ? "true" : "false",
             bRunning ? "false" : "true",
             bRemoved ? "true" : "false",
@@ -2118,6 +2156,7 @@ static xwork_status xwork__local_host_set_terminal_state_result(
 
 cleanup:
     free(sEscapedSessionId);
+    free(sEscapedSessionName);
     free(sEscapedCommand);
     free(sEscapedCwd);
     free(sEscapedOutputText);
@@ -2130,7 +2169,25 @@ cleanup:
 static xwork_status xwork__local_host_set_terminal_write_result(
     xwork_local_host *pHost,
     const char *sSessionId,
+    const char *sSessionName,
+    size_t iSessionIndex,
     size_t iBytesWritten,
+    bool bWriteEof,
+    bool bStdinClosed,
+    bool bHasStateSnapshot,
+    const char *sCommand,
+    const char *sResolvedCwd,
+    const char *sOutputText,
+    size_t iOutputBytes,
+    size_t iTerminalCols,
+    size_t iTerminalRows,
+    bool bTerminalOutputCaptured,
+    bool bRunning,
+    bool bEventStreamDone,
+    uint64 iNextAfterSeq,
+    uint64 iEventEndSeq,
+    uint32 iEventCount,
+    const char *sEventsJson,
     bool bOk,
     const char *sVisibleSummary,
     const char *sErrorKind,
@@ -2138,10 +2195,12 @@ static xwork_status xwork__local_host_set_terminal_write_result(
     xwork_tool_result *pResult
 )
 {
+    char sExtraJson[128];
     char *sEscapedSessionId = NULL;
+    char *sEscapedSessionName = NULL;
     char *sEscapedErrorKind = NULL;
     char *sEscapedErrorMessage = NULL;
-    char *sOutputText = NULL;
+    char *sResultText = NULL;
     xwork_status iStatus;
 
     if ( !pHost || !pResult ) {
@@ -2153,12 +2212,62 @@ static xwork_status xwork__local_host_set_terminal_write_result(
         &sEscapedSessionId
     );
     if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(
+        sSessionName ? sSessionName : "",
+        &sEscapedSessionName
+    );
+    if ( iStatus != XWORK_OK ) goto cleanup;
+
+    if ( bHasStateSnapshot ) {
+        snprintf(
+            sExtraJson,
+            sizeof(sExtraJson),
+            "\"bytes_written\":%zu,\"write_eof\":%s,\"stdin_closed\":%s,",
+            iBytesWritten,
+            bWriteEof ? "true" : "false",
+            bStdinClosed ? "true" : "false"
+        );
+        iStatus = xwork__local_host_set_terminal_state_result(
+            pHost,
+            sSessionId,
+            sSessionName,
+            sCommand,
+            sResolvedCwd,
+            iSessionIndex,
+            sOutputText,
+            iOutputBytes,
+            iTerminalCols,
+            iTerminalRows,
+            bStdinClosed,
+            bTerminalOutputCaptured,
+            bRunning,
+            bEventStreamDone,
+            false,
+            iNextAfterSeq,
+            iEventEndSeq,
+            iEventCount,
+            sEventsJson,
+            sExtraJson,
+            NULL,
+            bOk,
+            sVisibleSummary,
+            sErrorKind,
+            sErrorMessage,
+            pResult
+        );
+        goto cleanup;
+    }
 
     if ( bOk ) {
-        sOutputText = xwork__dup_printf(
-            "{\"ok\":true,\"session_id\":\"%s\",\"bytes_written\":%zu}",
+        sResultText = xwork__dup_printf(
+            "{\"ok\":true,\"session_id\":\"%s\",\"session_name\":\"%s\",\"session_index\":%zu,\"bytes_written\":%zu,"
+            "\"write_eof\":%s,\"stdin_closed\":%s}",
             sEscapedSessionId,
-            iBytesWritten
+            sEscapedSessionName,
+            iSessionIndex,
+            iBytesWritten,
+            bWriteEof ? "true" : "false",
+            bStdinClosed ? "true" : "false"
         );
     } else {
         iStatus = xwork__local_host_json_escape(
@@ -2171,23 +2280,28 @@ static xwork_status xwork__local_host_set_terminal_write_result(
             &sEscapedErrorMessage
         );
         if ( iStatus != XWORK_OK ) goto cleanup;
-        sOutputText = xwork__dup_printf(
-            "{\"ok\":false,\"session_id\":\"%s\",\"bytes_written\":%zu,"
+        sResultText = xwork__dup_printf(
+            "{\"ok\":false,\"session_id\":\"%s\",\"session_name\":\"%s\",\"session_index\":%zu,\"bytes_written\":%zu,"
+            "\"write_eof\":%s,\"stdin_closed\":%s,"
             "\"error_kind\":\"%s\",\"error\":\"%s\"}",
             sEscapedSessionId,
+            sEscapedSessionName,
+            iSessionIndex,
             iBytesWritten,
+            bWriteEof ? "true" : "false",
+            bStdinClosed ? "true" : "false",
             sEscapedErrorKind,
             sEscapedErrorMessage
         );
     }
-    if ( !sOutputText ) {
+    if ( !sResultText ) {
         iStatus = XWORK_ERROR_NO_MEMORY;
         goto cleanup;
     }
 
     iStatus = xwork__local_host_set_result(
         pHost,
-        sOutputText,
+        sResultText,
         sVisibleSummary
             ? sVisibleSummary
             : (bOk ? "process.terminal_write ok" : "process.terminal_write failed"),
@@ -2196,9 +2310,77 @@ static xwork_status xwork__local_host_set_terminal_write_result(
 
 cleanup:
     free(sEscapedSessionId);
+    free(sEscapedSessionName);
     free(sEscapedErrorKind);
     free(sEscapedErrorMessage);
-    free(sOutputText);
+    free(sResultText);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_set_terminal_list_result(
+    xwork_local_host *pHost,
+    size_t iSessionCount,
+    const char *sSessionsJson,
+    bool bOk,
+    const char *sVisibleSummary,
+    const char *sErrorKind,
+    const char *sErrorMessage,
+    xwork_tool_result *pResult
+)
+{
+    char *sEscapedErrorKind = NULL;
+    char *sEscapedErrorMessage = NULL;
+    char *sResultText = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    if ( bOk ) {
+        sResultText = xwork__dup_printf(
+            "{\"ok\":true,\"session_count\":%zu,\"sessions\":%s}",
+            iSessionCount,
+            sSessionsJson ? sSessionsJson : "[]"
+        );
+    } else {
+        iStatus = xwork__local_host_json_escape(
+            sErrorKind ? sErrorKind : "external_failure",
+            &sEscapedErrorKind
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        iStatus = xwork__local_host_json_escape(
+            sErrorMessage ? sErrorMessage : "failed to list terminal sessions",
+            &sEscapedErrorMessage
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        sResultText = xwork__dup_printf(
+            "{\"ok\":false,\"session_count\":%zu,\"sessions\":%s,"
+            "\"error_kind\":\"%s\",\"error\":\"%s\"}",
+            iSessionCount,
+            sSessionsJson ? sSessionsJson : "[]",
+            sEscapedErrorKind,
+            sEscapedErrorMessage
+        );
+    }
+    if ( !sResultText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_set_result(
+        pHost,
+        sResultText,
+        sVisibleSummary
+            ? sVisibleSummary
+            : (bOk ? "process.list_terminals ok" : "process.list_terminals failed"),
+        pResult
+    );
+
+cleanup:
+    free(sEscapedErrorKind);
+    free(sEscapedErrorMessage);
+    free(sResultText);
     return iStatus;
 }
 
@@ -3400,6 +3582,7 @@ static xwork_status xwork__local_host_invoke_start_terminal(
     xvalue tRequest = NULL;
     xvalue tEnvList = NULL;
     const char *sCommand;
+    const char *sSessionName = NULL;
     const char *sRequestedCwd = NULL;
     char *sResolvedCwd = NULL;
     char **psEnvEntries = NULL;
@@ -3450,6 +3633,14 @@ static xwork_status xwork__local_host_invoke_start_terminal(
         sFailureKind = "invalid_request";
         sFailureSummary = "process.start_terminal invalid request";
         sFailureMessage = "command is required";
+        goto cleanup;
+    }
+    sSessionName = xwork__local_host_request_get_text(tRequest, "session_name");
+    if ( sSessionName && !sSessionName[0] ) {
+        iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+        sFailureKind = "invalid_request";
+        sFailureSummary = "process.start_terminal invalid request";
+        sFailureMessage = "session_name must not be empty";
         goto cleanup;
     }
     sRequestedCwd = xwork__local_host_request_get_text(tRequest, "cwd");
@@ -3560,11 +3751,14 @@ static xwork_status xwork__local_host_invoke_start_terminal(
         "terminal-session-%zu",
         pHost->iNextTerminalSessionId + 1u
     );
+    pSession->sSessionName = xwork__dup_cstr(sSessionName ? sSessionName : "");
     pSession->sCommand = xwork__dup_cstr(sCommand);
     pSession->sResolvedCwd = xwork__dup_cstr(sResolvedCwd ? sResolvedCwd : "");
+    pSession->iSessionIndex = pHost->iNextTerminalSessionId + 1u;
     pSession->iTerminalCols = iTerminalCols;
     pSession->iTerminalRows = iTerminalRows;
-    if ( !pSession->sSessionId || !pSession->sCommand || !pSession->sResolvedCwd ) {
+    if ( !pSession->sSessionId || !pSession->sSessionName ||
+         !pSession->sCommand || !pSession->sResolvedCwd ) {
         iStatus = XWORK_ERROR_NO_MEMORY;
         goto cleanup;
     }
@@ -3624,18 +3818,21 @@ static xwork_status xwork__local_host_invoke_start_terminal(
         goto cleanup;
     }
 
-    iStatus = xwork__local_host_set_terminal_state_result(
-        pHost,
-        pSession->sSessionId,
-        pSession->sCommand,
-        pSession->sResolvedCwd,
-        sOutputText,
-        iOutputBytes,
-        pSession->iTerminalCols,
-        pSession->iTerminalRows,
-        bTerminalOutputCaptured,
-        bRunning,
-        bEventStreamDone,
+        iStatus = xwork__local_host_set_terminal_state_result(
+            pHost,
+            pSession->sSessionId,
+            pSession->sSessionName,
+            pSession->sCommand,
+            pSession->sResolvedCwd,
+            pSession->iSessionIndex,
+            sOutputText,
+            iOutputBytes,
+            pSession->iTerminalCols,
+            pSession->iTerminalRows,
+            pSession->bStdinClosed,
+            bTerminalOutputCaptured,
+            bRunning,
+            bEventStreamDone,
         false,
         iNextAfterSeq,
         iEventEndSeq,
@@ -3655,12 +3852,15 @@ cleanup:
         (void)xwork__local_host_set_terminal_state_result(
             pHost,
             pSession ? pSession->sSessionId : "",
+            pSession ? pSession->sSessionName : sSessionName,
             sCommand ? sCommand : "",
             sResolvedCwd ? sResolvedCwd : sRequestedCwd,
+            pSession ? pSession->iSessionIndex : 0u,
             sOutputText,
             iOutputBytes,
             iTerminalCols,
             iTerminalRows,
+            pSession ? pSession->bStdinClosed : false,
             bTerminalOutputCaptured,
             false,
             bEventStreamDone,
@@ -3691,6 +3891,171 @@ cleanup:
     if ( iStatus != XWORK_OK && bInsertedSession && pSession ) {
         xwork__local_host_remove_terminal_session(pHost, pSession);
     }
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_invoke_list_terminals(
+    xwork_local_host *pHost,
+    const char *sRequestJson,
+    xwork_tool_result *pResult
+)
+{
+    xvalue tRequest = NULL;
+    xwork__local_host_terminal_session *pSession;
+    char *sSessionsJson = NULL;
+    size_t iSessionCount = 0u;
+    xwork_status iStatus = XWORK_OK;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( sRequestJson && sRequestJson[0] ) {
+        iStatus = xwork__local_host_parse_request_json(sRequestJson, &tRequest);
+        if ( iStatus != XWORK_OK ) {
+            return iStatus;
+        }
+    }
+
+    sSessionsJson = xwork__dup_cstr("[");
+    if ( !sSessionsJson ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    for ( pSession = (xwork__local_host_terminal_session *)pHost->pTerminalSessions;
+          pSession;
+          pSession = pSession->pNext ) {
+        xprocessexitinfo tExitInfo;
+        char *sEscapedSessionId = NULL;
+        char *sEscapedSessionName = NULL;
+        char *sEscapedCommand = NULL;
+        char *sEscapedCwd = NULL;
+        char *sEntryJson = NULL;
+        char *sNextJson = NULL;
+        bool bRunning = false;
+
+        memset(&tExitInfo, 0, sizeof(tExitInfo));
+        if ( pSession->pProcess ) {
+            bRunning = xrtProcessIsRunning(pSession->pProcess);
+            (void)xrtProcessGetExitInfo(pSession->pProcess, &tExitInfo);
+        }
+
+        iStatus = xwork__local_host_json_escape(
+            pSession->sSessionId ? pSession->sSessionId : "",
+            &sEscapedSessionId
+        );
+        if ( iStatus != XWORK_OK ) goto session_cleanup;
+        iStatus = xwork__local_host_json_escape(
+            pSession->sSessionName ? pSession->sSessionName : "",
+            &sEscapedSessionName
+        );
+        if ( iStatus != XWORK_OK ) goto session_cleanup;
+        iStatus = xwork__local_host_json_escape(
+            pSession->sCommand ? pSession->sCommand : "",
+            &sEscapedCommand
+        );
+        if ( iStatus != XWORK_OK ) goto session_cleanup;
+        iStatus = xwork__local_host_json_escape(
+            pSession->sResolvedCwd ? pSession->sResolvedCwd : "",
+            &sEscapedCwd
+        );
+        if ( iStatus != XWORK_OK ) goto session_cleanup;
+
+        sEntryJson = xwork__dup_printf(
+            "%s{\"session_id\":\"%s\",\"session_name\":\"%s\",\"session_index\":%zu,"
+            "\"command\":\"%s\",\"cwd\":\"%s\","
+            "\"running\":%s,\"done\":%s,"
+            "\"terminal_cols\":%zu,\"terminal_rows\":%zu,"
+            "\"stdin_closed\":%s,"
+            "\"exit_kind\":\"%s\",\"exit_code\":%d,\"signal\":%d,"
+            "\"stage\":\"%s\",\"os_error\":%d,"
+            "\"stop_reason\":\"%s\",\"timed_out\":%s,\"cancelled\":%s}",
+            (iSessionCount > 0u) ? "," : "",
+            sEscapedSessionId,
+            sEscapedSessionName,
+            pSession->iSessionIndex,
+            sEscapedCommand,
+            sEscapedCwd,
+            bRunning ? "true" : "false",
+            bRunning ? "false" : "true",
+            pSession->iTerminalCols,
+            pSession->iTerminalRows,
+            pSession->bStdinClosed ? "true" : "false",
+            xwork__local_host_process_exit_kind_name(tExitInfo.iKind),
+            tExitInfo.iExitCode,
+            tExitInfo.iSignal,
+            xwork__local_host_process_exit_stage_name(tExitInfo.iStage),
+            tExitInfo.iOsError,
+            xwork__local_host_process_stop_reason_name(tExitInfo.iStopReason),
+            tExitInfo.bTimedOut ? "true" : "false",
+            tExitInfo.bCancelled ? "true" : "false"
+        );
+        if ( !sEntryJson ) {
+            iStatus = XWORK_ERROR_NO_MEMORY;
+            goto session_cleanup;
+        }
+
+        sNextJson = xwork__dup_printf("%s%s", sSessionsJson, sEntryJson);
+        if ( !sNextJson ) {
+            iStatus = XWORK_ERROR_NO_MEMORY;
+            goto session_cleanup;
+        }
+
+        free(sSessionsJson);
+        sSessionsJson = sNextJson;
+        sNextJson = NULL;
+        ++iSessionCount;
+
+session_cleanup:
+        free(sEscapedSessionId);
+        free(sEscapedSessionName);
+        free(sEscapedCommand);
+        free(sEscapedCwd);
+        free(sEntryJson);
+        free(sNextJson);
+        if ( iStatus != XWORK_OK ) {
+            goto cleanup;
+        }
+    }
+
+    {
+        char *sClosedJson = xwork__dup_printf("%s]", sSessionsJson);
+        if ( !sClosedJson ) {
+            iStatus = XWORK_ERROR_NO_MEMORY;
+            goto cleanup;
+        }
+        free(sSessionsJson);
+        sSessionsJson = sClosedJson;
+    }
+
+    iStatus = xwork__local_host_set_terminal_list_result(
+        pHost,
+        iSessionCount,
+        sSessionsJson,
+        true,
+        "process.list_terminals ok",
+        NULL,
+        NULL,
+        pResult
+    );
+
+cleanup:
+    if ( iStatus != XWORK_OK ) {
+        (void)xwork__local_host_set_terminal_list_result(
+            pHost,
+            xwork__local_host_terminal_session_count(pHost),
+            "[]",
+            false,
+            "process.list_terminals failed",
+            "external_failure",
+            "failed to build terminal session list",
+            pResult
+        );
+    }
+    if ( tRequest ) {
+        xvoUnref(tRequest);
+    }
+    free(sSessionsJson);
     return iStatus;
 }
 
@@ -3799,12 +4164,15 @@ static xwork_status xwork__local_host_invoke_terminal_read(
     iStatus = xwork__local_host_set_terminal_state_result(
         pHost,
         pSession->sSessionId,
+        pSession->sSessionName,
         pSession->sCommand,
         pSession->sResolvedCwd,
+        pSession->iSessionIndex,
         sOutputText,
         iOutputBytes,
         pSession->iTerminalCols,
         pSession->iTerminalRows,
+        pSession->bStdinClosed,
         bTerminalOutputCaptured,
         bRunning,
         bEventStreamDone,
@@ -3827,12 +4195,15 @@ cleanup:
         (void)xwork__local_host_set_terminal_state_result(
             pHost,
             sSessionId ? sSessionId : "",
+            pSession ? pSession->sSessionName : "",
             pSession ? pSession->sCommand : "",
             pSession ? pSession->sResolvedCwd : NULL,
+            pSession ? pSession->iSessionIndex : 0u,
             sOutputText,
             iOutputBytes,
             pSession ? pSession->iTerminalCols : 0u,
             pSession ? pSession->iTerminalRows : 0u,
+            pSession ? pSession->bStdinClosed : false,
             bTerminalOutputCaptured,
             false,
             bEventStreamDone,
@@ -3868,7 +4239,27 @@ static xwork_status xwork__local_host_invoke_terminal_write(
     const char *sSessionId;
     const char *sInputText;
     xwork__local_host_terminal_session *pSession = NULL;
+    xprocessexitinfo tExitInfo;
+    char *sEventsJson = NULL;
+    char *sOutputText = NULL;
+    bool bTerminalOutputCaptured = false;
+    bool bRunning = false;
+    bool bEventStreamDone = false;
+    bool bHasIncludeState = false;
+    bool bIncludeState = false;
+    bool bHasWriteEof = false;
+    bool bWriteEof = false;
+    bool bStdinClosed = false;
+    bool bHasStateSnapshot = false;
+    bool bHasAfterSeq = false;
+    bool bHasMaxEvents = false;
     size_t iInputBytes = 0u;
+    size_t iAfterSeq = 0u;
+    size_t iMaxEvents = 0u;
+    size_t iOutputBytes = 0u;
+    uint32 iEventCount = 0u;
+    uint64 iNextAfterSeq = 0u;
+    uint64 iEventEndSeq = 0u;
     int64 iBytesWritten = 0;
     const char *sFailureKind = NULL;
     const char *sFailureSummary = NULL;
@@ -3893,15 +4284,65 @@ static xwork_status xwork__local_host_invoke_terminal_write(
         sFailureMessage = "session_id is required";
         goto cleanup;
     }
-    if ( !sInputText ) {
+    iStatus = xwork__local_host_request_get_bool(
+        tRequest,
+        "write_eof",
+        &bHasWriteEof,
+        &bWriteEof
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "process.terminal_write invalid request";
+        sFailureMessage = "write_eof must be a boolean";
+        goto cleanup;
+    }
+    if ( (!sInputText || !sInputText[0]) && !bWriteEof ) {
         iStatus = XWORK_ERROR_INVALID_ARGUMENT;
         sFailureKind = "invalid_request";
         sFailureSummary = "process.terminal_write invalid request";
-        sFailureMessage = "input_text is required";
+        sFailureMessage = "input_text or write_eof is required";
         goto cleanup;
     }
-    iInputBytes = strlen(sInputText);
-    if ( pHost->iMaxProcessInputBytes > 0u &&
+    iStatus = xwork__local_host_request_get_positive_size_strict(
+        tRequest,
+        "after_seq",
+        &bHasAfterSeq,
+        &iAfterSeq
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "process.terminal_write invalid request";
+        sFailureMessage = "after_seq must be a positive integer";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_request_get_positive_size_strict(
+        tRequest,
+        "max_events",
+        &bHasMaxEvents,
+        &iMaxEvents
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "process.terminal_write invalid request";
+        sFailureMessage = "max_events must be a positive integer";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_request_get_bool(
+        tRequest,
+        "include_state",
+        &bHasIncludeState,
+        &bIncludeState
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "process.terminal_write invalid request";
+        sFailureMessage = "include_state must be a boolean";
+        goto cleanup;
+    }
+    bHasStateSnapshot = bIncludeState || bHasAfterSeq || bHasMaxEvents;
+    iInputBytes = sInputText ? strlen(sInputText) : 0u;
+    if ( sInputText &&
+         pHost->iMaxProcessInputBytes > 0u &&
          iInputBytes > pHost->iMaxProcessInputBytes ) {
         iStatus = XWORK_ERROR_INVALID_ARGUMENT;
         sFailureKind = "invalid_request";
@@ -3926,23 +4367,79 @@ static xwork_status xwork__local_host_invoke_terminal_write(
         goto cleanup;
     }
 
-    iBytesWritten = xrtProcessWriteText(
-        pSession->pProcess,
-        (str)sInputText,
-        iInputBytes
-    );
-    if ( iBytesWritten < 0 || (size_t)iBytesWritten != iInputBytes ) {
-        iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
-        sFailureKind = "write_failed";
-        sFailureSummary = "process.terminal_write failed";
-        sFailureMessage = "failed to write terminal input";
-        goto cleanup;
+    if ( sInputText && iInputBytes > 0u ) {
+        iBytesWritten = xrtProcessWriteText(
+            pSession->pProcess,
+            (str)sInputText,
+            iInputBytes
+        );
+        if ( iBytesWritten < 0 || (size_t)iBytesWritten != iInputBytes ) {
+            iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
+            sFailureKind = "write_failed";
+            sFailureSummary = "process.terminal_write failed";
+            sFailureMessage = "failed to write terminal input";
+            goto cleanup;
+        }
+    }
+    if ( bWriteEof ) {
+        if ( !xrtProcessCloseStdin(pSession->pProcess) ) {
+            iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
+            sFailureKind = "stdin_failed";
+            sFailureSummary = "process.terminal_write failed";
+            sFailureMessage = "failed to close terminal stdin";
+            goto cleanup;
+        }
+        bStdinClosed = true;
+        pSession->bStdinClosed = true;
+    }
+
+    if ( bHasStateSnapshot ) {
+        memset(&tExitInfo, 0, sizeof(tExitInfo));
+        iStatus = xwork__local_host_terminal_session_snapshot(
+            pSession,
+            bHasAfterSeq ? iAfterSeq : 0u,
+            bHasMaxEvents ? iMaxEvents : 0u,
+            &bTerminalOutputCaptured,
+            &bRunning,
+            &bEventStreamDone,
+            &tExitInfo,
+            &iEventCount,
+            &iNextAfterSeq,
+            &iEventEndSeq,
+            &sEventsJson,
+            &sOutputText,
+            &iOutputBytes
+        );
+        if ( iStatus != XWORK_OK ) {
+            sFailureKind = "snapshot_failed";
+            sFailureSummary = "process.terminal_write failed";
+            sFailureMessage = "failed to snapshot terminal session";
+            goto cleanup;
+        }
     }
 
     iStatus = xwork__local_host_set_terminal_write_result(
         pHost,
         pSession->sSessionId,
+        pSession->sSessionName,
+        pSession->iSessionIndex,
         iInputBytes,
+        bWriteEof,
+        bStdinClosed,
+        bHasStateSnapshot,
+        pSession->sCommand,
+        pSession->sResolvedCwd,
+        sOutputText,
+        iOutputBytes,
+        pSession->iTerminalCols,
+        pSession->iTerminalRows,
+        bTerminalOutputCaptured,
+        bRunning,
+        bEventStreamDone,
+        iNextAfterSeq,
+        iEventEndSeq,
+        iEventCount,
+        sEventsJson,
         true,
         "process.terminal_write ok",
         NULL,
@@ -3955,7 +4452,25 @@ cleanup:
         (void)xwork__local_host_set_terminal_write_result(
             pHost,
             sSessionId ? sSessionId : "",
+            pSession ? pSession->sSessionName : "",
+            pSession ? pSession->iSessionIndex : 0u,
             (size_t)((iBytesWritten > 0) ? iBytesWritten : 0),
+            bWriteEof,
+            pSession ? pSession->bStdinClosed || bStdinClosed : bStdinClosed,
+            bHasStateSnapshot,
+            pSession ? pSession->sCommand : "",
+            pSession ? pSession->sResolvedCwd : NULL,
+            sOutputText,
+            iOutputBytes,
+            pSession ? pSession->iTerminalCols : 0u,
+            pSession ? pSession->iTerminalRows : 0u,
+            bTerminalOutputCaptured,
+            false,
+            bEventStreamDone,
+            iNextAfterSeq,
+            iEventEndSeq,
+            iEventCount,
+            sEventsJson,
             false,
             sFailureSummary,
             sFailureKind,
@@ -3966,6 +4481,8 @@ cleanup:
     if ( tRequest ) {
         xvoUnref(tRequest);
     }
+    free(sEventsJson);
+    free(sOutputText);
     return iStatus;
 }
 
@@ -4126,12 +4643,15 @@ static xwork_status xwork__local_host_invoke_terminal_resize(
     iStatus = xwork__local_host_set_terminal_state_result(
         pHost,
         pSession->sSessionId,
+        pSession->sSessionName,
         pSession->sCommand,
         pSession->sResolvedCwd,
+        pSession->iSessionIndex,
         sOutputText,
         iOutputBytes,
         pSession->iTerminalCols,
         pSession->iTerminalRows,
+        pSession->bStdinClosed,
         bTerminalOutputCaptured,
         bRunning,
         bEventStreamDone,
@@ -4154,12 +4674,15 @@ cleanup:
         (void)xwork__local_host_set_terminal_state_result(
             pHost,
             sSessionId ? sSessionId : "",
+            pSession ? pSession->sSessionName : "",
             pSession ? pSession->sCommand : "",
             pSession ? pSession->sResolvedCwd : NULL,
+            pSession ? pSession->iSessionIndex : 0u,
             sOutputText,
             iOutputBytes,
             pSession ? pSession->iTerminalCols : iTerminalCols,
             pSession ? pSession->iTerminalRows : iTerminalRows,
+            pSession ? pSession->bStdinClosed : false,
             bTerminalOutputCaptured,
             false,
             bEventStreamDone,
@@ -4314,12 +4837,15 @@ static xwork_status xwork__local_host_invoke_terminal_stop(
     iStatus = xwork__local_host_set_terminal_state_result(
         pHost,
         pSession->sSessionId,
+        pSession->sSessionName,
         pSession->sCommand,
         pSession->sResolvedCwd,
+        pSession->iSessionIndex,
         sOutputText,
         iOutputBytes,
         pSession->iTerminalCols,
         pSession->iTerminalRows,
+        pSession->bStdinClosed,
         bTerminalOutputCaptured,
         bRunning,
         bEventStreamDone,
@@ -4346,12 +4872,15 @@ cleanup:
         (void)xwork__local_host_set_terminal_state_result(
             pHost,
             sSessionId ? sSessionId : "",
+            pSession ? pSession->sSessionName : "",
             pSession ? pSession->sCommand : "",
             pSession ? pSession->sResolvedCwd : NULL,
+            pSession ? pSession->iSessionIndex : 0u,
             sOutputText,
             iOutputBytes,
             pSession ? pSession->iTerminalCols : 0u,
             pSession ? pSession->iTerminalRows : 0u,
+            pSession ? pSession->bStdinClosed : false,
             bTerminalOutputCaptured,
             false,
             bEventStreamDone,
@@ -4546,6 +5075,13 @@ static xwork_status xwork__local_host_invoke_process_cb(
     }
     if ( strcmp(sOperationId, XWORK_HOST_PROCESS_START_TERMINAL) == 0 ) {
         return xwork__local_host_invoke_start_terminal(
+            pHost,
+            sRequestJson,
+            pResult
+        );
+    }
+    if ( strcmp(sOperationId, XWORK_HOST_PROCESS_LIST_TERMINALS) == 0 ) {
+        return xwork__local_host_invoke_list_terminals(
             pHost,
             sRequestJson,
             pResult

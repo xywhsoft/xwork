@@ -26,6 +26,8 @@ typedef struct {
     int iTurnCount;
     const char *sExpectedMemoryText;
     int iObservedMemoryTurns;
+    bool bTerminalWriteEof;
+    bool bTerminalListFlow;
 } xwork_mock_adapter_ctx;
 
 typedef struct {
@@ -647,6 +649,14 @@ static const char *xwork_test_json_get_text(xvalue tTable, const char *sKey)
     return (const char *)xvoGetText(tValue);
 }
 
+static xvalue xwork_test_json_get_value(xvalue tTable, const char *sKey)
+{
+    if ( !tTable || !sKey ) {
+        return NULL;
+    }
+    return xvoTableGetValue(tTable, sKey, (uint32)strlen(sKey));
+}
+
 static bool xwork_test_json_get_size(xvalue tTable, const char *sKey, size_t *piValue)
 {
     xvalue tValue;
@@ -875,6 +885,8 @@ static int32 xwork_mock_adapter_chat(
     sInstruction = xwork_mock_first_text(&pRequest->pMessages[iUserIndex]);
 
     if ( pState->iTurnCount == 0 ) {
+        pState->bTerminalWriteEof = false;
+        pState->bTerminalListFlow = false;
         if ( pRequest->iMessageCount != (bHasInlineSystemMessage ? 2u : 1u) ) {
             return XRT_NET_ERROR;
         }
@@ -1040,10 +1052,31 @@ static int32 xwork_mock_adapter_chat(
                 "\"terminal_cols\":100,\"terminal_rows\":32}"
             );
         } else if ( sInstruction &&
+                    strstr(sInstruction, "Run the local interactive terminal session listing through host service.") != NULL ) {
+            pState->bTerminalListFlow = true;
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-process-terminal-session-list-start",
+                XWORK_TOOL_PROCESS_START_TERMINAL,
+                "{\"command\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_COMMAND "\","
+                "\"session_name\":\"build-shell\","
+                "\"terminal_cols\":100,\"terminal_rows\":32}"
+            );
+        } else if ( sInstruction &&
                     strstr(sInstruction, "Run the local interactive terminal session through host service.") != NULL ) {
             *ppResponse = xwork_mock_build_tool_call_response(
                 pProfile->sId,
                 "mock-response-process-terminal-session-start",
+                XWORK_TOOL_PROCESS_START_TERMINAL,
+                "{\"command\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_COMMAND "\","
+                "\"terminal_cols\":100,\"terminal_rows\":32}"
+            );
+        } else if ( sInstruction &&
+                    strstr(sInstruction, "Run the local interactive terminal session with EOF through host service.") != NULL ) {
+            pState->bTerminalWriteEof = true;
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-process-terminal-session-eof-start",
                 XWORK_TOOL_PROCESS_START_TERMINAL,
                 "{\"command\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_COMMAND "\","
                 "\"terminal_cols\":100,\"terminal_rows\":32}"
@@ -1155,6 +1188,8 @@ static int32 xwork_mock_adapter_chat(
             sSessionIdText = xwork_test_json_get_text(tToolTable, "session_id");
             if ( strstr(sToolText, "\"ok\":true") == NULL ||
                  !sSessionIdText ||
+                 strstr(sToolText, "\"session_index\":") == NULL ||
+                 strstr(sToolText, "\"stdin_closed\":false") == NULL ||
                  strstr(sToolText, "\"terminal_output_captured\":") == NULL ||
                  strstr(sToolText, "\"output_text\":\"") == NULL ||
                  strstr(sToolText, "\"output_bytes\":") == NULL ||
@@ -1167,9 +1202,24 @@ static int32 xwork_mock_adapter_chat(
                 xvoUnref(tToolTable);
                 return XRT_NET_ERROR;
             }
+            if ( pState->bTerminalListFlow &&
+                 strstr(sToolText, "\"session_name\":\"build-shell\"") == NULL ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
             if ( iParsedEventEndSeq < iParsedNextAfterSeq || bParsedEventStreamDone ) {
                 xvoUnref(tToolTable);
                 return XRT_NET_ERROR;
+            }
+            if ( pState->bTerminalListFlow ) {
+                xvoUnref(tToolTable);
+                *ppResponse = xwork_mock_build_tool_call_response(
+                    pProfile->sId,
+                    "mock-response-terminal-list",
+                    XWORK_TOOL_PROCESS_LIST_TERMINALS,
+                    "{}"
+                );
+                return 0;
             }
             sNextArgsJson = xwork_test_dup_cstr(
                 "{\"terminal_cols\":140,\"terminal_rows\":40}"
@@ -1197,6 +1247,8 @@ static int32 xwork_mock_adapter_chat(
             sSessionIdText = xwork_test_json_get_text(tToolTable, "session_id");
             if ( strstr(sToolText, "\"ok\":true") == NULL ||
                  !sSessionIdText ||
+                 strstr(sToolText, "\"session_index\":") == NULL ||
+                 strstr(sToolText, "\"stdin_closed\":false") == NULL ||
                  strstr(sToolText, "\"resize_applied\":") == NULL ||
                  strstr(sToolText, "\"terminal_cols\":140") == NULL ||
                  strstr(sToolText, "\"terminal_rows\":40") == NULL ) {
@@ -1204,8 +1256,19 @@ static int32 xwork_mock_adapter_chat(
                 return XRT_NET_ERROR;
             }
             sNextArgsJson = xwork__dup_printf(
-                "{\"session_id\":\"%s\",\"input_text\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "\"}",
-                sSessionIdText
+                pState->bTerminalWriteEof
+                    ? (iParsedNextAfterSeq > 0u
+                        ? "{\"session_id\":\"%s\",\"input_text\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "\","
+                          "\"include_state\":true,\"write_eof\":true,\"after_seq\":%zu}"
+                        : "{\"session_id\":\"%s\",\"input_text\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "\","
+                          "\"include_state\":true,\"write_eof\":true}")
+                    : (iParsedNextAfterSeq > 0u
+                        ? "{\"session_id\":\"%s\",\"input_text\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "\","
+                          "\"include_state\":true,\"after_seq\":%zu}"
+                        : "{\"session_id\":\"%s\",\"input_text\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "\","
+                          "\"include_state\":true}"),
+                sSessionIdText,
+                iParsedNextAfterSeq
             );
             xvoUnref(tToolTable);
             if ( !sNextArgsJson ) {
@@ -1218,20 +1281,86 @@ static int32 xwork_mock_adapter_chat(
                 sNextArgsJson
             );
             free(sNextArgsJson);
-        } else if ( strcmp(sToolId, XWORK_TOOL_PROCESS_TERMINAL_WRITE) == 0 ) {
+        } else if ( strcmp(sToolId, XWORK_TOOL_PROCESS_LIST_TERMINALS) == 0 ) {
+            xvalue tSessions = NULL;
+            xvalue tSessionItem = NULL;
+
             if ( !xwork_test_parse_json_table(sToolText, &tToolTable) ) {
                 return XRT_NET_ERROR;
             }
-            sSessionIdText = xwork_test_json_get_text(tToolTable, "session_id");
+            tSessions = xwork_test_json_get_value(tToolTable, "sessions");
             if ( strstr(sToolText, "\"ok\":true") == NULL ||
-                 !sSessionIdText ||
-                 strstr(sToolText, "\"bytes_written\":") == NULL ) {
+                 strstr(sToolText, "\"session_count\":") == NULL ||
+                 !tSessions ||
+                 xvoType(tSessions) != XVO_DT_ARRAY ||
+                 xvoArrayItemCount(tSessions) == 0u ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
+            tSessionItem = xvoArrayGetValue(tSessions, 0u);
+            if ( !tSessionItem || xvoType(tSessionItem) != XVO_DT_TABLE ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
+            sSessionIdText = xwork_test_json_get_text(tSessionItem, "session_id");
+            if ( !sSessionIdText ||
+                 strcmp(xwork_test_json_get_text(tSessionItem, "session_name"), "build-shell") != 0 ||
+                 !xwork_test_json_get_bool(tSessionItem, "running", &bDone) ||
+                 !bDone ||
+                 strstr(sToolText, "\"stdin_closed\":false") == NULL ) {
                 xvoUnref(tToolTable);
                 return XRT_NET_ERROR;
             }
             sNextArgsJson = xwork__dup_printf(
                 "{\"session_id\":\"%s\"}",
                 sSessionIdText
+            );
+            xvoUnref(tToolTable);
+            if ( !sNextArgsJson ) {
+                return XRT_NET_ERROR;
+            }
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-terminal-stop-after-list",
+                XWORK_TOOL_PROCESS_TERMINAL_STOP,
+                sNextArgsJson
+            );
+            free(sNextArgsJson);
+        } else if ( strcmp(sToolId, XWORK_TOOL_PROCESS_TERMINAL_WRITE) == 0 ) {
+            size_t iParsedNextAfterSeq = 0u;
+            size_t iParsedEventEndSeq = 0u;
+            bool bParsedHasMoreEvents = false;
+            bool bParsedEventStreamDone = false;
+
+            if ( !xwork_test_parse_json_table(sToolText, &tToolTable) ) {
+                return XRT_NET_ERROR;
+            }
+            sSessionIdText = xwork_test_json_get_text(tToolTable, "session_id");
+            if ( strstr(sToolText, "\"ok\":true") == NULL ||
+                 !sSessionIdText ||
+                 strstr(sToolText, "\"session_index\":") == NULL ||
+                 strstr(sToolText, "\"bytes_written\":") == NULL ||
+                 strstr(sToolText, pState->bTerminalWriteEof ? "\"write_eof\":true" : "\"write_eof\":false") == NULL ||
+                 strstr(sToolText, pState->bTerminalWriteEof ? "\"stdin_closed\":true" : "\"stdin_closed\":false") == NULL ||
+                 strstr(sToolText, "\"output_text\":\"") == NULL ||
+                 strstr(sToolText, "\"output_bytes\":") == NULL ||
+                 strstr(sToolText, "\"event_count\":") == NULL ||
+                 strstr(sToolText, "\"events\":[") == NULL ||
+                 !xwork_test_json_get_size(tToolTable, "next_after_seq", &iParsedNextAfterSeq) ||
+                 !xwork_test_json_get_size(tToolTable, "event_end_seq", &iParsedEventEndSeq) ||
+                 !xwork_test_json_get_bool(tToolTable, "has_more_events", &bParsedHasMoreEvents) ||
+                 !xwork_test_json_get_bool(tToolTable, "event_stream_done", &bParsedEventStreamDone) ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
+            if ( iParsedEventEndSeq < iParsedNextAfterSeq ) {
+                xvoUnref(tToolTable);
+                return XRT_NET_ERROR;
+            }
+            sNextArgsJson = xwork__dup_printf(
+                "{\"session_id\":\"%s\",\"after_seq\":%zu}",
+                sSessionIdText,
+                iParsedNextAfterSeq
             );
             xvoUnref(tToolTable);
             if ( !sNextArgsJson ) {
@@ -1257,6 +1386,8 @@ static int32 xwork_mock_adapter_chat(
             bDone = xwork_test_json_get_bool(tToolTable, "done", &bDone) && bDone;
             if ( strstr(sToolText, "\"ok\":true") == NULL ||
                  !sSessionIdText ||
+                 strstr(sToolText, "\"session_index\":") == NULL ||
+                 strstr(sToolText, pState->bTerminalWriteEof ? "\"stdin_closed\":true" : "\"stdin_closed\":false") == NULL ||
                  strstr(sToolText, "\"terminal_output_captured\":") == NULL ||
                  strstr(sToolText, "\"output_text\":\"") == NULL ||
                  strstr(sToolText, "\"output_bytes\":") == NULL ||
@@ -1281,23 +1412,32 @@ static int32 xwork_mock_adapter_chat(
                 xvoUnref(tToolTable);
                 return XRT_NET_ERROR;
             }
-            sNextArgsJson = xwork__dup_printf(
-                "{\"session_id\":\"%s\"}",
-                sSessionIdText
-            );
-            xvoUnref(tToolTable);
-            if ( !sNextArgsJson ) {
-                return XRT_NET_ERROR;
+            if ( pState->bTerminalWriteEof ) {
+                xvoUnref(tToolTable);
+                *ppResponse = xwork_mock_build_final_response(
+                    pProfile->sId,
+                    "Host service terminal EOF session completed."
+                );
+            } else {
+                sNextArgsJson = xwork__dup_printf(
+                    "{\"session_id\":\"%s\"}",
+                    sSessionIdText
+                );
+                xvoUnref(tToolTable);
+                if ( !sNextArgsJson ) {
+                    return XRT_NET_ERROR;
+                }
+                *ppResponse = xwork_mock_build_tool_call_response(
+                    pProfile->sId,
+                    "mock-response-terminal-stop",
+                    XWORK_TOOL_PROCESS_TERMINAL_STOP,
+                    sNextArgsJson
+                );
+                free(sNextArgsJson);
             }
-            *ppResponse = xwork_mock_build_tool_call_response(
-                pProfile->sId,
-                "mock-response-terminal-stop",
-                XWORK_TOOL_PROCESS_TERMINAL_STOP,
-                sNextArgsJson
-            );
-            free(sNextArgsJson);
         } else if ( strcmp(sToolId, XWORK_TOOL_PROCESS_TERMINAL_STOP) == 0 ) {
             if ( strstr(sToolText, "\"ok\":true") == NULL ||
+                 strstr(sToolText, "\"session_index\":") == NULL ||
                  strstr(sToolText, "\"terminal_output_captured\":") == NULL ||
                  strstr(sToolText, "\"output_text\":\"") == NULL ||
                  strstr(sToolText, "\"output_bytes\":") == NULL ||
@@ -1309,7 +1449,11 @@ static int32 xwork_mock_adapter_chat(
             }
             *ppResponse = xwork_mock_build_final_response(
                 pProfile->sId,
-                "Host service terminal session completed."
+                pState->bTerminalWriteEof
+                    ? "Host service terminal EOF session completed."
+                    : (pState->bTerminalListFlow
+                        ? "Host service terminal list completed."
+                        : "Host service terminal session completed.")
             );
         } else if ( strcmp(sToolId, "process.exec") == 0 ) {
             if ( strstr(sToolText, "\"ok\":true") == NULL ||
@@ -2010,6 +2154,10 @@ int main(void)
     assert(pBuiltinToolDef != NULL);
     assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
     assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_PROCESS_START_TERMINAL) == 0);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_PROCESS_LIST_TERMINALS);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_PROCESS_LIST_TERMINALS) == 0);
     pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_PROCESS_TERMINAL_READ);
     assert(pBuiltinToolDef != NULL);
     assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
@@ -2353,6 +2501,12 @@ int main(void)
     assert(
         xwork_runtime_register_builtin_tool(
             pLocalHostRuntime,
+            XWORK_TOOL_PROCESS_LIST_TERMINALS
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
             XWORK_TOOL_PROCESS_TERMINAL_READ
         ) == XWORK_OK
     );
@@ -2394,6 +2548,13 @@ int main(void)
     assert(pBuiltinToolDef != NULL);
     assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
     assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_PROCESS_START_TERMINAL) == 0);
+    pBuiltinToolDef = xwork_runtime_find_tool(
+        pLocalHostRuntime,
+        XWORK_TOOL_PROCESS_LIST_TERMINALS
+    );
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_PROCESS_LIST_TERMINALS) == 0);
 
     assert(
         xwork_runtime_invoke_host_service(
@@ -2823,6 +2984,7 @@ int main(void)
             char *sTerminalRequestJson = NULL;
             size_t iTerminalNextAfterSeq = 0u;
             size_t iTerminalEventEndSeq = 0u;
+            size_t iTerminalSessionIndex = 0u;
             bool bTerminalHasMoreEvents = false;
             bool bTerminalDone = false;
             bool bTerminalEventStreamDone = false;
@@ -2834,6 +2996,7 @@ int main(void)
                     XWORK_HOST_PROCESS,
                     XWORK_HOST_PROCESS_START_TERMINAL,
                     "{\"command\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_COMMAND "\","
+                    "\"session_name\":\"build-shell\","
                     "\"terminal_cols\":100,\"terminal_rows\":32}",
                     &tLocalHostResult
                 ) == XWORK_OK
@@ -2849,18 +3012,56 @@ int main(void)
             assert(strstr(tLocalHostResult.sOutputText, "\"event_end_seq\":") != NULL);
             assert(strstr(tLocalHostResult.sOutputText, "\"has_more_events\":") != NULL);
             assert(strstr(tLocalHostResult.sOutputText, "\"event_stream_done\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"session_name\":\"build-shell\"") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"session_index\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"stdin_closed\":false") != NULL);
             assert(xwork_test_parse_json_table(tLocalHostResult.sOutputText, &tTerminalTable));
             sTerminalSessionId = xwork_test_json_get_text(tTerminalTable, "session_id");
             assert(sTerminalSessionId != NULL);
             sOwnedTerminalSessionId = xwork__dup_cstr(sTerminalSessionId);
             assert(sOwnedTerminalSessionId != NULL);
             sTerminalSessionId = sOwnedTerminalSessionId;
+            assert(xwork_test_json_get_size(tTerminalTable, "session_index", &iTerminalSessionIndex));
+            assert(iTerminalSessionIndex > 0u);
             assert(xwork_test_json_get_size(tTerminalTable, "next_after_seq", &iTerminalNextAfterSeq));
             assert(xwork_test_json_get_size(tTerminalTable, "event_end_seq", &iTerminalEventEndSeq));
             assert(xwork_test_json_get_bool(tTerminalTable, "has_more_events", &bTerminalHasMoreEvents));
             assert(xwork_test_json_get_bool(tTerminalTable, "event_stream_done", &bTerminalEventStreamDone));
             assert(iTerminalEventEndSeq >= iTerminalNextAfterSeq);
             assert(!bTerminalEventStreamDone);
+            xvoUnref(tTerminalTable);
+            tTerminalTable = NULL;
+
+            assert(
+                xwork_runtime_invoke_host_service(
+                    pLocalHostRuntime,
+                    XWORK_HOST_PROCESS,
+                    XWORK_HOST_PROCESS_LIST_TERMINALS,
+                    "{}",
+                    &tLocalHostResult
+                ) == XWORK_OK
+            );
+            assert(strcmp(tLocalHostResult.sVisibleSummary, "process.list_terminals ok") == 0);
+            assert(strstr(tLocalHostResult.sOutputText, "\"session_count\":1") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"sessions\":[") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"session_name\":\"build-shell\"") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"stdin_closed\":false") != NULL);
+            assert(xwork_test_parse_json_table(tLocalHostResult.sOutputText, &tTerminalTable));
+            {
+                xvalue tSessions = xwork_test_json_get_value(tTerminalTable, "sessions");
+                xvalue tSessionItem = NULL;
+                assert(tSessions != NULL);
+                assert(xvoType(tSessions) == XVO_DT_ARRAY);
+                assert(xvoArrayItemCount(tSessions) == 1u);
+                tSessionItem = xvoArrayGetValue(tSessions, 0u);
+                assert(tSessionItem != NULL);
+                assert(xvoType(tSessionItem) == XVO_DT_TABLE);
+                assert(strcmp(xwork_test_json_get_text(tSessionItem, "session_id"), sTerminalSessionId) == 0);
+                assert(strcmp(xwork_test_json_get_text(tSessionItem, "session_name"), "build-shell") == 0);
+                assert(xwork_test_json_get_size(tSessionItem, "session_index", &iTerminalSessionIndex));
+                assert(xwork_test_json_get_bool(tSessionItem, "running", &bTerminalDone));
+                assert(bTerminalDone);
+            }
             xvoUnref(tTerminalTable);
             tTerminalTable = NULL;
 
@@ -2884,10 +3085,17 @@ int main(void)
             assert(strstr(tLocalHostResult.sOutputText, "\"resize_applied\":") != NULL);
             assert(strstr(tLocalHostResult.sOutputText, "\"terminal_cols\":140") != NULL);
             assert(strstr(tLocalHostResult.sOutputText, "\"terminal_rows\":40") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"session_index\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"stdin_closed\":false") != NULL);
 
             sTerminalRequestJson = xwork__dup_printf(
-                "{\"session_id\":\"%s\",\"input_text\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "\"}",
-                sTerminalSessionId
+                iTerminalNextAfterSeq > 0u
+                    ? "{\"session_id\":\"%s\",\"input_text\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "\","
+                      "\"include_state\":true,\"after_seq\":%zu}"
+                    : "{\"session_id\":\"%s\",\"input_text\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "\","
+                      "\"include_state\":true}",
+                sTerminalSessionId,
+                iTerminalNextAfterSeq
             );
             assert(sTerminalRequestJson != NULL);
             assert(
@@ -2902,7 +3110,25 @@ int main(void)
             free(sTerminalRequestJson);
             sTerminalRequestJson = NULL;
             assert(strcmp(tLocalHostResult.sVisibleSummary, "process.terminal_write ok") == 0);
+            assert(strstr(tLocalHostResult.sOutputText, "\"session_index\":") != NULL);
             assert(strstr(tLocalHostResult.sOutputText, "\"bytes_written\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"write_eof\":false") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"stdin_closed\":false") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"output_text\":\"") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"output_bytes\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"event_count\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"events\":[") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"event_end_seq\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"has_more_events\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"event_stream_done\":") != NULL);
+            assert(xwork_test_parse_json_table(tLocalHostResult.sOutputText, &tTerminalTable));
+            assert(xwork_test_json_get_size(tTerminalTable, "next_after_seq", &iTerminalNextAfterSeq));
+            assert(xwork_test_json_get_size(tTerminalTable, "event_end_seq", &iTerminalEventEndSeq));
+            assert(xwork_test_json_get_bool(tTerminalTable, "has_more_events", &bTerminalHasMoreEvents));
+            assert(xwork_test_json_get_bool(tTerminalTable, "event_stream_done", &bTerminalEventStreamDone));
+            assert(iTerminalEventEndSeq >= iTerminalNextAfterSeq);
+            xvoUnref(tTerminalTable);
+            tTerminalTable = NULL;
 
             for ( iPoll = 0u; iPoll < 5u; ++iPoll ) {
                 sTerminalRequestJson = xwork__dup_printf(
@@ -2925,6 +3151,8 @@ int main(void)
                 free(sTerminalRequestJson);
                 sTerminalRequestJson = NULL;
                 assert(strcmp(tLocalHostResult.sVisibleSummary, "process.terminal_read ok") == 0);
+                assert(strstr(tLocalHostResult.sOutputText, "\"session_index\":") != NULL);
+                assert(strstr(tLocalHostResult.sOutputText, "\"stdin_closed\":false") != NULL);
                 assert(strstr(tLocalHostResult.sOutputText, "\"terminal_output_captured\":") != NULL);
                 assert(strstr(tLocalHostResult.sOutputText, "\"output_text\":\"") != NULL);
                 assert(strstr(tLocalHostResult.sOutputText, "\"output_bytes\":") != NULL);
@@ -2968,6 +3196,9 @@ int main(void)
             free(sTerminalRequestJson);
             sTerminalRequestJson = NULL;
             assert(strcmp(tLocalHostResult.sVisibleSummary, "process.terminal_stop ok") == 0);
+            assert(strstr(tLocalHostResult.sOutputText, "\"session_name\":\"build-shell\"") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"session_index\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"stdin_closed\":false") != NULL);
             assert(strstr(tLocalHostResult.sOutputText, "\"terminal_output_captured\":") != NULL);
             assert(strstr(tLocalHostResult.sOutputText, "\"output_text\":\"") != NULL);
             assert(strstr(tLocalHostResult.sOutputText, "\"output_bytes\":") != NULL);
@@ -2975,6 +3206,19 @@ int main(void)
             assert(strstr(tLocalHostResult.sOutputText, "\"has_more_events\":") != NULL);
             assert(strstr(tLocalHostResult.sOutputText, "\"event_stream_done\":true") != NULL);
             assert(strstr(tLocalHostResult.sOutputText, "\"removed\":true") != NULL);
+
+            assert(
+                xwork_runtime_invoke_host_service(
+                    pLocalHostRuntime,
+                    XWORK_HOST_PROCESS,
+                    XWORK_HOST_PROCESS_LIST_TERMINALS,
+                    "{}",
+                    &tLocalHostResult
+                ) == XWORK_OK
+            );
+            assert(strcmp(tLocalHostResult.sVisibleSummary, "process.list_terminals ok") == 0);
+            assert(strstr(tLocalHostResult.sOutputText, "\"session_count\":0") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"sessions\":[]") != NULL);
 
             sTerminalRequestJson = xwork__dup_printf(
                 "{\"session_id\":\"%s\"}",
@@ -2994,6 +3238,133 @@ int main(void)
             sTerminalRequestJson = NULL;
             assert(strcmp(tLocalHostResult.sVisibleSummary, "process.terminal_read failed") == 0);
             assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"not_found\"") != NULL);
+            free(sOwnedTerminalSessionId);
+
+            sOwnedTerminalSessionId = NULL;
+            iTerminalNextAfterSeq = 0u;
+            iTerminalEventEndSeq = 0u;
+            bTerminalHasMoreEvents = false;
+            bTerminalDone = false;
+            bTerminalEventStreamDone = false;
+            assert(
+                xwork_runtime_invoke_host_service(
+                    pLocalHostRuntime,
+                    XWORK_HOST_PROCESS,
+                    XWORK_HOST_PROCESS_START_TERMINAL,
+                    "{\"command\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_COMMAND "\","
+                    "\"session_name\":\"build-shell\","
+                    "\"terminal_cols\":100,\"terminal_rows\":32}",
+                    &tLocalHostResult
+                ) == XWORK_OK
+            );
+            assert(strcmp(tLocalHostResult.sVisibleSummary, "process.start_terminal ok") == 0);
+            assert(xwork_test_parse_json_table(tLocalHostResult.sOutputText, &tTerminalTable));
+            sTerminalSessionId = xwork_test_json_get_text(tTerminalTable, "session_id");
+            assert(sTerminalSessionId != NULL);
+            sOwnedTerminalSessionId = xwork__dup_cstr(sTerminalSessionId);
+            assert(sOwnedTerminalSessionId != NULL);
+            sTerminalSessionId = sOwnedTerminalSessionId;
+            assert(xwork_test_json_get_size(tTerminalTable, "session_index", &iTerminalSessionIndex));
+            assert(iTerminalSessionIndex > 0u);
+            assert(xwork_test_json_get_size(tTerminalTable, "next_after_seq", &iTerminalNextAfterSeq));
+            xvoUnref(tTerminalTable);
+            tTerminalTable = NULL;
+
+            sTerminalRequestJson = xwork__dup_printf(
+                iTerminalNextAfterSeq > 0u
+                    ? "{\"session_id\":\"%s\",\"input_text\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "\","
+                      "\"write_eof\":true,\"include_state\":true,\"after_seq\":%zu}"
+                    : "{\"session_id\":\"%s\",\"input_text\":\"" XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT "\","
+                      "\"write_eof\":true,\"include_state\":true}",
+                sTerminalSessionId,
+                iTerminalNextAfterSeq
+            );
+            assert(sTerminalRequestJson != NULL);
+            assert(
+                xwork_runtime_invoke_host_service(
+                    pLocalHostRuntime,
+                    XWORK_HOST_PROCESS,
+                    XWORK_HOST_PROCESS_TERMINAL_WRITE,
+                    sTerminalRequestJson,
+                    &tLocalHostResult
+                ) == XWORK_OK
+            );
+            free(sTerminalRequestJson);
+            sTerminalRequestJson = NULL;
+            assert(strcmp(tLocalHostResult.sVisibleSummary, "process.terminal_write ok") == 0);
+            assert(strstr(tLocalHostResult.sOutputText, "\"session_index\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"bytes_written\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"write_eof\":true") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"stdin_closed\":true") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"output_text\":\"") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"output_bytes\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"event_end_seq\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"has_more_events\":") != NULL);
+            assert(strstr(tLocalHostResult.sOutputText, "\"event_stream_done\":") != NULL);
+            assert(xwork_test_parse_json_table(tLocalHostResult.sOutputText, &tTerminalTable));
+            assert(xwork_test_json_get_size(tTerminalTable, "next_after_seq", &iTerminalNextAfterSeq));
+            xvoUnref(tTerminalTable);
+            tTerminalTable = NULL;
+
+            for ( iPoll = 0u; iPoll < 5u; ++iPoll ) {
+                sTerminalRequestJson = xwork__dup_printf(
+                    iTerminalNextAfterSeq > 0u
+                        ? "{\"session_id\":\"%s\",\"after_seq\":%zu}"
+                        : "{\"session_id\":\"%s\"}",
+                    sTerminalSessionId,
+                    iTerminalNextAfterSeq
+                );
+                assert(sTerminalRequestJson != NULL);
+                assert(
+                    xwork_runtime_invoke_host_service(
+                        pLocalHostRuntime,
+                        XWORK_HOST_PROCESS,
+                        XWORK_HOST_PROCESS_TERMINAL_READ,
+                        sTerminalRequestJson,
+                        &tLocalHostResult
+                    ) == XWORK_OK
+                );
+                free(sTerminalRequestJson);
+                sTerminalRequestJson = NULL;
+                assert(strcmp(tLocalHostResult.sVisibleSummary, "process.terminal_read ok") == 0);
+                assert(strstr(tLocalHostResult.sOutputText, "\"session_index\":") != NULL);
+                assert(strstr(tLocalHostResult.sOutputText, "\"stdin_closed\":true") != NULL);
+                assert(xwork_test_parse_json_table(tLocalHostResult.sOutputText, &tTerminalTable));
+                assert(xwork_test_json_get_bool(tTerminalTable, "done", &bTerminalDone));
+                assert(xwork_test_json_get_size(tTerminalTable, "next_after_seq", &iTerminalNextAfterSeq));
+                assert(xwork_test_json_get_size(tTerminalTable, "event_end_seq", &iTerminalEventEndSeq));
+                assert(xwork_test_json_get_bool(tTerminalTable, "has_more_events", &bTerminalHasMoreEvents));
+                assert(xwork_test_json_get_bool(tTerminalTable, "event_stream_done", &bTerminalEventStreamDone));
+                xvoUnref(tTerminalTable);
+                tTerminalTable = NULL;
+                if ( bTerminalDone ) {
+                    assert(bTerminalEventStreamDone);
+                    assert(strstr(tLocalHostResult.sOutputText, "\"kind\":\"exit\"") != NULL);
+                    break;
+                }
+                xrtSleep(20u);
+            }
+            assert(strstr(tLocalHostResult.sOutputText, "\"terminal_output_captured\":") != NULL);
+
+            sTerminalRequestJson = xwork__dup_printf(
+                "{\"session_id\":\"%s\"}",
+                sTerminalSessionId
+            );
+            assert(sTerminalRequestJson != NULL);
+            assert(
+                xwork_runtime_invoke_host_service(
+                    pLocalHostRuntime,
+                    XWORK_HOST_PROCESS,
+                    XWORK_HOST_PROCESS_TERMINAL_STOP,
+                    sTerminalRequestJson,
+                    &tLocalHostResult
+                ) == XWORK_OK
+            );
+            free(sTerminalRequestJson);
+            sTerminalRequestJson = NULL;
+            assert(strcmp(tLocalHostResult.sVisibleSummary, "process.terminal_stop ok") == 0);
+            assert(strstr(tLocalHostResult.sOutputText, "\"removed\":true") != NULL);
+
             free(sOwnedTerminalSessionId);
         }
     } else {
@@ -3733,6 +4104,8 @@ int main(void)
         assert(tRunSnapshot.sLastToolResultText != NULL);
         assert(strstr(tRunSnapshot.sLastToolResultText, "\"ok\":true") != NULL);
         assert(strstr(tRunSnapshot.sLastToolResultText, "\"removed\":true") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"session_index\":") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"stdin_closed\":false") != NULL);
         assert(strstr(tRunSnapshot.sLastToolResultText, "\"terminal_output_captured\":") != NULL);
         assert(strstr(tRunSnapshot.sLastToolResultText, "\"output_text\":\"") != NULL);
         assert(strstr(tRunSnapshot.sLastToolResultText, "\"output_bytes\":") != NULL);
@@ -3768,6 +4141,94 @@ int main(void)
             assert(strstr(tArtifact.sStorageRef, "terminal-session-") != NULL);
             xwork_artifact_reset(&tArtifact);
         }
+        xwork_run_destroy(pLocalHostRun);
+        pLocalHostRun = NULL;
+
+        tAdapterCtx.iTurnCount = 0;
+        asWorkspaceIds[0] = "local-host-main";
+        xwork_run_options_init(&tRunOptions);
+        xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+        tRunOptions.sRunId = "run-local-terminal-list-tool";
+        tRunOptions.sInstruction = "Run the local interactive terminal session listing through host service.";
+        tRunOptions.sLlmProfileId = "mock-profile";
+        tRunOptions.sSessionProfileId = "mock-session";
+        tRunOptions.psWorkspaceIds = asWorkspaceIds;
+        tRunOptions.iWorkspaceCount = 1u;
+        assert(
+            xwork_run_create(
+                pLocalHostRuntime,
+                &tRunOptions,
+                &pLocalHostRun
+            ) == XWORK_OK
+        );
+        xwork_orchestrator_options_init(&tExecOptions);
+        tExecOptions.iMaxTurns = 8u;
+        tExecOptions.bAutoApprove = true;
+        assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_OK);
+        assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+        assert(
+            strcmp(
+                xwork_run_get_last_output_text(pLocalHostRun),
+                "Host service terminal list completed."
+            ) == 0
+        );
+        assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+        assert(tRunSnapshot.sLastToolResultText != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"removed\":true") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"session_name\":\"build-shell\"") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"session_index\":") != NULL);
+        xwork_run_snapshot_reset(&tRunSnapshot);
+        assert(xwork_run_get_artifact_count(pLocalHostRun) >= 1u);
+        assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+        assert(strcmp(tArtifact.sCommandText, XWORK_TEST_PROCESS_TERMINAL_SESSION_COMMAND) == 0);
+        xwork_artifact_reset(&tArtifact);
+        xwork_run_destroy(pLocalHostRun);
+        pLocalHostRun = NULL;
+
+        tAdapterCtx.iTurnCount = 0;
+        asWorkspaceIds[0] = "local-host-main";
+        xwork_run_options_init(&tRunOptions);
+        xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+        tRunOptions.sRunId = "run-local-terminal-session-eof-tool";
+        tRunOptions.sInstruction = "Run the local interactive terminal session with EOF through host service.";
+        tRunOptions.sLlmProfileId = "mock-profile";
+        tRunOptions.sSessionProfileId = "mock-session";
+        tRunOptions.psWorkspaceIds = asWorkspaceIds;
+        tRunOptions.iWorkspaceCount = 1u;
+        assert(
+            xwork_run_create(
+                pLocalHostRuntime,
+                &tRunOptions,
+                &pLocalHostRun
+            ) == XWORK_OK
+        );
+        xwork_orchestrator_options_init(&tExecOptions);
+        tExecOptions.iMaxTurns = 8u;
+        tExecOptions.bAutoApprove = true;
+        assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_OK);
+        assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+        assert(
+            strcmp(
+                xwork_run_get_last_output_text(pLocalHostRun),
+                "Host service terminal EOF session completed."
+            ) == 0
+        );
+        assert(xwork_run_get_snapshot(pLocalHostRun, &tRunSnapshot) == XWORK_OK);
+        assert(tRunSnapshot.sLastToolResultText != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"ok\":true") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"done\":") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"event_stream_done\":") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"session_id\":\"terminal-session-") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"session_index\":") != NULL);
+        assert(strstr(tRunSnapshot.sLastToolResultText, "\"stdin_closed\":true") != NULL);
+        xwork_run_snapshot_reset(&tRunSnapshot);
+        assert(xwork_run_get_artifact_count(pLocalHostRun) >= 2u);
+        assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+        assert(strcmp(tArtifact.sCommandText, XWORK_TEST_PROCESS_TERMINAL_SESSION_COMMAND) == 0);
+        xwork_artifact_reset(&tArtifact);
+        assert(xwork_run_get_artifact(pLocalHostRun, 1u, &tArtifact) == XWORK_OK);
+        assert(strcmp(tArtifact.sCommandText, XWORK_TEST_PROCESS_TERMINAL_SESSION_INPUT) == 0);
+        xwork_artifact_reset(&tArtifact);
         xwork_run_destroy(pLocalHostRun);
         pLocalHostRun = NULL;
     }

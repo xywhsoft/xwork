@@ -75,6 +75,9 @@ What exists now:
 - local host now supports interactive terminal sessions via `process.start_terminal` / `process.terminal_read` / `process.terminal_write` / `process.terminal_resize` / `process.terminal_stop`
 - local `process.terminal_resize` now reports explicit `resize_applied` so terminal resize can degrade gracefully instead of failing the whole session
 - local terminal session state results now return explicit `output_text` / `output_bytes`, plus `event_end_seq` / `has_more_events` / `event_stream_done` alongside ordered events
+- local `process.terminal_write` now supports `include_state:true` with optional `after_seq` / `max_events`, and also `write_eof:true` to close terminal stdin explicitly; a write can return the post-write incremental terminal state in one round trip
+- local terminal session state results now also carry stable metadata `session_index` / `stdin_closed`, so callers can track session lifetime without inferring it from write responses
+- local host now supports `process.list_terminals`, and terminal sessions can carry a stable `session_name`, so callers can rediscover and manage active interactive sessions without caching everything out-of-band
 - builtin `process.exec` artifact synthesis now preserves stderr instead of dropping it from command artifacts
 - local `process.exec` failure paths now preserve structured result payloads for invalid request / timeout / non-zero exit cases, including requested stop policy and observed stop reason
 - local `process.exec` stdin_text is bounded by configured `iMaxProcessInputBytes`

@@ -254,6 +254,9 @@
 - 本地 host 已支持 interactive terminal session：`process.start_terminal` / `process.terminal_read` / `process.terminal_write` / `process.terminal_resize` / `process.terminal_stop`
 - `process.terminal_resize` 已显式返回 `resize_applied`，使 terminal resize 可以 best-effort 降级，而不是直接打断整个 session
 - interactive terminal session state result 已显式返回 `output_text` / `output_bytes`，并带 `event_end_seq` / `has_more_events` / `event_stream_done`，调用方不必自己拆 event 或推断是否还有后续输出
+- `process.terminal_write` 已支持 `include_state:true`、可选 `after_seq` / `max_events`，以及 `write_eof:true` 显式关闭 terminal stdin；单次写入后可直接返回 post-write 增量 terminal state
+- interactive terminal session state result 现在也带稳定元数据 `session_index` / `stdin_closed`，调用方不需要再从单次 write 结果反推会话状态
+- local host 现在支持 `process.list_terminals`，并且 terminal session 可以携带稳定的 `session_name`，调用方可以重新发现并管理活跃 interactive terminal session，而不需要把所有会话状态都自行缓存到外部
 - builtin `process.exec` artifact bridge 已保留 stderr，不再只落 stdout
 - `process.exec` 失败路径已保留最小结构化结果，可区分 invalid request / timeout / non-zero exit，并带回请求 stop policy 与观察到的 stop reason
 - `process.exec` 最小 stdin contract 已会校验 configured `iMaxProcessInputBytes`
