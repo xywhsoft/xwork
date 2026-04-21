@@ -53,14 +53,16 @@ static void xwork__init_memory_context_block(
     xllm_context_block *pBlock,
     xllm_message *pMessage,
     xllm_content_part *pPart,
-    const char *sText
+    const char *sText,
+    int iPriority,
+    bool bPinned
 )
 {
     memset(pBlock, 0, sizeof(*pBlock));
     xwork__init_system_message(pMessage, pPart, sText);
     pBlock->eKind = XLLM_CONTEXT_MEMORY;
-    pBlock->iPriority = 0;
-    pBlock->bPinned = false;
+    pBlock->iPriority = iPriority;
+    pBlock->bPinned = bPinned;
     pBlock->pMessages = pMessage;
     pBlock->iMessageCount = 1u;
 }
@@ -157,6 +159,124 @@ void xwork__run_reset_session_state(xwork_run *pRun)
 
     xwork__run_discard_session(pRun);
     xwork__free_cstr(&pRun->sSessionStateData);
+}
+
+typedef struct {
+    size_t iHistoryCount;
+    uint32 uCommittedTurns;
+    uint32 uSummaryTurns;
+    bool bHasSessionSummary;
+} xwork__session_compaction_metrics;
+
+static xllm_compact_strategy xwork__to_xllm_compact_strategy(
+    xwork_session_compact_strategy eStrategy
+)
+{
+    switch ( eStrategy ) {
+        case XWORK_SESSION_COMPACT_TRUNCATE:
+            return XLLM_COMPACT_TRUNCATE;
+        case XWORK_SESSION_COMPACT_SUMMARIZE:
+            return XLLM_COMPACT_SUMMARIZE;
+        case XWORK_SESSION_COMPACT_CUSTOM:
+            return XLLM_COMPACT_CUSTOM;
+        default:
+            return XLLM_COMPACT_SUMMARIZE;
+    }
+}
+
+static uint32 xwork__size_to_u32_saturating(size_t iValue)
+{
+    return iValue > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32)iValue;
+}
+
+static xwork_status xwork__session_get_compaction_metrics(
+    xllm_session *pSession,
+    xwork__session_compaction_metrics *pMetrics
+)
+{
+    xllm_session_state *pState = NULL;
+    xvalue tStateValue = NULL;
+    xvalue tHistoryValue = NULL;
+    const char *sSessionSummary;
+
+    if ( !pSession || !pMetrics ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    memset(pMetrics, 0, sizeof(*pMetrics));
+    if ( xllm_session_export_state(pSession, &pState) != XRT_NET_OK || !pState ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+    if ( xllm_session_state_to_xvalue(pState, &tStateValue) != XRT_NET_OK || !tStateValue ) {
+        xllm_session_state_free(pState);
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+    tHistoryValue = xvoTableGetValue(tStateValue, (str)"history", 0u);
+    if ( tHistoryValue && xvoType(tHistoryValue) == XVO_DT_ARRAY ) {
+        pMetrics->iHistoryCount = (size_t)xvoArrayItemCount(tHistoryValue);
+    }
+    pMetrics->uCommittedTurns =
+        (uint32)xvoTableGetInt(tStateValue, (str)"committed_turns", 0u);
+    pMetrics->uSummaryTurns =
+        (uint32)xvoTableGetInt(tStateValue, (str)"summary_turns", 0u);
+    sSessionSummary = (const char *)xvoTableGetText(tStateValue, (str)"session_summary", 0u);
+    pMetrics->bHasSessionSummary = sSessionSummary && sSessionSummary[0];
+
+    xvoUnref(tStateValue);
+    xllm_session_state_free(pState);
+    return XWORK_OK;
+}
+
+static bool xwork__session_compacted_between(
+    const xwork__session_compaction_metrics *pBefore,
+    const xwork__session_compaction_metrics *pAfter
+)
+{
+    uint32 uExpectedCommittedTurns;
+
+    if ( !pBefore || !pAfter ) {
+        return false;
+    }
+
+    if ( pAfter->uSummaryTurns > pBefore->uSummaryTurns ) {
+        return true;
+    }
+    if ( !pBefore->bHasSessionSummary && pAfter->bHasSessionSummary ) {
+        return true;
+    }
+
+    uExpectedCommittedTurns = pBefore->uCommittedTurns < 0xFFFFFFFFu
+        ? pBefore->uCommittedTurns + 1u
+        : pBefore->uCommittedTurns;
+    if ( pAfter->uCommittedTurns < uExpectedCommittedTurns ) {
+        return true;
+    }
+    if ( pAfter->iHistoryCount < pBefore->iHistoryCount ) {
+        return true;
+    }
+
+    return false;
+}
+
+static bool xwork__session_policy_should_compact_now(
+    const xwork_session_policy *pPolicy,
+    const xwork__session_compaction_metrics *pMetrics
+)
+{
+    if ( !pPolicy || !pMetrics || !pPolicy->bEnableAutoCompact ) {
+        return false;
+    }
+    if ( pPolicy->iCompactTriggerTurns != 0u &&
+         pMetrics->uCommittedTurns < pPolicy->iCompactTriggerTurns ) {
+        return false;
+    }
+    if ( pPolicy->iKeepRecentTurns != 0u &&
+         pMetrics->uCommittedTurns <= pPolicy->iKeepRecentTurns ) {
+        return false;
+    }
+    return pMetrics->uCommittedTurns > 0u && pMetrics->iHistoryCount > 0u;
 }
 
 static xwork_status xwork__serialize_session_state(
@@ -308,13 +428,17 @@ xwork_status xwork__run_ensure_session(xwork_run *pRun)
 
     xllm_session_options_init(&tOptions);
     tOptions.sProfileId = sProfileId;
-    tOptions.bEnableAutoCompact = pRun->tSessionPolicy.bEnableAutoCompact;
+    tOptions.bEnableAutoCompact = false;
     tOptions.fCompactTriggerRatio = pRun->tSessionPolicy.fCompactTriggerRatio;
-    if ( pRun->tSessionPolicy.iCompactTriggerTurns > 0xFFFFFFFFu ) {
-        tOptions.uCompactTriggerTurns = 0xFFFFFFFFu;
-    } else {
-        tOptions.uCompactTriggerTurns = (uint32)pRun->tSessionPolicy.iCompactTriggerTurns;
-    }
+    tOptions.uCompactTriggerTurns =
+        xwork__size_to_u32_saturating(pRun->tSessionPolicy.iCompactTriggerTurns);
+    tOptions.uReserveOutputTokens =
+        xwork__size_to_u32_saturating(pRun->tSessionPolicy.iReserveOutputTokens);
+    tOptions.uKeepRecentTurns =
+        xwork__size_to_u32_saturating(pRun->tSessionPolicy.iKeepRecentTurns);
+    tOptions.bKeepActiveToolChain = pRun->tSessionPolicy.bKeepActiveToolChain;
+    tOptions.eCompactStrategy =
+        xwork__to_xllm_compact_strategy(pRun->tSessionPolicy.eCompactStrategy);
     if ( xllm_session_create(pRun->pRuntime->pLlmRuntime, &tOptions, &pSession) != XRT_NET_OK ||
          !pSession ) {
         return XWORK_ERROR_EXTERNAL_FAILURE;
@@ -406,6 +530,7 @@ static xwork_status xwork__append_memory_context_text(
 
 static xwork_status xwork__apply_workspace_memory_context(
     const xwork_run *pRun,
+    const xwork_orchestrator_options *pOptions,
     xllm_request *pRequest,
     xwork_memory_context *pContext,
     xllm_error *pError
@@ -440,6 +565,11 @@ static xwork_status xwork__apply_workspace_memory_context(
         if ( !xwork__workspace_has_searchable_memory(pWorkspace) ) {
             continue;
         }
+        if ( pOptions &&
+             pOptions->iMemoryContextMaxBlocks > 0u &&
+             iWorkspaceCount >= pOptions->iMemoryContextMaxBlocks ) {
+            break;
+        }
 
         pMemory = xwork_workspace_get_memory(pWorkspace);
         xllm_memory_search_options_init(&tSearchOptions);
@@ -447,7 +577,22 @@ static xwork_status xwork__apply_workspace_memory_context(
         xllm_memory_context_options_init(&tContextOptions);
 
         tSearchOptions.sQuery = pRun->sInstruction;
+        if ( pOptions && pOptions->iMemorySearchMaxHits > 0u ) {
+            tSearchOptions.uMaxHits = (uint32)pOptions->iMemorySearchMaxHits;
+        }
         tContextOptions.sLabel = sLabel;
+        if ( pOptions ) {
+            tContextOptions.iPriority = (int32)pOptions->iMemoryContextPriority;
+            tContextOptions.bPinned = pOptions->bMemoryContextPinned;
+            if ( pOptions->iMemoryContextMaxCharsPerHit > 0u ) {
+                tContextOptions.uMaxCharsPerHit =
+                    (uint32)pOptions->iMemoryContextMaxCharsPerHit;
+            }
+            if ( pOptions->iMemoryContextMaxTotalChars > 0u ) {
+                tContextOptions.uMaxTotalChars =
+                    (uint32)pOptions->iMemoryContextMaxTotalChars;
+            }
+        }
         (void)snprintf(sLabel, sizeof(sLabel), "Workspace memory: %s", sWorkspaceId);
 
         iExistingBlockCount = pRequest->iContextBlockCount;
@@ -669,15 +814,316 @@ static const char *xwork__artifact_report_class_name(xwork_artifact_report_class
     }
 }
 
+static bool xwork__mask_allows_value(unsigned int uMask, int iValue)
+{
+    if ( uMask == 0u ) {
+        return true;
+    }
+    if ( iValue < 0 || iValue >= 32 ) {
+        return false;
+    }
+    return (uMask & (1u << (unsigned int)iValue)) != 0u;
+}
+
+static bool xwork__ascii_contains_ci(const char *sText, const char *sPattern);
+
+static bool xwork__artifact_text_looks_sensitive(const char *sText)
+{
+    static const char *const psSensitivePatterns[] = {
+        "password",
+        "passwd",
+        "secret",
+        "api_key",
+        "apikey",
+        "access_token",
+        "refresh_token",
+        "private key",
+        "authorization:",
+        "bearer ",
+        "x-api-key",
+        "credential",
+        ".env"
+    };
+    size_t i;
+
+    if ( !sText || !sText[0] ) {
+        return false;
+    }
+
+    for ( i = 0u; i < sizeof(psSensitivePatterns) / sizeof(psSensitivePatterns[0]); ++i ) {
+        if ( xwork__ascii_contains_ci(sText, psSensitivePatterns[i]) ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool xwork__artifact_looks_sensitive(const xwork_artifact *pArtifact)
+{
+    if ( !pArtifact ) {
+        return false;
+    }
+
+    return xwork__artifact_text_looks_sensitive(pArtifact->sName) ||
+        xwork__artifact_text_looks_sensitive(pArtifact->sMimeType) ||
+        xwork__artifact_text_looks_sensitive(pArtifact->sStorageRef) ||
+        xwork__artifact_text_looks_sensitive(pArtifact->sSummary) ||
+        xwork__artifact_text_looks_sensitive(pArtifact->sContentText) ||
+        xwork__artifact_text_looks_sensitive(pArtifact->sPatchApplyResultJson) ||
+        xwork__artifact_text_looks_sensitive(pArtifact->sPatchFileSummaryJson) ||
+        xwork__artifact_text_looks_sensitive(pArtifact->sCommandText);
+}
+
+static bool xwork__artifact_memory_ingest_policy_allows(
+    const xwork_artifact *pArtifact,
+    const xwork_orchestrator_options *pOptions
+)
+{
+    if ( !pArtifact ) {
+        return false;
+    }
+    if ( !pOptions ) {
+        return !xwork__artifact_looks_sensitive(pArtifact);
+    }
+
+    if ( !xwork__mask_allows_value(
+            pOptions->uArtifactMemoryIngestKindMask,
+            (int)pArtifact->eKind
+         ) ) {
+        return false;
+    }
+    if ( pOptions->uArtifactMemoryIngestOutputClassMask != 0u &&
+         !xwork__mask_allows_value(
+             pOptions->uArtifactMemoryIngestOutputClassMask,
+             (int)pArtifact->eOutputClass
+         ) ) {
+        return false;
+    }
+    if ( pOptions->uArtifactMemoryIngestReportClassMask != 0u &&
+         !xwork__mask_allows_value(
+             pOptions->uArtifactMemoryIngestReportClassMask,
+             (int)pArtifact->eReportClass
+         ) ) {
+        return false;
+    }
+    if ( !pOptions->bIngestSensitiveArtifactsToMemory &&
+         xwork__artifact_looks_sensitive(pArtifact) ) {
+        return false;
+    }
+
+    return true;
+}
+
+static char *xwork__json_escape_string(const char *sText)
+{
+    size_t i;
+    size_t iLength;
+    size_t iOutLength = 0u;
+    char *sEscaped;
+    char *pOut;
+
+    if ( !sText ) {
+        sText = "";
+    }
+    iLength = strlen(sText);
+    for ( i = 0u; i < iLength; ++i ) {
+        unsigned char ch = (unsigned char)sText[i];
+        switch ( ch ) {
+            case '"':
+            case '\\':
+            case '\b':
+            case '\f':
+            case '\n':
+            case '\r':
+            case '\t':
+                iOutLength += 2u;
+                break;
+            default:
+                if ( ch < 0x20u ) {
+                    iOutLength += 6u;
+                } else {
+                    iOutLength += 1u;
+                }
+                break;
+        }
+    }
+
+    sEscaped = (char *)malloc(iOutLength + 1u);
+    if ( !sEscaped ) {
+        return NULL;
+    }
+    pOut = sEscaped;
+    for ( i = 0u; i < iLength; ++i ) {
+        unsigned char ch = (unsigned char)sText[i];
+        switch ( ch ) {
+            case '"': *pOut++ = '\\'; *pOut++ = '"'; break;
+            case '\\': *pOut++ = '\\'; *pOut++ = '\\'; break;
+            case '\b': *pOut++ = '\\'; *pOut++ = 'b'; break;
+            case '\f': *pOut++ = '\\'; *pOut++ = 'f'; break;
+            case '\n': *pOut++ = '\\'; *pOut++ = 'n'; break;
+            case '\r': *pOut++ = '\\'; *pOut++ = 'r'; break;
+            case '\t': *pOut++ = '\\'; *pOut++ = 't'; break;
+            default:
+                if ( ch < 0x20u ) {
+                    sprintf(pOut, "\\u%04x", (unsigned int)ch);
+                    pOut += 6u;
+                } else {
+                    *pOut++ = (char)ch;
+                }
+                break;
+        }
+    }
+    *pOut = '\0';
+    return sEscaped;
+}
+
+static bool xwork__command_looks_like_build_or_test(const char *sCommand)
+{
+    if ( !sCommand || !sCommand[0] ) {
+        return false;
+    }
+    return strstr(sCommand, "test") != NULL ||
+        strstr(sCommand, "build") != NULL ||
+        strstr(sCommand, "make") != NULL ||
+        strstr(sCommand, "gcc") != NULL ||
+        strstr(sCommand, "clang") != NULL ||
+        strstr(sCommand, "cmake") != NULL ||
+        strstr(sCommand, "ctest") != NULL ||
+        strstr(sCommand, "pytest") != NULL ||
+        strstr(sCommand, "npm run") != NULL;
+}
+
+static xwork_status xwork__emit_process_diagnostics_artifact(
+    xwork_run *pRun,
+    const char *sCommand,
+    const char *sCwd,
+    const char *sStdout,
+    const char *sStderr,
+    bool bHasExitCode,
+    int iExitCode,
+    bool bStdoutTruncated,
+    bool bStderrTruncated
+)
+{
+    xwork_report_artifact_options tOptions;
+    char *sEscapedCommand = NULL;
+    char *sEscapedCwd = NULL;
+    char *sEscapedMessage = NULL;
+    char *sReportText = NULL;
+    const char *sMessage;
+    const char *sSeverity;
+    const char *sStatus;
+    bool bBuildOrTest;
+    bool bHasStderr;
+    bool bShouldEmit;
+    size_t iDiagnosticCount;
+    xwork_status iStatus;
+
+    if ( !pRun || !sCommand ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    bBuildOrTest = xwork__command_looks_like_build_or_test(sCommand);
+    bHasStderr = sStderr && sStderr[0];
+    bShouldEmit = bBuildOrTest || bHasStderr || (bHasExitCode && iExitCode != 0);
+    if ( !bShouldEmit ) {
+        return XWORK_OK;
+    }
+
+    sMessage = bHasStderr ? sStderr : (sStdout ? sStdout : "");
+    sSeverity = (bHasExitCode && iExitCode != 0) ? "error" :
+        (bHasStderr ? "warning" : "note");
+    sStatus = (bHasExitCode && iExitCode != 0) ? "failed" : "passed";
+    iDiagnosticCount = (bHasStderr || (bHasExitCode && iExitCode != 0)) ? 1u : 0u;
+
+    sEscapedCommand = xwork__json_escape_string(sCommand);
+    sEscapedCwd = xwork__json_escape_string(sCwd ? sCwd : "");
+    sEscapedMessage = xwork__json_escape_string(sMessage);
+    if ( !sEscapedCommand || !sEscapedCwd || !sEscapedMessage ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    sReportText = xwork__dup_printf(
+        "{\"schema\":\"" XWORK_DIAGNOSTICS_SCHEMA_V1 "\","
+        "\"source\":\"process.exec\",\"command\":\"%s\",\"cwd\":\"%s\","
+        "\"status\":\"%s\",\"exit_code\":%d,\"has_exit_code\":%s,"
+        "\"stdout_truncated\":%s,\"stderr_truncated\":%s,"
+        "\"diagnostic_count\":%lu,\"diagnostics\":[%s"
+        "{\"severity\":\"%s\",\"source\":\"process.exec\","
+        "\"location\":\"\",\"message\":\"%s\"}%s]}",
+        sEscapedCommand,
+        sEscapedCwd,
+        sStatus,
+        iExitCode,
+        bHasExitCode ? "true" : "false",
+        bStdoutTruncated ? "true" : "false",
+        bStderrTruncated ? "true" : "false",
+        (unsigned long)iDiagnosticCount,
+        iDiagnosticCount ? "" : "",
+        sSeverity,
+        sEscapedMessage,
+        iDiagnosticCount ? "" : ""
+    );
+    if ( !sReportText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    if ( iDiagnosticCount == 0u ) {
+        free(sReportText);
+        sReportText = xwork__dup_printf(
+            "{\"schema\":\"" XWORK_DIAGNOSTICS_SCHEMA_V1 "\","
+            "\"source\":\"process.exec\",\"command\":\"%s\",\"cwd\":\"%s\","
+            "\"status\":\"%s\",\"exit_code\":%d,\"has_exit_code\":%s,"
+            "\"stdout_truncated\":%s,\"stderr_truncated\":%s,"
+            "\"diagnostic_count\":0,\"diagnostics\":[]}",
+            sEscapedCommand,
+            sEscapedCwd,
+            sStatus,
+            iExitCode,
+            bHasExitCode ? "true" : "false",
+            bStdoutTruncated ? "true" : "false",
+            bStderrTruncated ? "true" : "false"
+        );
+        if ( !sReportText ) {
+            iStatus = XWORK_ERROR_NO_MEMORY;
+            goto cleanup;
+        }
+    }
+
+    xwork_report_artifact_options_init(&tOptions);
+    tOptions.sName = "process.diagnostics.json";
+    tOptions.sMimeType = "application/json";
+    tOptions.sStorageRef = sCwd;
+    tOptions.sSummary = (bHasExitCode && iExitCode != 0)
+        ? "process.exec diagnostics failed"
+        : "process.exec diagnostics";
+    tOptions.eReportClass = XWORK_ARTIFACT_REPORT_DIAGNOSTICS;
+    tOptions.sReportSubjectRef = sCommand;
+    tOptions.sReportText = sReportText;
+    iStatus = xwork_run_emit_report_artifact(pRun, &tOptions, NULL);
+
+cleanup:
+    free(sEscapedCommand);
+    free(sEscapedCwd);
+    free(sEscapedMessage);
+    free(sReportText);
+    return iStatus;
+}
+
 static xwork_status xwork__ingest_artifact_to_memory(
     xwork_run *pRun,
-    const xwork_artifact *pArtifact
+    const xwork_artifact *pArtifact,
+    const xwork_orchestrator_options *pOptions
 )
 {
     size_t i;
 
     if ( !pRun || !pRun->pRuntime || !pArtifact ) {
         return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !xwork__artifact_memory_ingest_policy_allows(pArtifact, pOptions) ) {
+        return XWORK_OK;
     }
 
     for ( i = 0u; i < pRun->iWorkspaceCount; ++i ) {
@@ -742,7 +1188,8 @@ static xwork_status xwork__ingest_artifact_to_memory(
                 "Report subject ref: %s\nSummary: %s\n"
                 "Content bytes: %lu\nContent lines: %lu\n"
                 "Patch files: %lu\nPatch hunks: %lu\n"
-                "Patch added lines: %lu\nPatch deleted lines: %lu",
+                "Patch added lines: %lu\nPatch deleted lines: %lu\n"
+                "Patch apply result: %s\nPatch file summary: %s",
                 xwork__artifact_kind_name(pArtifact->eKind),
                 sArtifactName,
                 pArtifact->sMimeType ? pArtifact->sMimeType : "",
@@ -757,7 +1204,9 @@ static xwork_status xwork__ingest_artifact_to_memory(
                 (unsigned long)pArtifact->iPatchFileCount,
                 (unsigned long)pArtifact->iPatchHunkCount,
                 (unsigned long)pArtifact->iPatchAddedLineCount,
-                (unsigned long)pArtifact->iPatchDeletedLineCount
+                (unsigned long)pArtifact->iPatchDeletedLineCount,
+                pArtifact->sPatchApplyResultJson ? pArtifact->sPatchApplyResultJson : "",
+                pArtifact->sPatchFileSummaryJson ? pArtifact->sPatchFileSummaryJson : ""
             );
         } else if ( pArtifact->bHasContentStats ) {
             sText = xwork__dup_printf(
@@ -783,7 +1232,8 @@ static xwork_status xwork__ingest_artifact_to_memory(
                 "Output class: %s\nOutput role: %s\nReport class: %s\n"
                 "Report subject ref: %s\nSummary: %s\n"
                 "Patch files: %lu\nPatch hunks: %lu\n"
-                "Patch added lines: %lu\nPatch deleted lines: %lu",
+                "Patch added lines: %lu\nPatch deleted lines: %lu\n"
+                "Patch apply result: %s\nPatch file summary: %s",
                 xwork__artifact_kind_name(pArtifact->eKind),
                 sArtifactName,
                 pArtifact->sMimeType ? pArtifact->sMimeType : "",
@@ -796,7 +1246,9 @@ static xwork_status xwork__ingest_artifact_to_memory(
                 (unsigned long)pArtifact->iPatchFileCount,
                 (unsigned long)pArtifact->iPatchHunkCount,
                 (unsigned long)pArtifact->iPatchAddedLineCount,
-                (unsigned long)pArtifact->iPatchDeletedLineCount
+                (unsigned long)pArtifact->iPatchDeletedLineCount,
+                pArtifact->sPatchApplyResultJson ? pArtifact->sPatchApplyResultJson : "",
+                pArtifact->sPatchFileSummaryJson ? pArtifact->sPatchFileSummaryJson : ""
             );
         } else {
             sText = xwork__dup_printf(
@@ -886,7 +1338,8 @@ static xwork_status xwork__ingest_artifact_to_memory(
 
 static xwork_status xwork__ingest_artifacts_to_memory_range(
     xwork_run *pRun,
-    size_t iStartIndex
+    size_t iStartIndex,
+    const xwork_orchestrator_options *pOptions
 )
 {
     size_t i;
@@ -898,7 +1351,8 @@ static xwork_status xwork__ingest_artifacts_to_memory_range(
     for ( i = iStartIndex; i < pRun->iArtifactCount; ++i ) {
         xwork_status iStatus = xwork__ingest_artifact_to_memory(
             pRun,
-            &pRun->pArtifactLog[i].tArtifact
+            &pRun->pArtifactLog[i].tArtifact,
+            pOptions
         );
         if ( iStatus != XWORK_OK ) {
             return iStatus;
@@ -908,9 +1362,160 @@ static xwork_status xwork__ingest_artifacts_to_memory_range(
     return XWORK_OK;
 }
 
+static char xwork__ascii_lower(char c)
+{
+    if ( c >= 'A' && c <= 'Z' ) {
+        return (char)(c - 'A' + 'a');
+    }
+    return c;
+}
+
+static bool xwork__ascii_contains_ci(const char *sText, const char *sPattern)
+{
+    size_t i;
+    size_t j;
+    size_t iTextLength;
+    size_t iPatternLength;
+
+    if ( !sText || !sPattern || !sPattern[0] ) {
+        return false;
+    }
+
+    iTextLength = strlen(sText);
+    iPatternLength = strlen(sPattern);
+    if ( iPatternLength > iTextLength ) {
+        return false;
+    }
+
+    for ( i = 0u; i <= iTextLength - iPatternLength; ++i ) {
+        bool bMatches = true;
+
+        for ( j = 0u; j < iPatternLength; ++j ) {
+            if ( xwork__ascii_lower(sText[i + j]) !=
+                 xwork__ascii_lower(sPattern[j]) ) {
+                bMatches = false;
+                break;
+            }
+        }
+        if ( bMatches ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool xwork__tool_arguments_look_destructive_command(
+    const xwork_tool_def *pTool,
+    const char *sArgumentsJson
+)
+{
+    static const char *const psDestructivePatterns[] = {
+        "rm -",
+        "rm /",
+        "del ",
+        "erase ",
+        "rd ",
+        "rmdir ",
+        "remove-item",
+        "git clean",
+        "git reset --hard",
+        "git checkout --"
+    };
+    size_t i;
+
+    if ( !pTool || !sArgumentsJson ) {
+        return false;
+    }
+    if ( strcmp(pTool->sToolId, XWORK_TOOL_PROCESS_EXEC) != 0 &&
+         strcmp(pTool->sToolId, XWORK_TOOL_PROCESS_START_TERMINAL) != 0 &&
+         strcmp(pTool->sToolId, XWORK_TOOL_PROCESS_TERMINAL_WRITE) != 0 ) {
+        return false;
+    }
+
+    for ( i = 0u; i < sizeof(psDestructivePatterns) / sizeof(psDestructivePatterns[0]); ++i ) {
+        if ( xwork__ascii_contains_ci(sArgumentsJson, psDestructivePatterns[i]) ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool xwork__tool_arguments_json_bool_is_true(
+    const char *sArgumentsJson,
+    const char *sName
+)
+{
+    size_t i;
+    size_t j;
+    size_t iNameLength;
+
+    if ( !sArgumentsJson || !sName || !sName[0] ) {
+        return false;
+    }
+    iNameLength = strlen(sName);
+    for ( i = 0u; sArgumentsJson[i] != '\0'; ++i ) {
+        if ( sArgumentsJson[i] != '"' ) {
+            continue;
+        }
+        for ( j = 0u; j < iNameLength; ++j ) {
+            if ( xwork__ascii_lower(sArgumentsJson[i + 1u + j]) !=
+                 xwork__ascii_lower(sName[j]) ) {
+                break;
+            }
+        }
+        if ( j != iNameLength || sArgumentsJson[i + 1u + j] != '"' ) {
+            continue;
+        }
+        i += 1u + j + 1u;
+        while ( sArgumentsJson[i] == ' ' ||
+                sArgumentsJson[i] == '\t' ||
+                sArgumentsJson[i] == '\r' ||
+                sArgumentsJson[i] == '\n' ) {
+            ++i;
+        }
+        if ( sArgumentsJson[i] != ':' ) {
+            continue;
+        }
+        ++i;
+        while ( sArgumentsJson[i] == ' ' ||
+                sArgumentsJson[i] == '\t' ||
+                sArgumentsJson[i] == '\r' ||
+                sArgumentsJson[i] == '\n' ) {
+            ++i;
+        }
+        return xwork__ascii_lower(sArgumentsJson[i]) == 't' &&
+            xwork__ascii_lower(sArgumentsJson[i + 1u]) == 'r' &&
+            xwork__ascii_lower(sArgumentsJson[i + 2u]) == 'u' &&
+            xwork__ascii_lower(sArgumentsJson[i + 3u]) == 'e';
+    }
+    return false;
+}
+
+static bool xwork__tool_arguments_look_destructive_filesystem(
+    const xwork_tool_def *pTool,
+    const char *sArgumentsJson
+)
+{
+    bool bDryRun;
+
+    if ( !pTool || !sArgumentsJson ) {
+        return false;
+    }
+    bDryRun = xwork__tool_arguments_json_bool_is_true(sArgumentsJson, "dry_run");
+    if ( strcmp(pTool->sToolId, XWORK_TOOL_FILESYSTEM_DELETE) == 0 ) {
+        return !bDryRun;
+    }
+    if ( strcmp(pTool->sToolId, XWORK_TOOL_FILESYSTEM_MOVE) == 0 ) {
+        return !bDryRun &&
+            xwork__tool_arguments_json_bool_is_true(sArgumentsJson, "overwrite");
+    }
+    return false;
+}
+
 static xwork_status xwork__evaluate_tool_approval(
     const xwork_run *pRun,
     const xwork_tool_def *pTool,
+    const xllm_output_tool_call *pToolCall,
     const xwork_orchestrator_options *pOptions,
     xwork_approval_decision *pDecision
 )
@@ -926,6 +1531,23 @@ static xwork_status xwork__evaluate_tool_approval(
     tInput.eApprovalMode = pTool->eApprovalMode;
     tInput.eSideEffect = pTool->eSideEffect;
     tInput.bAutoApproveRequested = pOptions->bAutoApprove;
+    if ( xwork__tool_arguments_look_destructive_command(
+             pTool,
+             pToolCall ? pToolCall->sArgumentsJson : NULL
+         ) ) {
+        tInput.bHasRiskLevelOverride = true;
+        tInput.eRiskLevelOverride = XWORK_RISK_CRITICAL;
+        tInput.sRiskScopeOverride = "destructive_command";
+        tInput.sRiskReasonOverride = "Tool arguments are classified as destructive.";
+    } else if ( xwork__tool_arguments_look_destructive_filesystem(
+                    pTool,
+                    pToolCall ? pToolCall->sArgumentsJson : NULL
+                ) ) {
+        tInput.bHasRiskLevelOverride = true;
+        tInput.eRiskLevelOverride = XWORK_RISK_CRITICAL;
+        tInput.sRiskScopeOverride = "destructive_filesystem";
+        tInput.sRiskReasonOverride = "Filesystem arguments are classified as destructive.";
+    }
     return xwork_policy_evaluate_approval(&pRun->pRuntime->tPolicy, &tInput, pDecision);
 }
 
@@ -1124,6 +1746,76 @@ static xwork_status xwork__fail_run_with_summary(xwork_run *pRun, const char *sS
     );
 }
 
+static const char *xwork__xllm_error_code_cstr(xllm_error_code eCode)
+{
+    switch ( eCode ) {
+        case XLLM_ERROR_NONE:
+            return "none";
+        case XLLM_ERROR_AUTH:
+            return "auth";
+        case XLLM_ERROR_QUOTA:
+            return "quota";
+        case XLLM_ERROR_RATE_LIMIT:
+            return "rate_limit";
+        case XLLM_ERROR_TIMEOUT:
+            return "timeout";
+        case XLLM_ERROR_NETWORK:
+            return "network";
+        case XLLM_ERROR_CANCELLED:
+            return "cancelled";
+        case XLLM_ERROR_INVALID_REQUEST:
+            return "invalid_request";
+        case XLLM_ERROR_UNSUPPORTED_CAPABILITY:
+            return "unsupported_capability";
+        case XLLM_ERROR_UNSUPPORTED_INPUT_TYPE:
+            return "unsupported_input_type";
+        case XLLM_ERROR_UNSUPPORTED_MIME_TYPE:
+            return "unsupported_mime_type";
+        case XLLM_ERROR_INPUT_TOO_LARGE:
+            return "input_too_large";
+        case XLLM_ERROR_TOO_MANY_INPUT_PARTS:
+            return "too_many_input_parts";
+        case XLLM_ERROR_MISSING_MULTIMODAL_MODEL:
+            return "missing_multimodal_model";
+        case XLLM_ERROR_MODEL_NOT_FOUND:
+            return "model_not_found";
+        case XLLM_ERROR_UPSTREAM_4XX:
+            return "upstream_4xx";
+        case XLLM_ERROR_UPSTREAM_5XX:
+            return "upstream_5xx";
+        case XLLM_ERROR_PARSE:
+            return "parse";
+        case XLLM_ERROR_INTERNAL:
+            return "internal";
+        case XLLM_ERROR_SESSION_CONTEXT_OVERFLOW:
+            return "session_context_overflow";
+        case XLLM_ERROR_SESSION_COMPACT_FAILED:
+            return "session_compact_failed";
+        case XLLM_ERROR_SESSION_SUMMARY_FAILED:
+            return "session_summary_failed";
+        case XLLM_ERROR_SESSION_REQUIRES_MODEL_LIMITS:
+            return "session_requires_model_limits";
+        default:
+            return "unknown";
+    }
+}
+
+static char *xwork__format_model_turn_error_summary(const xllm_error *pError)
+{
+    const char *sErrorCode = pError
+        ? xwork__xllm_error_code_cstr(pError->eCode)
+        : "unknown";
+    const char *sMessage = (pError && pError->sMessage)
+        ? pError->sMessage
+        : "unknown error";
+
+    return xwork__dup_printf(
+        "xllm session chat failed: xllm_error=%s message=%s",
+        sErrorCode,
+        sMessage
+    );
+}
+
 static void xwork__fail_run_after_tool_error(
     xwork_run *pRun,
     const xwork_tool_result *pToolResult,
@@ -1215,6 +1907,54 @@ static xwork_status xwork__save_checkpoint(
     );
 }
 
+static xwork_status xwork__record_session_compacted(
+    xwork_run *pRun,
+    const xwork__session_compaction_metrics *pBefore,
+    const xwork__session_compaction_metrics *pAfter
+)
+{
+    char *sSummary;
+    xwork_status iStatus;
+
+    if ( !pRun || !pBefore || !pAfter ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    sSummary = xwork__dup_printf(
+        "Session compacted: committed_turns=%u->%u history_messages=%u->%u summary_turns=%u->%u.",
+        (unsigned)pBefore->uCommittedTurns,
+        (unsigned)pAfter->uCommittedTurns,
+        (unsigned)pBefore->iHistoryCount,
+        (unsigned)pAfter->iHistoryCount,
+        (unsigned)pBefore->uSummaryTurns,
+        (unsigned)pAfter->uSummaryTurns
+    );
+    if ( !sSummary ) {
+        return XWORK_ERROR_NO_MEMORY;
+    }
+
+    iStatus = xwork__save_checkpoint(
+        pRun,
+        XWORK_CHECKPOINT_SESSION_COMPACTED,
+        "session_compacted",
+        NULL,
+        sSummary
+    );
+    if ( iStatus == XWORK_OK ) {
+        iStatus = xwork__run_record_event(
+            pRun,
+            XWORK_EVENT_SESSION_COMPACTED,
+            pRun->sLastToolId,
+            pRun->sLastApprovalRequestId,
+            pRun->sLastCheckpointId,
+            sSummary
+        );
+    }
+
+    free(sSummary);
+    return iStatus;
+}
+
 static xwork_status xwork__cancel_run_with_checkpoint(
     xwork_run *pRun,
     const char *sPendingStep,
@@ -1284,6 +2024,69 @@ static xwork_status xwork__check_interrupt_or_cancelled(
     return XWORK_OK;
 }
 
+static void xwork__retry_backoff_delay(const xwork_orchestrator_options *pOptions)
+{
+    size_t iDelayMs;
+
+    if ( !pOptions || pOptions->iRetryBackoffMs == 0u ) {
+        return;
+    }
+
+    iDelayMs = pOptions->iRetryBackoffMs;
+    if ( iDelayMs > (size_t)0xffffffffu ) {
+        iDelayMs = (size_t)0xffffffffu;
+    }
+    xrtSleep((uint32)iDelayMs);
+}
+
+static bool xwork__tool_status_is_retryable(
+    xwork_status iStatus,
+    const xwork_tool_result *pToolResult
+)
+{
+    if ( iStatus == XWORK_OK ||
+         iStatus == XWORK_ERROR_CANCELLED ||
+         iStatus == XWORK_ERROR_INVALID_ARGUMENT ||
+         iStatus == XWORK_ERROR_INVALID_STATE ||
+         iStatus == XWORK_ERROR_NOT_FOUND ||
+         iStatus == XWORK_ERROR_ALREADY_EXISTS ||
+         iStatus == XWORK_ERROR_UNSUPPORTED ||
+         iStatus == XWORK_ERROR_NO_MEMORY ) {
+        return false;
+    }
+
+    return pToolResult && pToolResult->bRetryable;
+}
+
+static const char *xwork__planner_system_text(const xwork_orchestrator_options *pOptions)
+{
+    if ( !pOptions || pOptions->ePlannerMode == XWORK_PLANNER_OFF ) {
+        return NULL;
+    }
+    if ( pOptions->sPlannerContextText && pOptions->sPlannerContextText[0] ) {
+        return pOptions->sPlannerContextText;
+    }
+    if ( pOptions->sPlannerPlanJson && pOptions->sPlannerPlanJson[0] ) {
+        return pOptions->sPlannerPlanJson;
+    }
+    return NULL;
+}
+
+static xllm_tool_choice_mode xwork__to_xllm_tool_choice(xwork_tool_choice_mode eMode)
+{
+    switch ( eMode ) {
+        case XWORK_TOOL_CHOICE_NONE:
+            return XLLM_TOOL_CHOICE_NONE;
+        case XWORK_TOOL_CHOICE_REQUIRED:
+            return XLLM_TOOL_CHOICE_REQUIRED;
+        case XWORK_TOOL_CHOICE_NAMED:
+            return XLLM_TOOL_CHOICE_NAMED;
+        case XWORK_TOOL_CHOICE_AUTO:
+        default:
+            return XLLM_TOOL_CHOICE_AUTO;
+    }
+}
+
 static xwork_status xwork__store_tool_call(
     xwork_run *pRun,
     const xllm_output_tool_call *pToolCall
@@ -1338,6 +2141,37 @@ static xwork_status xwork__store_tool_result(
 
     pRun->bHasLastToolResult = (pResult != NULL);
     return XWORK_OK;
+}
+
+static xwork_status xwork__record_retry_checkpoint(
+    xwork_run *pRun,
+    const char *sToolId,
+    const char *sPendingStep,
+    const char *sRetrySummary,
+    const char *sCheckpointSummary
+)
+{
+    xwork_status iStatus;
+
+    iStatus = xwork__run_record_event(
+        pRun,
+        XWORK_EVENT_RETRY_SCHEDULED,
+        sToolId,
+        pRun ? pRun->sLastApprovalRequestId : NULL,
+        pRun ? pRun->sLastCheckpointId : NULL,
+        sRetrySummary
+    );
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    return xwork__save_checkpoint(
+        pRun,
+        XWORK_CHECKPOINT_MANUAL,
+        sPendingStep,
+        pRun ? pRun->sLastToolResultText : NULL,
+        sCheckpointSummary
+    );
 }
 
 static xwork_status xwork__store_final_output(xwork_run *pRun, const char *sOutputText)
@@ -1433,6 +2267,143 @@ static bool xwork__json_table_get_bool(xvalue tTable, const char *sKey, bool *pb
 
     *pbValue = xvoGetBool(tValue);
     return true;
+}
+
+static void xwork__patch_text_stats(
+    const char *sPatchText,
+    size_t *piHunkCount,
+    size_t *piAddedLineCount,
+    size_t *piDeletedLineCount
+)
+{
+    const char *sCursor;
+
+    if ( piHunkCount ) *piHunkCount = 0u;
+    if ( piAddedLineCount ) *piAddedLineCount = 0u;
+    if ( piDeletedLineCount ) *piDeletedLineCount = 0u;
+    if ( !sPatchText ) {
+        return;
+    }
+
+    sCursor = sPatchText;
+    while ( *sCursor ) {
+        const char *sLine = sCursor;
+
+        if ( sLine[0] == '@' && sLine[1] == '@' && piHunkCount ) {
+            ++*piHunkCount;
+        } else if ( sLine[0] == '+' && strncmp(sLine, "+++", 3u) != 0 &&
+                    piAddedLineCount ) {
+            ++*piAddedLineCount;
+        } else if ( sLine[0] == '-' && strncmp(sLine, "---", 3u) != 0 &&
+                    piDeletedLineCount ) {
+            ++*piDeletedLineCount;
+        }
+
+        while ( *sCursor && *sCursor != '\n' ) {
+            ++sCursor;
+        }
+        if ( *sCursor == '\n' ) {
+            ++sCursor;
+        }
+    }
+}
+
+static xwork_status xwork__build_patch_apply_artifact_metadata(
+    xvalue tResult,
+    const char *sToolId,
+    const char *sPath,
+    const char *sPatchText,
+    char **ppsApplyResultJson,
+    char **ppsFileSummaryJson
+)
+{
+    char *sEscapedToolId = NULL;
+    char *sEscapedPath = NULL;
+    char *sEscapedErrorKind = NULL;
+    char *sEscapedError = NULL;
+    char *sApplyResultJson = NULL;
+    char *sFileSummaryJson = NULL;
+    const char *sErrorKind;
+    const char *sError;
+    bool bOk = false;
+    bool bDryRun = false;
+    bool bChanged = false;
+    int iBytesBefore = 0;
+    int iBytesAfter = 0;
+    size_t iHunkCount = 0u;
+    size_t iAddedLineCount = 0u;
+    size_t iDeletedLineCount = 0u;
+
+    if ( !ppsApplyResultJson || !ppsFileSummaryJson ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    *ppsApplyResultJson = NULL;
+    *ppsFileSummaryJson = NULL;
+
+    (void)xwork__json_table_get_bool(tResult, "ok", &bOk);
+    (void)xwork__json_table_get_bool(tResult, "dry_run", &bDryRun);
+    (void)xwork__json_table_get_bool(tResult, "changed", &bChanged);
+    (void)xwork__json_table_get_int(tResult, "bytes_before", &iBytesBefore);
+    (void)xwork__json_table_get_int(tResult, "bytes_after", &iBytesAfter);
+    sErrorKind = xwork__json_table_get_text(tResult, "error_kind");
+    sError = xwork__json_table_get_text(tResult, "error");
+    xwork__patch_text_stats(
+        sPatchText,
+        &iHunkCount,
+        &iAddedLineCount,
+        &iDeletedLineCount
+    );
+
+    sEscapedToolId = xwork__json_escape_string(sToolId ? sToolId : "");
+    sEscapedPath = xwork__json_escape_string(sPath ? sPath : "");
+    sEscapedErrorKind = xwork__json_escape_string(sErrorKind ? sErrorKind : "");
+    sEscapedError = xwork__json_escape_string(sError ? sError : "");
+    if ( !sEscapedToolId || !sEscapedPath || !sEscapedErrorKind || !sEscapedError ) {
+        free(sEscapedError);
+        free(sEscapedErrorKind);
+        free(sEscapedPath);
+        free(sEscapedToolId);
+        return XWORK_ERROR_NO_MEMORY;
+    }
+
+    sApplyResultJson = xwork__dup_printf(
+        "{\"schema\":\"" XWORK_PATCH_APPLY_RESULT_SCHEMA_V1 "\","
+        "\"tool\":\"%s\",\"path\":\"%s\",\"ok\":%s,\"dry_run\":%s,"
+        "\"changed\":%s,\"bytes_before\":%d,\"bytes_after\":%d,"
+        "\"error_kind\":\"%s\",\"error\":\"%s\"}",
+        sEscapedToolId,
+        sEscapedPath,
+        bOk ? "true" : "false",
+        bDryRun ? "true" : "false",
+        bChanged ? "true" : "false",
+        iBytesBefore,
+        iBytesAfter,
+        sEscapedErrorKind,
+        sEscapedError
+    );
+    sFileSummaryJson = xwork__dup_printf(
+        "{\"schema\":\"" XWORK_PATCH_FILE_SUMMARY_SCHEMA_V1 "\","
+        "\"files\":[{\"path\":\"%s\",\"change_kind\":\"modify\","
+        "\"hunks\":%lu,\"added_lines\":%lu,\"deleted_lines\":%lu}]}",
+        sEscapedPath,
+        (unsigned long)iHunkCount,
+        (unsigned long)iAddedLineCount,
+        (unsigned long)iDeletedLineCount
+    );
+
+    free(sEscapedError);
+    free(sEscapedErrorKind);
+    free(sEscapedPath);
+    free(sEscapedToolId);
+    if ( !sApplyResultJson || !sFileSummaryJson ) {
+        free(sFileSummaryJson);
+        free(sApplyResultJson);
+        return XWORK_ERROR_NO_MEMORY;
+    }
+
+    *ppsApplyResultJson = sApplyResultJson;
+    *ppsFileSummaryJson = sFileSummaryJson;
+    return XWORK_OK;
 }
 
 static xvalue xwork__json_table_get_array(xvalue tTable, const char *sKey)
@@ -1605,7 +2576,10 @@ static xwork_status xwork__emit_builtin_tool_artifact(
         }
     } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_LIST) == 0 ||
                 strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_STAT) == 0 ||
-                strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_GLOB) == 0 ) {
+                strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_GLOB) == 0 ||
+                strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_MKDIR) == 0 ||
+                strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_MOVE) == 0 ||
+                strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_DELETE) == 0 ) {
         xwork_output_artifact_options tOptions;
         const char *sPath = xwork__json_table_get_text(tResult, "resolved_path");
         const char *sName = "filesystem.query.json";
@@ -1616,6 +2590,12 @@ static xwork_status xwork__emit_builtin_tool_artifact(
             sName = "filesystem.stat.json";
         } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_GLOB) == 0 ) {
             sName = "filesystem.glob.json";
+        } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_MKDIR) == 0 ) {
+            sName = "filesystem.mkdir.json";
+        } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_MOVE) == 0 ) {
+            sName = "filesystem.move.json";
+        } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_DELETE) == 0 ) {
+            sName = "filesystem.delete.json";
         }
         if ( !sPath ) {
             sPath = xwork__json_table_get_text(tArguments, "path");
@@ -1631,6 +2611,67 @@ static xwork_status xwork__emit_builtin_tool_artifact(
             tOptions.sOutputText = pToolResult->sOutputText;
             iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
         }
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_APPLY_PATCH) == 0 ) {
+        xwork_patch_artifact_options tOptions;
+        const char *sPatchText = xwork__json_table_get_text(tResult, "patch_text");
+        const char *sPath = xwork__json_table_get_text(tResult, "resolved_path");
+        char *sApplyResultJson = NULL;
+        char *sFileSummaryJson = NULL;
+
+        if ( !sPath ) {
+            sPath = xwork__json_table_get_text(tArguments, "path");
+        }
+        if ( sPatchText && sPatchText[0] ) {
+            iStatus = xwork__build_patch_apply_artifact_metadata(
+                tResult,
+                pToolDef->sToolId,
+                sPath,
+                sPatchText,
+                &sApplyResultJson,
+                &sFileSummaryJson
+            );
+            if ( iStatus != XWORK_OK ) {
+                free(sFileSummaryJson);
+                free(sApplyResultJson);
+                goto cleanup;
+            }
+            xwork_patch_artifact_options_init(&tOptions);
+            tOptions.sName = "filesystem.apply_patch.diff";
+            tOptions.sTargetRef = sPath;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.sPatchText = sPatchText;
+            tOptions.sApplyResultJson = sApplyResultJson;
+            tOptions.sFileSummaryJson = sFileSummaryJson;
+            iStatus = xwork_run_emit_patch_artifact(pRun, &tOptions, NULL);
+            free(sFileSummaryJson);
+            free(sApplyResultJson);
+        }
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_EDITOR_OPEN_BUFFER) == 0 ||
+                strcmp(pToolDef->sToolId, XWORK_TOOL_EDITOR_APPLY_EDIT) == 0 ) {
+        xwork_output_artifact_options tOptions;
+        const char *sPath = xwork__json_table_get_text(tResult, "resolved_path");
+        const char *sText = xwork__json_table_get_text(tResult, "text");
+        const char *sName = (strcmp(pToolDef->sToolId, XWORK_TOOL_EDITOR_OPEN_BUFFER) == 0)
+            ? "editor.open_buffer.json"
+            : "editor.apply_edit.json";
+
+        if ( !sPath ) {
+            sPath = xwork__json_table_get_text(tArguments, "path");
+        }
+        if ( pToolResult->sOutputText && pToolResult->sOutputText[0] ) {
+            xwork_output_artifact_options_init(&tOptions);
+            tOptions.sName = sName;
+            tOptions.sMimeType = "application/json";
+            tOptions.sStorageRef = sPath;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.eOutputClass = (strcmp(pToolDef->sToolId, XWORK_TOOL_EDITOR_OPEN_BUFFER) == 0)
+                ? XWORK_ARTIFACT_OUTPUT_FILE_CONTENT
+                : XWORK_ARTIFACT_OUTPUT_FILE_CHANGE;
+            tOptions.sOutputRole = pToolDef->sToolId;
+            tOptions.sOutputText = pToolResult->sOutputText;
+            iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
+        }
+        (void)sText;
     } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_EXEC) == 0 ) {
         xwork_command_artifact_options tOptions;
         const char *sCommand = xwork__json_table_get_text(tArguments, "command");
@@ -1677,6 +2718,20 @@ static xwork_status xwork__emit_builtin_tool_artifact(
             tOptions.bHasExitCode = bHasExitCode;
             tOptions.iExitCode = iExitCode;
             iStatus = xwork_run_emit_command_artifact(pRun, &tOptions, NULL);
+            if ( iStatus != XWORK_OK ) {
+                goto cleanup;
+            }
+            iStatus = xwork__emit_process_diagnostics_artifact(
+                pRun,
+                sCommand,
+                sCwd,
+                sStdout,
+                sStderr,
+                bHasExitCode,
+                iExitCode,
+                bStdoutTruncated,
+                bStderrTruncated
+            );
         }
     } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_START_TERMINAL) == 0 ) {
         xwork_command_artifact_options tOptions;
@@ -1813,21 +2868,39 @@ static xwork_status xwork__emit_builtin_tool_artifact(
             tOptions.sOutputText = pToolResult->sOutputText;
             iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
         }
-    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_VCS_STATUS) == 0 ) {
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_VCS_STATUS) == 0 ||
+                strcmp(pToolDef->sToolId, XWORK_TOOL_VCS_DIFF) == 0 ||
+                strcmp(pToolDef->sToolId, XWORK_TOOL_VCS_LOG) == 0 ||
+                strcmp(pToolDef->sToolId, XWORK_TOOL_VCS_BRANCH) == 0 ) {
         xwork_command_artifact_options tOptions;
-        const char *sStatusText = xwork__json_table_get_text(tResult, "status");
+        const char *sVcsText = xwork__json_table_get_text(tResult, "status");
         const char *sPath = xwork__json_table_get_text(tResult, "resolved_path");
+        const char *sArtifactName = "git-status.txt";
+        const char *sCommandText = "git status --short --branch";
 
         if ( !sPath ) {
             sPath = xwork__json_table_get_text(tArguments, "path");
         }
-        if ( sStatusText ) {
+        if ( strcmp(pToolDef->sToolId, XWORK_TOOL_VCS_DIFF) == 0 ) {
+            sVcsText = xwork__json_table_get_text(tResult, "diff");
+            sArtifactName = "git-diff.txt";
+            sCommandText = xwork__json_table_get_text(tResult, "command");
+        } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_VCS_LOG) == 0 ) {
+            sVcsText = xwork__json_table_get_text(tResult, "log");
+            sArtifactName = "git-log.txt";
+            sCommandText = "git log --oneline";
+        } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_VCS_BRANCH) == 0 ) {
+            sVcsText = xwork__json_table_get_text(tResult, "branch_status");
+            sArtifactName = "git-branch.txt";
+            sCommandText = "git status --short --branch";
+        }
+        if ( sVcsText ) {
             xwork_command_artifact_options_init(&tOptions);
-            tOptions.sName = "git-status.txt";
+            tOptions.sName = sArtifactName;
             tOptions.sStorageRef = sPath;
             tOptions.sSummary = pToolResult->sVisibleSummary;
-            tOptions.sCommandText = "git status --short --branch";
-            tOptions.sOutputText = sStatusText;
+            tOptions.sCommandText = sCommandText ? sCommandText : pToolDef->sToolId;
+            tOptions.sOutputText = sVcsText;
             iStatus = xwork_run_emit_command_artifact(pRun, &tOptions, NULL);
         }
     }
@@ -1904,6 +2977,60 @@ static xwork_status xwork__execute_tool(
     return XWORK_ERROR_UNSUPPORTED;
 }
 
+static xwork_status xwork__execute_tool_with_retry(
+    xwork_run *pRun,
+    const xwork_tool_def *pToolDef,
+    const xwork_tool_call *pToolCall,
+    xwork_tool_result *pToolResult,
+    const xwork_orchestrator_options *pOptions
+)
+{
+    size_t iAttempt;
+    xwork_status iStatus;
+
+    if ( !pRun || !pToolDef || !pToolCall || !pToolResult || !pOptions ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    for ( iAttempt = 0u; ; ++iAttempt ) {
+        xwork_tool_result_init(pToolResult);
+        iStatus = xwork__execute_tool(pRun, pToolDef, pToolCall, pToolResult, pOptions);
+        if ( iStatus == XWORK_OK ||
+             iAttempt >= pOptions->iMaxRetries ||
+             !xwork__tool_status_is_retryable(iStatus, pToolResult) ) {
+            return iStatus;
+        }
+
+        iStatus = xwork__store_tool_result(pRun, pToolResult);
+        if ( iStatus != XWORK_OK ) {
+            return iStatus;
+        }
+        iStatus = xwork__record_retry_checkpoint(
+            pRun,
+            pToolDef->sToolId,
+            "retry_tool",
+            pToolResult->sVisibleSummary ?
+                pToolResult->sVisibleSummary :
+                "Retrying tool execution after retryable failure.",
+            "Checkpoint saved before retrying tool execution."
+        );
+        if ( iStatus != XWORK_OK ) {
+            return iStatus;
+        }
+
+        xwork__retry_backoff_delay(pOptions);
+        iStatus = xwork__check_interrupt_or_cancelled(
+            pRun,
+            pOptions,
+            "before_tool_retry",
+            "retry_tool"
+        );
+        if ( iStatus != XWORK_OK ) {
+            return iStatus;
+        }
+    }
+}
+
 static xwork_status xwork__resume_pending_tool(
     xwork_run *pRun,
     const xwork_orchestrator_options *pOptions
@@ -1967,7 +3094,7 @@ static xwork_status xwork__resume_pending_tool(
 
     pRun->eState = XWORK_RUN_RUNNING;
     iArtifactCountBefore = pRun->iArtifactCount;
-    iStatus = xwork__execute_tool(
+    iStatus = xwork__execute_tool_with_retry(
         pRun,
         pToolDef,
         &tToolCall,
@@ -2013,7 +3140,11 @@ static xwork_status xwork__resume_pending_tool(
     }
 
     if ( pOptions->bIngestArtifactsToMemory && pRun->iArtifactCount > iArtifactCountBefore ) {
-        iStatus = xwork__ingest_artifacts_to_memory_range(pRun, iArtifactCountBefore);
+        iStatus = xwork__ingest_artifacts_to_memory_range(
+            pRun,
+            iArtifactCountBefore,
+            pOptions
+        );
         if ( iStatus != XWORK_OK ) {
             return iStatus;
         }
@@ -2059,6 +3190,10 @@ static xwork_status xwork__run_execute_body(
     }
 
     if ( pExecOptions->iMaxTurns == 0u ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( pExecOptions->eToolChoiceMode == XWORK_TOOL_CHOICE_NAMED &&
+         (!pExecOptions->sToolChoiceToolId || !pExecOptions->sToolChoiceToolId[0]) ) {
         return XWORK_ERROR_INVALID_ARGUMENT;
     }
     if ( !pRun->pRuntime->pLlmRuntime ||
@@ -2129,6 +3264,9 @@ static xwork_status xwork__run_execute_body(
         xllm_message atContextMessages[1];
         xllm_content_part atContextParts[1];
         xwork_memory_context tMemoryContext;
+        xwork__session_compaction_metrics tCompactionBefore;
+        xwork__session_compaction_metrics tCompactionAfter;
+        xllm_compact_result tCompactResult;
         xllm_tool_def *pTools = NULL;
         size_t iToolCount = 0u;
         size_t iMessageCount = 0u;
@@ -2139,13 +3277,17 @@ static xwork_status xwork__run_execute_body(
         bool bCanAttachMemoryContext;
         bool bUseDefaultWorkspaceMemory;
         bool bHasToolFollowup;
+        bool bHaveCompactionBefore = false;
+        bool bHaveCompactionAfter = false;
         const xllm_output_tool_call *pToolCall = NULL;
         const char *sVisibleText = NULL;
+        const char *sPlannerSystemText = NULL;
 
         xllm_request_init(&tMemoryRequest);
         xllm_error_init(&tError);
         xllm_call_options_init(&tCallOptions);
         xwork_memory_context_init(&tMemoryContext);
+        memset(&tCompactResult, 0, sizeof(tCompactResult));
         memset(&tTurn, 0, sizeof(tTurn));
         memset(&tModelEventCtx, 0, sizeof(tModelEventCtx));
         memset(atMessages, 0, sizeof(atMessages));
@@ -2242,6 +3384,7 @@ static xwork_status xwork__run_execute_body(
         if ( bUseDefaultWorkspaceMemory ) {
             iStatus = xwork__apply_workspace_memory_context(
                 pRun,
+                pExecOptions,
                 &tMemoryRequest,
                 &tMemoryContext,
                 &tError
@@ -2294,9 +3437,22 @@ static xwork_status xwork__run_execute_body(
                 &atContextBlocks[0],
                 &atContextMessages[0],
                 &atContextParts[0],
-                tMemoryContext.sText
+                tMemoryContext.sText,
+                pExecOptions->iMemoryContextPriority,
+                pExecOptions->bMemoryContextPinned
             );
             iContextBlockCount = 1u;
+        }
+
+        sPlannerSystemText = xwork__planner_system_text(pExecOptions);
+        if ( sPlannerSystemText && sPlannerSystemText[0] ) {
+            xwork__init_system_message(
+                &atMessages[iMessageCount],
+                &atParts[iPartCount],
+                sPlannerSystemText
+            );
+            ++iMessageCount;
+            ++iPartCount;
         }
 
         if ( bHasToolFollowup ) {
@@ -2323,7 +3479,9 @@ static xwork_status xwork__run_execute_body(
         tTurn.iContextBlockCount = iContextBlockCount;
         tTurn.pTools = pTools;
         tTurn.iToolCount = iToolCount;
-        tTurn.tToolPolicy.eMode = XLLM_TOOL_CHOICE_AUTO;
+        tTurn.tToolPolicy.eMode = xwork__to_xllm_tool_choice(pExecOptions->eToolChoiceMode);
+        tTurn.tToolPolicy.sToolName = pExecOptions->sToolChoiceToolId;
+        tTurn.tToolPolicy.bAllowParallel = pExecOptions->bAllowParallelToolCalls;
 
         iStatus = xwork__check_interrupt_or_cancelled(
             pRun,
@@ -2365,13 +3523,77 @@ static xwork_status xwork__run_execute_body(
             tCallOptions.pUserData = &tModelEventCtx;
         }
 
-        iChatStatus = xllm_session_chat_ex(
-            pRun->pSession,
-            &tTurn,
-            &tCallOptions,
-            &pResponse,
-            &tError
-        );
+        if ( pRun->tSessionPolicy.bEnableAutoCompact ) {
+            if ( xwork__session_get_compaction_metrics(
+                     pRun->pSession,
+                     &tCompactionBefore
+                 ) == XWORK_OK ) {
+                bHaveCompactionBefore = true;
+            }
+        }
+
+        {
+            size_t iModelAttempt;
+
+            for ( iModelAttempt = 0u; ; ++iModelAttempt ) {
+                if ( pResponse ) {
+                    xllm_response_free(pResponse);
+                    pResponse = NULL;
+                }
+                xllm_error_free(&tError);
+                xllm_error_init(&tError);
+                tModelEventCtx.bCancelledByCallback = false;
+
+                iChatStatus = xllm_session_chat_ex(
+                    pRun->pSession,
+                    &tTurn,
+                    &tCallOptions,
+                    &pResponse,
+                    &tError
+                );
+                if ( iChatStatus == XRT_NET_CANCELLED ||
+                     tError.eCode == XLLM_ERROR_CANCELLED ||
+                     tModelEventCtx.bCancelledByCallback ||
+                     (pExecOptions->pCancelToken &&
+                      xllm_cancel_token_is_cancelled(pExecOptions->pCancelToken)) ||
+                     (iChatStatus == XRT_NET_OK && pResponse) ) {
+                    break;
+                }
+                if ( iModelAttempt >= pExecOptions->iMaxRetries ) {
+                    break;
+                }
+
+                iStatus = xwork__record_retry_checkpoint(
+                    pRun,
+                    pRun->sLastToolId,
+                    "retry_model",
+                    "Retrying model turn after provider failure.",
+                    "Checkpoint saved before retrying model turn."
+                );
+                if ( iStatus != XWORK_OK ) {
+                    free(pTools);
+                    xllm_request_reset(&tMemoryRequest);
+                    xllm_error_free(&tError);
+                    xwork_memory_context_reset(&tMemoryContext);
+                    return iStatus;
+                }
+
+                xwork__retry_backoff_delay(pExecOptions);
+                iStatus = xwork__check_interrupt_or_cancelled(
+                    pRun,
+                    pExecOptions,
+                    "before_model_retry",
+                    "retry_model"
+                );
+                if ( iStatus != XWORK_OK ) {
+                    free(pTools);
+                    xllm_request_reset(&tMemoryRequest);
+                    xllm_error_free(&tError);
+                    xwork_memory_context_reset(&tMemoryContext);
+                    return iStatus;
+                }
+            }
+        }
         if ( iChatStatus == XRT_NET_CANCELLED ||
              tError.eCode == XLLM_ERROR_CANCELLED ||
              tModelEventCtx.bCancelledByCallback ||
@@ -2389,10 +3611,7 @@ static xwork_status xwork__run_execute_body(
             );
         }
         if ( iChatStatus != XRT_NET_OK || !pResponse ) {
-            char *sErrorSummary = xwork__dup_printf(
-                "xllm session chat failed: %s",
-                tError.sMessage ? tError.sMessage : "unknown error"
-            );
+            char *sErrorSummary = xwork__format_model_turn_error_summary(&tError);
 
             free(pTools);
             xllm_request_reset(&tMemoryRequest);
@@ -2404,6 +3623,63 @@ static xwork_status xwork__run_execute_body(
             );
             free(sErrorSummary);
             return iStatus == XWORK_OK ? XWORK_ERROR_EXTERNAL_FAILURE : iStatus;
+        }
+
+        if ( bHaveCompactionBefore ) {
+            if ( xwork__session_get_compaction_metrics(
+                     pRun->pSession,
+                     &tCompactionAfter
+                 ) == XWORK_OK ) {
+                bHaveCompactionAfter = true;
+            }
+            if ( bHaveCompactionAfter &&
+                 !xwork__session_compacted_between(&tCompactionBefore, &tCompactionAfter) &&
+                 xwork__session_policy_should_compact_now(
+                     &pRun->tSessionPolicy,
+                     &tCompactionAfter
+                 ) ) {
+                memset(&tCompactResult, 0, sizeof(tCompactResult));
+                tCompactionBefore = tCompactionAfter;
+                if ( xllm_session_compact(
+                         pRun->pSession,
+                         NULL,
+                         &tCompactResult
+                     ) != XRT_NET_OK ) {
+                    xllm_response_free(pResponse);
+                    free(pTools);
+                    xllm_request_reset(&tMemoryRequest);
+                    xllm_error_free(&tError);
+                    xwork_memory_context_reset(&tMemoryContext);
+                    return xwork__fail_run_with_summary(
+                        pRun,
+                        "xllm session compaction failed."
+                    );
+                }
+                if ( tCompactResult.bCompacted &&
+                     xwork__session_get_compaction_metrics(
+                         pRun->pSession,
+                         &tCompactionAfter
+                     ) == XWORK_OK ) {
+                    bHaveCompactionAfter = true;
+                }
+            }
+        }
+        if ( bHaveCompactionBefore &&
+             bHaveCompactionAfter &&
+             xwork__session_compacted_between(&tCompactionBefore, &tCompactionAfter) ) {
+            iStatus = xwork__record_session_compacted(
+                pRun,
+                &tCompactionBefore,
+                &tCompactionAfter
+            );
+            if ( iStatus != XWORK_OK ) {
+                xllm_response_free(pResponse);
+                free(pTools);
+                xllm_request_reset(&tMemoryRequest);
+                xllm_error_free(&tError);
+                xwork_memory_context_reset(&tMemoryContext);
+                return iStatus;
+            }
         }
 
         free(pTools);
@@ -2490,6 +3766,7 @@ static xwork_status xwork__run_execute_body(
             iStatus = xwork__evaluate_tool_approval(
                 pRun,
                 pToolDef,
+                pToolCall,
                 pExecOptions,
                 &tApprovalDecision
             );
@@ -2602,7 +3879,7 @@ static xwork_status xwork__run_execute_body(
 
             pRun->eState = XWORK_RUN_RUNNING;
             iArtifactCountBefore = pRun->iArtifactCount;
-            iStatus = xwork__execute_tool(
+            iStatus = xwork__execute_tool_with_retry(
                 pRun,
                 pToolDef,
                 &tToolCall,
@@ -2664,7 +3941,11 @@ static xwork_status xwork__run_execute_body(
 
             if ( pExecOptions->bIngestArtifactsToMemory &&
                  pRun->iArtifactCount > iArtifactCountBefore ) {
-                iStatus = xwork__ingest_artifacts_to_memory_range(pRun, iArtifactCountBefore);
+                iStatus = xwork__ingest_artifacts_to_memory_range(
+                    pRun,
+                    iArtifactCountBefore,
+                    pExecOptions
+                );
                 if ( iStatus != XWORK_OK ) {
                     xllm_response_free(pResponse);
                     return iStatus;
@@ -2846,6 +4127,10 @@ xwork_status xwork_run_execute_async(
         pExecOptions = &tDefaultOptions;
     }
     if ( pExecOptions->iMaxTurns == 0u ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( pExecOptions->eToolChoiceMode == XWORK_TOOL_CHOICE_NAMED &&
+         (!pExecOptions->sToolChoiceToolId || !pExecOptions->sToolChoiceToolId[0]) ) {
         return XWORK_ERROR_INVALID_ARGUMENT;
     }
 

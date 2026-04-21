@@ -7,11 +7,19 @@ static const xwork_profile xwork__builtin_xcode_profile = {
     XWORK_PROFILE_XCODE,
     XWORK_PROFILE_XCODE,
     XWORK_AUTONOMY_SEMI_AUTO,
-    { XWORK_RISK_LOW },
-    { true, 0.75, 8u },
+    {
+        XWORK_RISK_LOW,
+        NULL,
+        0u,
+        NULL,
+        0u,
+        true
+    },
+    { true, 0.75, 8u, 1024u, 8u, true, XWORK_SESSION_COMPACT_SUMMARIZE },
     8u,
     false,
-    false
+    false,
+    XWORK_PLANNER_OFF
 };
 
 static const xwork_profile xwork__builtin_xclaw_profile = {
@@ -21,11 +29,19 @@ static const xwork_profile xwork__builtin_xclaw_profile = {
     XWORK_PROFILE_XCLAW,
     XWORK_PROFILE_XCLAW,
     XWORK_AUTONOMY_AUTO,
-    { XWORK_RISK_HIGH },
-    { true, 0.90, 24u },
+    {
+        XWORK_RISK_HIGH,
+        NULL,
+        0u,
+        NULL,
+        0u,
+        true
+    },
+    { true, 0.90, 24u, 2048u, 12u, true, XWORK_SESSION_COMPACT_SUMMARIZE },
     32u,
     true,
-    true
+    true,
+    XWORK_PLANNER_BOUNDARY
 };
 
 static const xwork_profile *xwork__find_builtin_profile(const char *sProfileId)
@@ -51,6 +67,7 @@ void xwork_profile_init(xwork_profile *pProfile)
         xwork_session_policy_init(&pProfile->tSessionPolicy);
         pProfile->iDefaultMaxTurns = 4u;
         pProfile->bDefaultAutoApprove = true;
+        pProfile->ePlannerMode = XWORK_PLANNER_OFF;
     }
 }
 
@@ -180,6 +197,7 @@ xwork_status xwork_profile_apply_orchestrator_options(
     if ( pProfile->iDefaultMaxTurns > 0u ) {
         pOptions->iMaxTurns = pProfile->iDefaultMaxTurns;
     }
+    pOptions->ePlannerMode = pProfile->ePlannerMode;
     pOptions->bAutoApprove = pProfile->bDefaultAutoApprove;
     return XWORK_OK;
 }

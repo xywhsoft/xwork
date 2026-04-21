@@ -1648,6 +1648,9 @@ int main(void)
     const char *sClientKeyPathEnv = xwork_test_env_non_empty(
         "XWORK_PROVIDER_SMOKE_CLIENT_KEY_PATH"
     );
+    const char *sExpectErrorEnv = xwork_test_env_non_empty(
+        "XWORK_PROVIDER_SMOKE_EXPECT_ERROR"
+    );
     xwork_provider_smoke_ctx tSmokeCtx;
     xwork_profile tProductProfile;
     xwork_xllm_profile_options tBootstrapProfile;
@@ -1673,6 +1676,7 @@ int main(void)
     char **psProviderAnthropicBetaHeaders = NULL;
     size_t iProviderAnthropicBetaHeaderCount = 0u;
     bool bParsedVerifyPeer = false;
+    bool bExpectProviderError = false;
     size_t iParsedConnectTimeoutMs = 0u;
     size_t iParsedReadTimeoutMs = 0u;
     size_t iParsedProxyPort = 0u;
@@ -2002,6 +2006,9 @@ int main(void)
             )
         );
     }
+    if ( sExpectErrorEnv ) {
+        assert(xwork_test_parse_bool(sExpectErrorEnv, &bExpectProviderError));
+    }
 
     memset(&tSmokeCtx, 0, sizeof(tSmokeCtx));
     xwork_runtime_options_init(&tRuntimeOptions);
@@ -2309,12 +2316,47 @@ int main(void)
     tExecOptions.pUserData = &tSmokeCtx;
     tExecOptions.bAutoApprove = true;
     assert(xwork_run_execute_async(pRun, &tExecOptions, &pAsync) == XWORK_OK);
-    assert(xwork_run_async_wait(pAsync) == XWORK_OK);
+    iAsyncStatus = xwork_run_async_wait(pAsync);
+    if ( bExpectProviderError ) {
+        assert(iAsyncStatus == XWORK_ERROR_EXTERNAL_FAILURE);
+    } else {
+        assert(iAsyncStatus == XWORK_OK);
+    }
     assert(xwork_run_async_get_status(pAsync, &iAsyncStatus, &bAsyncCompleted) == XWORK_OK);
     assert(bAsyncCompleted);
-    assert(iAsyncStatus == XWORK_OK);
+    if ( bExpectProviderError ) {
+        assert(iAsyncStatus == XWORK_ERROR_EXTERNAL_FAILURE);
+    } else {
+        assert(iAsyncStatus == XWORK_OK);
+    }
     xwork_run_async_destroy(pAsync);
     pAsync = NULL;
+
+    if ( bExpectProviderError ) {
+        assert(xwork_run_get_state(pRun) == XWORK_RUN_FAILED);
+        assert(tSmokeCtx.iExecCount == 0u);
+        assert(tSmokeCtx.iRequestTraceCount >= 1u);
+        assert(xwork_run_get_last_output_text(pRun) != NULL);
+        assert(
+            strstr(
+                xwork_run_get_last_output_text(pRun),
+                "xllm session chat failed"
+            ) != NULL
+        );
+
+        xwork_event_init(&tEvent);
+        assert(xwork_run_get_last_event(pRun, &tEvent) == XWORK_OK);
+        assert(tEvent.eKind == XWORK_EVENT_RUN_FAILED);
+        xwork_event_reset(&tEvent);
+
+        xwork_run_destroy(pRun);
+        xwork_runtime_destroy(pRuntime);
+        xwork_test_free_string_array(
+            psProviderAnthropicBetaHeaders,
+            iProviderAnthropicBetaHeaderCount
+        );
+        return 0;
+    }
 
     assert(xwork_run_get_state(pRun) == XWORK_RUN_COMPLETED);
     assert(tSmokeCtx.iExecCount == 1u);

@@ -29,12 +29,16 @@
   - `xllm` model-turn + tool-loop 最小编排闭环
   - approval pause/resume 与 checkpoint load/recover
   - workspace memory attach / tool-result ingest / artifact ingest 入口
-  - workspace root -> `xllm_memory_sync_workspace` 的最小同步入口
-  - workspace file -> `xllm_memory_sync_file` 的最小增量同步入口
-  - typed patch/report/command/output artifact emit helper
-  - in-memory persistence 与 file persistence backend
-  - persisted run/event/checkpoint/artifact 查询面
-  - `xcode` / `xclaw` 内建 profile
+- workspace root -> `xllm_memory_sync_workspace` 的最小同步入口
+- workspace file -> `xllm_memory_sync_file` 的最小增量同步入口
+- workspace memory sync policy 已暴露 allowed extensions、ignored directories、ignored extensions、ignored path patterns、ignored file names 与 max file bytes；xwork 负责把 public workspace options 复制并转发给 xllm，二进制内容过滤仍由 xllm memory ingest 侧执行，xwork 调用方可组合扩展名白名单和大小上限得到稳定同步边界
+- 默认 memory context 注入策略已固定：当 `xwork_orchestrator_options.pfnResolveMemoryContext == NULL` 且 run 绑定了启用 memory 的 workspace 时，xwork 使用 run instruction 作为 query 搜索每个 workspace memory，并把 `xllm_memory_apply_search_to_request` 生成的 block 文本合并为一个 `XLLM_CONTEXT_MEMORY` model-turn context block；`iMemorySearchMaxHits / iMemoryContextMaxBlocks / iMemoryContextMaxCharsPerHit / iMemoryContextMaxTotalChars / iMemoryContextPriority / bMemoryContextPinned` 控制检索数量、字符预算、priority 和 pinned。当前 token 预算以 xllm memory context 的字符预算作为稳定 proxy，后续若 xllm 暴露 tokenizer-backed token limit 再切换为真实 token。
+- artifact memory ingest policy 已固定：`bIngestArtifactsToMemory` 开启后，`uArtifactMemoryIngestKindMask / uArtifactMemoryIngestOutputClassMask / uArtifactMemoryIngestReportClassMask` 可按 kind、output class、report class 过滤，mask 为 0 表示不限制；默认跳过名称、摘要、正文、命令或 patch metadata 中含 password/secret/token/private key/credential 等敏感特征的 artifact，只有显式设置 `bIngestSensitiveArtifactsToMemory` 才允许进入 memory。
+- typed patch/report/command/output artifact emit helper
+- in-memory persistence 与 file persistence backend
+- persisted run/event/checkpoint/artifact 查询面
+- `xcode` / `xclaw` 内建 profile
+- `examples/ai_ide_agent.c` 和 `examples/claw_autonomous_agent.c` 最小产品接入样例
 - 内部模块目录：
   - [src/xwork_core](/D:/git/xwork/src/xwork_core)
   - [src/xwork_workspace](/D:/git/xwork/src/xwork_workspace)
@@ -84,7 +88,19 @@
 - `session` compaction
 - memory retrieval engine
 
-### 4.3 代码组织约束
+### 4.3 Public API 命名与结构审查结论
+
+当前 `xwork.h` 的 v1 public API 命名和结构按以下规则冻结：
+
+- `xwork_status_cstr()` 保持现名，用于强调返回值是非拥有的稳定 C string literal，适合日志和诊断输出。
+- `xwork_runtime_*persisted*` 是 runtime 级便捷查询入口，`xwork_file_persistence_*` 是 file backend 直连入口，两组命名保留以区分抽象层级。
+- `*_summary`、`*_summary_list`、`*_query`、`*_index` 命名保留，分别表示单对象摘要、摘要列表、查询条件和可排序索引视图。
+- `xwork_run_async_*` 命名保留，async handle 的 ownership / cancel / wait / destroy 语义已经由 `xwork.h` 注释定义。
+- `xwork_model_event` 中的 `eType` 继续保持 `int`，这是到 `xllm` model event type 的轻量桥接，不在 `xwork` 内重复定义 provider event enum。
+- `xwork_file_persistence` 与 `xwork_local_host` 是 caller-owned helper state struct。调用方负责 init/configure/reset，但 configure 之后不应直接改写其内部状态字段。
+- 当前未发现必须在 v1 前重命名的临时 public symbol。后续若要迁移为 opaque helper handle，应作为兼容性破坏变更单独规划。
+
+### 4.4 代码组织约束
 
 建议继续沿用与 `xllm` 类似的源码级组织方式：
 
@@ -162,9 +178,12 @@
 - 公共 helper 已补 `emit_patch/report/command/output_artifact`
 - 带 `content_text` 的 artifact 已补通用内容统计：`content_byte_count / content_line_count`，并贯穿 runtime 对象、summary、snapshot、file persistence 与 workspace memory ingest
 - command artifact 已补最小结构化 I/O 统计：`stdout_byte_count / stderr_byte_count / stdout_truncated / stderr_truncated`，并贯穿 runtime 对象、summary、snapshot、file persistence 与 workspace memory ingest
-- patch artifact 已补最小结构化统计：`file_count / hunk_count / added_line_count / deleted_line_count`，并贯穿 runtime 对象、summary、snapshot、file persistence 与 workspace memory ingest
+- patch artifact 已补最小结构化统计：`file_count / hunk_count / added_line_count / deleted_line_count`，并携带 `xwork.patch_apply_result.v1` apply result 与 `xwork.patch_file_summary.v1` per-file summary JSON，贯穿 runtime 对象、summary、snapshot、file persistence 与 workspace memory ingest
 - report/output artifact 已补最小 typed output metadata：`output_class / output_role`，并贯穿 runtime 对象、summary、snapshot、file persistence、summary query 与 workspace memory ingest；builtin filesystem/terminal bridge 会填充 file-content/file-change/terminal-state/terminal-inventory 分类
 - report artifact 已补专用 typed metadata：`report_class / report_subject_ref`，并贯穿 runtime 对象、summary、snapshot、file persistence、summary query 与 workspace memory ingest
+- report artifact JSON 内容可使用 `xwork.report.v1`，固定 `report_kind / status / subject_ref / title / summary / body_markdown / items` 字段，用于 AI IDE 与 claw 共享 plan/progress/final report contract
+- planner 在 v1 中是边界能力而不是完整 autonomous planner：上层可以用 plan report artifact 记录计划，用 orchestrator options 注入 planner context / plan JSON，并通过 tool choice 控制下一轮模型可用工具策略；具体 planner 生成逻辑留给 AI IDE / claw。
+- diagnostics artifact 已有最小 schema：`xwork.diagnostics.v1`，通过 `XWORK_ARTIFACT_REPORT_DIAGNOSTICS` report artifact 承载 `severity/source/location/message` 记录
 
 ### 5.8 `xwork_host`
 
@@ -183,6 +202,14 @@
 - `xcode` interactive profile
 - `xclaw` autonomous profile
 - 默认策略组合
+
+当前最小基线：
+
+- `xcode` 默认 semi-auto、低风险 auto-approval 上限、关闭 workspace memory、关闭 planner boundary、关闭默认 auto-approve，并对未声明网络访问 deny-by-default。
+- `xclaw` 默认 autonomous、高风险 auto-approval 上限、启用 workspace memory、启用 planner boundary、启用默认 auto-approve，并对未声明网络访问 deny-by-default。
+- profile smoke 已覆盖关键默认值、runtime/workspace/run/orchestrator options 应用，以及默认 approval 行为差异。
+- `examples/ai_ide_agent.c` 已覆盖 `xcode` profile、local filesystem host、example-only mock `xllm` model turn、dry-run patch/report artifacts，以及 `filesystem.apply_patch` 的 approval pause / submit / resume 闭环。
+- `examples/claw_autonomous_agent.c` 已覆盖 `xclaw` profile、`process.exec`、command/report artifacts、file persistence snapshot 和 recovery。
 
 ## 6. 开发策略
 
@@ -236,9 +263,23 @@
 
 - `xwork_host_service` / `xwork_host_services` 已接入 runtime
 - `xwork_local_host` 已能跑通最小 filesystem/process/vcs dispatch
-- builtin host tools 已有 `filesystem.read_text` / `filesystem.write_text` / `process.exec` / `process.start_terminal` / `process.terminal_read` / `process.terminal_write` / `process.terminal_resize` / `process.terminal_stop` / `vcs.status`
-- builtin host tool 在 orchestrator 中已能自动落最小 output/command artifact
+- builtin host tools 已有 `filesystem.read_text` / `filesystem.write_text` / `filesystem.list` / `filesystem.stat` / `filesystem.glob` / `filesystem.mkdir` / `filesystem.move` / `filesystem.delete` / `filesystem.apply_patch` / `process.exec` / `process.start_terminal` / `process.terminal_read` / `process.terminal_write` / `process.terminal_resize` / `process.terminal_stop` / `vcs.status` / `vcs.diff` / `vcs.log` / `vcs.branch`
+- builtin host tool 在 orchestrator 中已能自动落最小 output/command artifact，VCS status/diff/log/branch 会合成 command artifact
 - builtin terminal host tool 在 orchestrator 中已能自动落最小 session command/output artifact（start/write/stop）
+- `filesystem.list` 已支持 `path` / `recursive` / `include_hidden` / `limit`，返回结构化 entries 和分页元数据
+- `filesystem.stat` 已支持文件/目录/不存在路径的结构化探测，返回 type、size、mtime 等元数据
+- `filesystem.glob` 已支持带 `pattern`、递归开关、隐藏文件开关和数量限制的本地搜索
+- `filesystem.mkdir` 已支持递归创建、已存在处理和 dry-run
+- `filesystem.move` 已支持 target path、overwrite、recursive overwrite、create_dirs 和 dry-run
+- `filesystem.delete` 已支持文件/目录删除、递归目录删除和 dry-run
+- `filesystem.apply_patch` 已支持单文件 exact text replacement patch：`old_text` / `new_text` / `dry_run`，并对 conflict 返回结构化错误
+- local host filesystem 工具已支持可选路径策略：filesystem root、allow path prefixes、deny path prefixes；越界路径会返回结构化 `path_denied`
+- local host process 工具已支持可选命令策略：command allow patterns、deny patterns、destructive command 拒绝；拒绝会在 spawn 前返回结构化 `command_denied` 或 `destructive_command`
+- host service 公共边界已包含 `XWORK_HOST_NETWORK`，policy 层已支持 network host allow/deny patterns 和 deny-by-default 评估，用于约束联网副作用
+- host service 公共边界已包含 diagnostics service 槽位，当前先落成 `from_process_output` contract 与 process output -> diagnostics report artifact 的 orchestrator bridge
+- local host VCS 工具已支持 `status`、working-tree/staged `diff`、带 `limit` 的 `log`、以及返回当前 branch 和 dirty 状态的 `branch`
+- builtin `filesystem.list/stat/glob/mkdir/move/delete` 已能在 orchestrator 中合成 JSON output artifact
+- builtin `filesystem.apply_patch` 已能在 orchestrator 中合成 patch artifact，并填充 apply result / per-file summary schema metadata
 - `filesystem.write_text` 最小 request contract 已支持 `mode=append`
 - `filesystem.write_text` 最小 request contract 已支持 `mode=create`
 - `filesystem.write_text` 最小 request contract 已支持 `create_dirs:true`
@@ -246,12 +287,17 @@
 - `filesystem.read_text` 最小 response contract 已显式返回 `file_size_bytes` / `remaining_bytes` / `eof` / `next_offset_bytes`
 - `filesystem.read_text/write_text` 失败路径已保留最小结构化结果，可区分 not_found / already_exists / parent_not_found
 - orchestrator 已能把 `xllm` stream preference、model event callback、xllm cancel token 和协作式 interrupt check 接入同步 model-turn/tool-loop；取消会落 cancelled checkpoint 和 `RUN_CANCELLED` event
+- model event 取消优先级已明确：event bridge 先检查 interrupt/cancel token，再调用用户 model event callback；callback 返回 `false` 会触发 cancel token（如存在）并统一收口为 `XWORK_ERROR_CANCELLED`
 - host service invoke 已有 per-call context，可把 run/cancel/interrupt 元数据传入 builtin host；local `process.exec` 已能在 spawn 前和 subprocess polling wait 中协作取消
 - 自定义 tool executor 已有 `pfnToolExecEx` 扩展回调、`xwork_tool_exec_context` 与 `xwork_tool_exec_context_should_cancel()` helper，可自行轮询取消并让 orchestrator 收口为 cancelled run
 - orchestrator 已提供最小 async run handle：`xwork_run_execute_async` / `xwork_run_async_wait` / `xwork_run_async_wait_timeout` / `xwork_run_async_get_status` / `xwork_run_async_cancel` / `xwork_run_async_destroy`，内部复用同步 loop，并通过 owned 或外部 `xllm_cancel_token` 接入协作式取消；smoke 已覆盖 mock tool、未完成 handle destroy 与 local `process.exec` subprocess 取消
 - async run 公共 API 已写明 run/options/callback user data 的浅拷贝生命周期约束，以及 wait timeout 与未完成状态读取语义
 - run execution 已有 per-run execution guard，同一个 run 的并发 `xwork_run_execute` 入口会返回 `XWORK_ERROR_INVALID_STATE`
-- provider smoke 主执行路径已切到 async run handle，保留 local stub provider matrix 验证 request/response normalization，并补了离线 model-call failure 路径
+- provider / host / persistence 错误统一收敛到窄的 `xwork_status` 集合：caller contract 问题走 `INVALID_ARGUMENT / INVALID_STATE / NOT_FOUND / ALREADY_EXISTS / UNSUPPORTED`，协作取消走 `CANCELLED`，外部 I/O、provider、host 或 persistence 后端失败走 `EXTERNAL_FAILURE`；`xwork_status_cstr()` 提供稳定日志名称。
+- provider smoke 主执行路径已切到 async run handle，保留 local stub provider matrix 验证 request/response normalization，并补了离线 model-call failure 路径；provider error-path matrix 已覆盖 upstream_5xx/auth/rate_limit/parse/timeout，orchestrator 统一收口为 `XWORK_ERROR_EXTERNAL_FAILURE` + `XWORK_RUN_FAILED`，错误 summary 固定包含 `xllm_error=<code>` 和 provider message
+- session compaction knobs 已进入 public `xwork_session_policy`：auto compact、trigger ratio/turns、reserve output tokens、keep recent turns、keep active tool chain、compact strategy。orchestrator 在 model turn 成功提交后按 policy 调用 `xllm_session_compact()`，并在真实 compact 后写入 `XWORK_CHECKPOINT_SESSION_COMPACTED` 与 `XWORK_EVENT_SESSION_COMPACTED`；persistence snapshot format 已升到 v3 以保存新增 session policy 字段。
+- 默认测试组织已固定：`tests/README.md` 记录 standalone/core/host/orchestrator/persistence/profile/provider-offline/stress/examples/provider-real 测试组；`.github/workflows/ci.yml` 在 Windows/MSYS2 上跑 `xwork.c` standalone compile、core smoke、host smoke、主 orchestrator smoke、persistence smoke、profile smoke、provider offline smoke、stress smoke 和 examples，真实 provider smoke 通过 repository variable 显式开启且 `continue-on-error`，不阻塞默认 CI。真实 provider smoke 支持成功 tool-loop，也支持 `XWORK_PROVIDER_SMOKE_EXPECT_ERROR=1` 的错误路径断言，用于坏密钥、坏模型或受控错误端点。
+- `tests/xwork_stress_smoke.c` 已独立覆盖 terminal long-output capture/events，以及 many-runs/artifacts persistence query + pagination。
 - `process.exec` 最小 request contract 已支持 `cwd` 覆盖
 - `process.exec` 最小 request contract 已支持 `max_output_bytes` 截断
 - `process.exec` 最小 request contract 已支持 `env:["KEY=VALUE"]`
@@ -277,6 +323,7 @@
 - builtin `process.terminal_write` 现在也会在返回 terminal state 时合成 JSON output artifact，让 post-write terminal state window 能和 write command 一起进入 artifact/persistence 链路
 - builtin `process.terminal_read` 现在也会在 orchestrator run 中合成 JSON output artifact，让增量 terminal state window 能和 terminal transcript 一起进入 artifact/persistence 链路
 - builtin `process.terminal_stop` 现在也会在 orchestrator run 中合成 JSON output artifact，让 terminal session 的最终 stop state 能和 transcript/output 一起进入 artifact/persistence 链路
+- terminal session JSON artifact 已固定 schema 标识：state window 使用 `xwork.terminal_state.v1`，inventory 使用 `xwork.terminal_inventory.v1`
 - 在 interactive terminal 支持可用时，file persistence smoke 现在也会验证 terminal session 的 `resize/write/read/stop` 这些 JSON artifact 可以被列出并读回；同时公共 persistence API 也补了按 artifact 名称直接查找的最小读面
 - persisted artifact 现在也有轻量 summary list 读面（`id/kind/output_class/output_role/name/mime/storage_ref/summary/sequence`，以及存在时的 content/patch stats），调用方可以先检查 terminal JSON artifact 链，再按需加载完整 artifact
 - persisted artifact summary 现在也支持最小 metadata query（`kind` / `output_class` / `output_role` / `name_prefix` / `mime` / `storage_ref` / `exit_code` / `sequence`），调用方可以先按条件筛出 terminal JSON artifact，再按需加载完整对象
@@ -287,10 +334,12 @@
 - artifact summary query 现在也支持 `report_class` / `report_subject_ref_prefix`，durable smoke 会验证 report plan artifact 的专用 metadata 可恢复
 - artifact summary query 的 durable smoke 现在也覆盖 `exit_code` 和 min/max `sequence` 过滤，确保 command artifact 的 metadata 查询语义可恢复
 - builtin `process.exec` artifact bridge 已保留 stderr，不再只落 stdout
+- builtin `process.exec` artifact bridge 会在 stderr、非零退出或 build/test-like command 时生成 diagnostics report；成功的 test/build 命令会得到 `diagnostic_count:0` 的结构化摘要
 - command artifact 现在也能保留结构化 stdout/stderr byte counts 与 per-stream truncation flags，`process.exec` artifact bridge 已将 host result 中的相关字段映射进 artifact metadata
 - `process.exec` 失败路径已保留最小结构化结果，可区分 invalid request / timeout / cancelled / non-zero exit，并带回请求 stop policy 与观察到的 stop reason
 - `process.exec` 最小 stdin contract 已会校验 configured `iMaxProcessInputBytes`
 - `process.exec` 最小 env contract 已会校验 configured `iMaxProcessEnvEntries`
+- persistence recovery 以 latest run snapshot 为边界；approval resolved 会刷新 latest snapshot，因此 pending tool 在批准后即使进程重启也能恢复到可 resume 状态。live OS process handle 和 interactive terminal session 不跨进程恢复，持久化的 terminal/process artifact 只作为审计和输出记录，宿主需要显式重新发现或重启 live session
 
 这一层接下来更重要的是：
 
@@ -367,14 +416,19 @@
 - `xllm` 集成 smoke
 - 产品接入 smoke
 
-## 11. 近期建议
+## 11. 当前 v1 基线与后续方向
 
-最合理的下一步顺序：
+当前 `AGENT_RUNTIME_TRACKING_SPEC.md` 中的 P0/P1/P2 任务已经收敛为可验证基线：
 
-1. 扩 builtin host tool 面，并继续硬化 filesystem/process/vcs request contract
-2. 继续硬化 persistence format、versioning 和 direct query surface
-3. 扩大真实 `xllm` smoke 覆盖，保留离线 stub 基线并增加 provider matrix
-4. 硬化 async run 的 handle lifetime、并发观察和取消覆盖
-5. 扩大真实 `xllm` provider smoke，并把 provider 错误路径矩阵扩展到离线 HTTP failure 基线之外
+- public API、ownership/lifetime、错误码、版本字符串和 persistence format version 已有明确 contract。
+- builtin host tool 面已覆盖 filesystem/process/terminal/vcs/editor/diagnostics 的 agent 常用路径。
+- policy/approval、checkpoint/recovery、artifact schema、workspace memory、xllm provider/tool-loop、product profile/example、CI smoke matrix 已形成默认可用路径。
+- core/host/orchestrator/persistence/profile/provider/stress/examples 都有独立或聚合 smoke，可作为后续重构的安全网。
 
-当前阶段最重要的不是再发明更多名词，而是把已经存在的 runtime 主线做稳、做可测、做可恢复。
+下一阶段不应继续无边界扩张 v1 API，优先做 hardening：
+
+1. 把主 orchestrator 聚合 smoke 逐步拆薄为更小的主题文件，保留端到端聚合入口。
+2. 为 host tool JSON request/response 持续维护独立 contract 文档和示例 corpus；当前 contract 文档已落在 `docs/HOST_TOOL_CONTRACTS.md`，示例 corpus 已落在 `docs/HOST_TOOL_EXAMPLES.md`。
+3. 为 persistence format v3 持续维护 schema 文档和迁移测试 fixture；当前 format 文档已落在 `docs/PERSISTENCE_FORMAT.md`，focused newer-version fixture 已落在 `tests/xwork_persistence_smoke.c`。
+4. 用真实 provider 环境定期跑成功/错误两条可选 smoke，并记录 provider 差异；运行说明和差异记录模板已落在 `docs/PROVIDER_SMOKE.md`。
+5. 在 release 前做一次 `xwork.h` ABI/source compatibility review，冻结 0.1.0 对外快照；冻结检查清单已落在 `docs/API_FREEZE_0_1.md`。

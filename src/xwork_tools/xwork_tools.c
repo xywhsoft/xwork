@@ -57,6 +57,50 @@ static const xwork_tool_def *xwork__get_builtin_tool_def(const char *sToolId)
         XWORK_APPROVAL_DEFAULT,
         false
     };
+    static const xwork_tool_def tFilesystemMkdir = {
+        XWORK_TOOL_FILESYSTEM_MKDIR,
+        "Filesystem Mkdir",
+        "Create a workspace directory.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_FILESYSTEM,
+        XWORK_HOST_FILESYSTEM_MKDIR,
+        XWORK_SIDE_EFFECT_WORKSPACE_WRITE,
+        XWORK_APPROVAL_ALWAYS,
+        false
+    };
+    static const xwork_tool_def tFilesystemMove = {
+        XWORK_TOOL_FILESYSTEM_MOVE,
+        "Filesystem Move",
+        "Move or rename a workspace path.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_FILESYSTEM,
+        XWORK_HOST_FILESYSTEM_MOVE,
+        XWORK_SIDE_EFFECT_WORKSPACE_WRITE,
+        XWORK_APPROVAL_ALWAYS,
+        false
+    };
+    static const xwork_tool_def tFilesystemDelete = {
+        XWORK_TOOL_FILESYSTEM_DELETE,
+        "Filesystem Delete",
+        "Delete a workspace file or directory.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_FILESYSTEM,
+        XWORK_HOST_FILESYSTEM_DELETE,
+        XWORK_SIDE_EFFECT_WORKSPACE_WRITE,
+        XWORK_APPROVAL_ALWAYS,
+        false
+    };
+    static const xwork_tool_def tFilesystemApplyPatch = {
+        XWORK_TOOL_FILESYSTEM_APPLY_PATCH,
+        "Filesystem Apply Patch",
+        "Apply a single-file workspace text patch.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_FILESYSTEM,
+        XWORK_HOST_FILESYSTEM_APPLY_PATCH,
+        XWORK_SIDE_EFFECT_WORKSPACE_WRITE,
+        XWORK_APPROVAL_ALWAYS,
+        false
+    };
     static const xwork_tool_def tProcessExec = {
         XWORK_TOOL_PROCESS_EXEC,
         "Process Exec",
@@ -145,6 +189,61 @@ static const xwork_tool_def *xwork__get_builtin_tool_def(const char *sToolId)
         XWORK_APPROVAL_DEFAULT,
         false
     };
+    static const xwork_tool_def tVcsDiff = {
+        XWORK_TOOL_VCS_DIFF,
+        "VCS Diff",
+        "Read version-control diff for a workspace path.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_VCS,
+        XWORK_HOST_VCS_DIFF,
+        XWORK_SIDE_EFFECT_READ_ONLY,
+        XWORK_APPROVAL_DEFAULT,
+        false
+    };
+    static const xwork_tool_def tVcsLog = {
+        XWORK_TOOL_VCS_LOG,
+        "VCS Log",
+        "Read recent version-control commit log for a workspace path.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_VCS,
+        XWORK_HOST_VCS_LOG,
+        XWORK_SIDE_EFFECT_READ_ONLY,
+        XWORK_APPROVAL_DEFAULT,
+        false
+    };
+    static const xwork_tool_def tVcsBranch = {
+        XWORK_TOOL_VCS_BRANCH,
+        "VCS Branch",
+        "Read current version-control branch and dirty state for a workspace path.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_VCS,
+        XWORK_HOST_VCS_BRANCH,
+        XWORK_SIDE_EFFECT_READ_ONLY,
+        XWORK_APPROVAL_DEFAULT,
+        false
+    };
+    static const xwork_tool_def tEditorOpenBuffer = {
+        XWORK_TOOL_EDITOR_OPEN_BUFFER,
+        "Editor Open Buffer",
+        "Open a workspace file as an editor buffer with optional selection.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_EDITOR,
+        XWORK_HOST_EDITOR_OPEN_BUFFER,
+        XWORK_SIDE_EFFECT_READ_ONLY,
+        XWORK_APPROVAL_DEFAULT,
+        false
+    };
+    static const xwork_tool_def tEditorApplyEdit = {
+        XWORK_TOOL_EDITOR_APPLY_EDIT,
+        "Editor Apply Edit",
+        "Apply an edit to an open workspace editor buffer.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_EDITOR,
+        XWORK_HOST_EDITOR_APPLY_EDIT,
+        XWORK_SIDE_EFFECT_WORKSPACE_WRITE,
+        XWORK_APPROVAL_ALWAYS,
+        false
+    };
 
     if ( !sToolId || !sToolId[0] ) {
         return NULL;
@@ -163,6 +262,18 @@ static const xwork_tool_def *xwork__get_builtin_tool_def(const char *sToolId)
     }
     if ( strcmp(sToolId, XWORK_TOOL_FILESYSTEM_GLOB) == 0 ) {
         return &tFilesystemGlob;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_FILESYSTEM_MKDIR) == 0 ) {
+        return &tFilesystemMkdir;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_FILESYSTEM_MOVE) == 0 ) {
+        return &tFilesystemMove;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_FILESYSTEM_DELETE) == 0 ) {
+        return &tFilesystemDelete;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_FILESYSTEM_APPLY_PATCH) == 0 ) {
+        return &tFilesystemApplyPatch;
     }
     if ( strcmp(sToolId, XWORK_TOOL_PROCESS_EXEC) == 0 ) {
         return &tProcessExec;
@@ -187,6 +298,21 @@ static const xwork_tool_def *xwork__get_builtin_tool_def(const char *sToolId)
     }
     if ( strcmp(sToolId, XWORK_TOOL_VCS_STATUS) == 0 ) {
         return &tVcsStatus;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_VCS_DIFF) == 0 ) {
+        return &tVcsDiff;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_VCS_LOG) == 0 ) {
+        return &tVcsLog;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_VCS_BRANCH) == 0 ) {
+        return &tVcsBranch;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_EDITOR_OPEN_BUFFER) == 0 ) {
+        return &tEditorOpenBuffer;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_EDITOR_APPLY_EDIT) == 0 ) {
+        return &tEditorApplyEdit;
     }
     return NULL;
 }

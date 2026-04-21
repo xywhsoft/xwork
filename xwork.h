@@ -15,6 +15,7 @@ extern "C" {
 #define XWORK_VERSION_MAJOR 0
 #define XWORK_VERSION_MINOR 1
 #define XWORK_VERSION_PATCH 0
+#define XWORK_PERSISTENCE_FORMAT_VERSION 3
 
 #define XWORK_PROFILE_XCODE "xcode"
 #define XWORK_PROFILE_XCLAW "xclaw"
@@ -33,6 +34,10 @@ extern "C" {
 #define XWORK_TOOL_FILESYSTEM_LIST "filesystem.list"
 #define XWORK_TOOL_FILESYSTEM_STAT "filesystem.stat"
 #define XWORK_TOOL_FILESYSTEM_GLOB "filesystem.glob"
+#define XWORK_TOOL_FILESYSTEM_MKDIR "filesystem.mkdir"
+#define XWORK_TOOL_FILESYSTEM_MOVE "filesystem.move"
+#define XWORK_TOOL_FILESYSTEM_DELETE "filesystem.delete"
+#define XWORK_TOOL_FILESYSTEM_APPLY_PATCH "filesystem.apply_patch"
 #define XWORK_TOOL_PROCESS_EXEC "process.exec"
 #define XWORK_TOOL_PROCESS_START_TERMINAL "process.start_terminal"
 #define XWORK_TOOL_PROCESS_LIST_TERMINALS "process.list_terminals"
@@ -41,11 +46,20 @@ extern "C" {
 #define XWORK_TOOL_PROCESS_TERMINAL_RESIZE "process.terminal_resize"
 #define XWORK_TOOL_PROCESS_TERMINAL_STOP "process.terminal_stop"
 #define XWORK_TOOL_VCS_STATUS "vcs.status"
+#define XWORK_TOOL_VCS_DIFF "vcs.diff"
+#define XWORK_TOOL_VCS_LOG "vcs.log"
+#define XWORK_TOOL_VCS_BRANCH "vcs.branch"
+#define XWORK_TOOL_EDITOR_OPEN_BUFFER "editor.open_buffer"
+#define XWORK_TOOL_EDITOR_APPLY_EDIT "editor.apply_edit"
 #define XWORK_HOST_FILESYSTEM_READ_TEXT "read_text"
 #define XWORK_HOST_FILESYSTEM_WRITE_TEXT "write_text"
 #define XWORK_HOST_FILESYSTEM_LIST "list"
 #define XWORK_HOST_FILESYSTEM_STAT "stat"
 #define XWORK_HOST_FILESYSTEM_GLOB "glob"
+#define XWORK_HOST_FILESYSTEM_MKDIR "mkdir"
+#define XWORK_HOST_FILESYSTEM_MOVE "move"
+#define XWORK_HOST_FILESYSTEM_DELETE "delete"
+#define XWORK_HOST_FILESYSTEM_APPLY_PATCH "apply_patch"
 #define XWORK_HOST_PROCESS_EXEC "exec"
 #define XWORK_HOST_PROCESS_START_TERMINAL "start_terminal"
 #define XWORK_HOST_PROCESS_LIST_TERMINALS "list_terminals"
@@ -54,6 +68,18 @@ extern "C" {
 #define XWORK_HOST_PROCESS_TERMINAL_RESIZE "terminal_resize"
 #define XWORK_HOST_PROCESS_TERMINAL_STOP "terminal_stop"
 #define XWORK_HOST_VCS_STATUS "status"
+#define XWORK_HOST_VCS_DIFF "diff"
+#define XWORK_HOST_VCS_LOG "log"
+#define XWORK_HOST_VCS_BRANCH "branch"
+#define XWORK_HOST_DIAGNOSTICS_FROM_PROCESS "from_process_output"
+#define XWORK_HOST_EDITOR_OPEN_BUFFER "open_buffer"
+#define XWORK_HOST_EDITOR_APPLY_EDIT "apply_edit"
+#define XWORK_REPORT_SCHEMA_V1 "xwork.report.v1"
+#define XWORK_DIAGNOSTICS_SCHEMA_V1 "xwork.diagnostics.v1"
+#define XWORK_PATCH_APPLY_RESULT_SCHEMA_V1 "xwork.patch_apply_result.v1"
+#define XWORK_PATCH_FILE_SUMMARY_SCHEMA_V1 "xwork.patch_file_summary.v1"
+#define XWORK_TERMINAL_STATE_SCHEMA_V1 "xwork.terminal_state.v1"
+#define XWORK_TERMINAL_INVENTORY_SCHEMA_V1 "xwork.terminal_inventory.v1"
 
 typedef struct xllm_runtime xllm_runtime;
 typedef struct xllm_session xllm_session;
@@ -65,6 +91,9 @@ typedef struct xwork_workspace xwork_workspace;
 typedef struct xwork_run xwork_run;
 typedef struct xwork_run_async xwork_run_async;
 typedef struct xwork_event xwork_event;
+typedef struct xwork_run_step xwork_run_step;
+typedef struct xwork_run_step_list xwork_run_step_list;
+typedef struct xwork_run_step_query xwork_run_step_query;
 typedef struct xwork_approval_request xwork_approval_request;
 typedef struct xwork_checkpoint xwork_checkpoint;
 typedef struct xwork_artifact xwork_artifact;
@@ -129,6 +158,17 @@ typedef struct xwork_tool_exec_context xwork_tool_exec_context;
  * - While a run is executing synchronously or through an async handle, callers
  *   must not execute, destroy, or directly mutate the same run concurrently.
  *   A second execute entry on the same run returns XWORK_ERROR_INVALID_STATE.
+ *
+ * Recovery boundary:
+ * - File persistence stores events, artifacts, checkpoint snapshots, and the
+ *   latest run snapshot. xwork_runtime_recover_run_from_persistence() restores
+ *   that latest snapshot, including pending tool calls and approval decisions.
+ *   An approved pending tool can be resumed and executed again from stored
+ *   arguments.
+ * - OS process handles and local interactive terminal sessions are not
+ *   rehydrated across process restarts. Persisted process/terminal artifacts
+ *   are durable audit/output records; callers must rediscover or restart live
+ *   host sessions after recovery.
  */
 
 /*
@@ -175,6 +215,13 @@ typedef enum {
     /* Execution was cancelled by a cancel token, interrupt check, timeout stop, or async cancellation. */
     XWORK_ERROR_CANCELLED
 } xwork_status;
+
+/*
+ * Returns a stable string literal for an xwork_status value.
+ * Unknown numeric values return "XWORK_STATUS_UNKNOWN".
+ */
+XWORK_API const char *xwork_version(void);
+XWORK_API const char *xwork_status_cstr(xwork_status eStatus);
 
 typedef enum {
     XWORK_AUTONOMY_MANUAL = 0,
@@ -233,6 +280,7 @@ typedef enum {
 typedef enum {
     XWORK_CHECKPOINT_MANUAL = 0,
     XWORK_CHECKPOINT_MODEL_TURN,
+    XWORK_CHECKPOINT_SESSION_COMPACTED,
     XWORK_CHECKPOINT_BEFORE_TOOL,
     XWORK_CHECKPOINT_AFTER_TOOL,
     XWORK_CHECKPOINT_COMPLETION
@@ -266,6 +314,28 @@ typedef enum {
     XWORK_ARTIFACT_REPORT_FINAL
 } xwork_artifact_report_class;
 
+#define XWORK_ARTIFACT_KIND_MASK(kind_) (1u << (unsigned int)(kind_))
+#define XWORK_ARTIFACT_OUTPUT_CLASS_MASK(class_) (1u << (unsigned int)(class_))
+#define XWORK_ARTIFACT_REPORT_CLASS_MASK(class_) (1u << (unsigned int)(class_))
+
+typedef enum {
+    XWORK_PLANNER_OFF = 0,
+    XWORK_PLANNER_BOUNDARY
+} xwork_planner_mode;
+
+typedef enum {
+    XWORK_TOOL_CHOICE_AUTO = 0,
+    XWORK_TOOL_CHOICE_NONE,
+    XWORK_TOOL_CHOICE_REQUIRED,
+    XWORK_TOOL_CHOICE_NAMED
+} xwork_tool_choice_mode;
+
+typedef enum {
+    XWORK_DIAGNOSTIC_NOTE = 0,
+    XWORK_DIAGNOSTIC_WARNING,
+    XWORK_DIAGNOSTIC_ERROR
+} xwork_diagnostic_severity;
+
 typedef enum {
     XWORK_EVENT_NONE = 0,
     XWORK_EVENT_RUN_CREATED,
@@ -274,6 +344,7 @@ typedef enum {
     XWORK_EVENT_MEMORY_RECORD_INGESTED,
     XWORK_EVENT_MODEL_TURN_STARTED,
     XWORK_EVENT_MODEL_TURN_COMPLETED,
+    XWORK_EVENT_SESSION_COMPACTED,
     XWORK_EVENT_TOOL_CALL_REQUESTED,
     XWORK_EVENT_APPROVAL_REQUESTED,
     XWORK_EVENT_APPROVAL_RESOLVED,
@@ -282,11 +353,30 @@ typedef enum {
     XWORK_EVENT_ARTIFACT_EMITTED,
     XWORK_EVENT_CHECKPOINT_SAVED,
     XWORK_EVENT_CHECKPOINT_LOADED,
+    XWORK_EVENT_RETRY_SCHEDULED,
     XWORK_EVENT_RUN_PAUSED,
     XWORK_EVENT_RUN_COMPLETED,
     XWORK_EVENT_RUN_CANCELLED,
     XWORK_EVENT_RUN_FAILED
 } xwork_event_kind;
+
+typedef enum {
+    XWORK_RUN_STEP_RUN_STATE = 0,
+    XWORK_RUN_STEP_MEMORY,
+    XWORK_RUN_STEP_MODEL_TURN,
+    XWORK_RUN_STEP_TOOL_CALL,
+    XWORK_RUN_STEP_APPROVAL,
+    XWORK_RUN_STEP_TOOL_EXEC,
+    XWORK_RUN_STEP_ARTIFACT,
+    XWORK_RUN_STEP_RETRY,
+    XWORK_RUN_STEP_CHECKPOINT
+} xwork_run_step_kind;
+
+typedef enum {
+    XWORK_SESSION_COMPACT_TRUNCATE = 0,
+    XWORK_SESSION_COMPACT_SUMMARIZE,
+    XWORK_SESSION_COMPACT_CUSTOM
+} xwork_session_compact_strategy;
 
 typedef struct {
     const char *sCallId;
@@ -305,6 +395,7 @@ typedef enum {
     XWORK_HOST_FILESYSTEM,
     XWORK_HOST_PROCESS,
     XWORK_HOST_VCS,
+    XWORK_HOST_NETWORK,
     XWORK_HOST_DIAGNOSTICS,
     XWORK_HOST_EDITOR
 } xwork_host_service_kind;
@@ -355,12 +446,18 @@ typedef struct {
     xwork_host_service tFilesystem;
     xwork_host_service tProcess;
     xwork_host_service tVcs;
+    xwork_host_service tNetwork;
     xwork_host_service tDiagnostics;
     xwork_host_service tEditor;
 } xwork_host_services;
 
 typedef struct {
     xwork_risk_level eAutoApproveRiskLimit;
+    const char **psNetworkAllowHostPatterns;
+    size_t iNetworkAllowHostPatternCount;
+    const char **psNetworkDenyHostPatterns;
+    size_t iNetworkDenyHostPatternCount;
+    bool bDenyNetworkByDefault;
 } xwork_policy_options;
 
 typedef struct {
@@ -368,6 +465,10 @@ typedef struct {
     xwork_approval_mode eApprovalMode;
     xwork_tool_side_effect eSideEffect;
     bool bAutoApproveRequested;
+    bool bHasRiskLevelOverride;
+    xwork_risk_level eRiskLevelOverride;
+    const char *sRiskScopeOverride;
+    const char *sRiskReasonOverride;
 } xwork_approval_eval_input;
 
 typedef struct {
@@ -379,6 +480,19 @@ typedef struct {
 } xwork_approval_decision;
 
 typedef struct {
+    const char *sUrl;
+    const char *sHost;
+    bool bNetworkAccessRequested;
+} xwork_network_policy_eval_input;
+
+typedef struct {
+    bool bAllowed;
+    xwork_risk_level eRiskLevel;
+    const char *sScope;
+    const char *sReason;
+} xwork_network_policy_decision;
+
+typedef struct {
     const char *sText;
     size_t iWorkspaceCount;
 } xwork_memory_context;
@@ -387,6 +501,10 @@ typedef struct {
     bool bEnableAutoCompact;
     double fCompactTriggerRatio;
     size_t iCompactTriggerTurns;
+    size_t iReserveOutputTokens;
+    size_t iKeepRecentTurns;
+    bool bKeepActiveToolChain;
+    xwork_session_compact_strategy eCompactStrategy;
 } xwork_session_policy;
 
 typedef enum {
@@ -463,6 +581,7 @@ struct xwork_profile {
     size_t iDefaultMaxTurns;
     bool bDefaultAutoApprove;
     bool bEnableWorkspaceMemory;
+    xwork_planner_mode ePlannerMode;
 };
 
 typedef struct {
@@ -510,6 +629,23 @@ typedef enum {
     XWORK_MODEL_STREAM_REQUIRE
 } xwork_model_stream_mode;
 
+/*
+ * Model stream event passed to xwork_model_event_fn.
+ *
+ * eType is the underlying xllm_event_type value. xwork forwards the event
+ * ordering produced by xllm and exposes stable v1 payload fields for common
+ * agent UI cases:
+ * - START: sResponseId, sModel
+ * - TEXT_DELTA / THINKING_DELTA / REFUSAL / ERROR: sText
+ * - THINKING_DELTA: sFormat
+ * - TOOL_CALL_DELTA / TOOL_CALL_READY: sToolCallId, sToolId, sToolName,
+ *   sArgumentsDelta
+ * - ARTIFACT_*: sArtifactId, plus pArtifactData/iArtifactSize for chunks
+ *
+ * Other event kinds still pass through via eType so callers can count progress
+ * events such as OUTPUT_BEGIN, USAGE, OUTPUT_END, and END without depending on
+ * private xwork internals.
+ */
 typedef struct {
     int eType;
     bool bSynthetic;
@@ -534,11 +670,33 @@ typedef bool (*xwork_model_event_fn)(
 );
 
 typedef struct {
-    /* sWorkspaceId and sRootPath are copied. pMemory is borrowed. */
+    /*
+     * sWorkspaceId, sRootPath and memory sync policy strings are copied.
+     * pMemory is borrowed.
+     *
+     * Memory sync policy strings use xllm's delimiter convention:
+     * comma, semicolon, pipe or whitespace separated tokens.
+     * - sMemorySyncAllowedExtensions is an include list, e.g. ".c,.h,.md".
+     * - sMemorySyncIgnoredDirectories excludes directory names.
+     * - sMemorySyncIgnoredExtensions excludes extensions.
+     * - sMemorySyncIgnoredPathPatterns excludes relative path substrings/patterns.
+     * - sMemorySyncIgnoredFiles is forwarded to workspace sync for exact file ignores.
+     * - iMemorySyncMaxFileBytes skips files above the limit when non-zero.
+     *
+     * Binary files are not ingested by xllm memory; callers should combine an
+     * extension include list with max-file limits for deterministic agent memory
+     * behavior.
+     */
     const char *sWorkspaceId;
     const char *sRootPath;
     bool bEnableMemory;
     xllm_memory *pMemory;
+    const char *sMemorySyncAllowedExtensions;
+    const char *sMemorySyncIgnoredDirectories;
+    const char *sMemorySyncIgnoredExtensions;
+    const char *sMemorySyncIgnoredPathPatterns;
+    const char *sMemorySyncIgnoredFiles;
+    size_t iMemorySyncMaxFileBytes;
 } xwork_workspace_options;
 
 typedef struct {
@@ -615,6 +773,8 @@ typedef struct {
     size_t iPatchHunkCount;
     size_t iPatchAddedLineCount;
     size_t iPatchDeletedLineCount;
+    const char *sPatchApplyResultJson;
+    const char *sPatchFileSummaryJson;
     const char *sCommandText;
     bool bHasCommandIoStats;
     size_t iStdoutByteCount;
@@ -631,6 +791,8 @@ typedef struct {
     const char *sTargetRef;
     const char *sSummary;
     const char *sPatchText;
+    const char *sApplyResultJson;
+    const char *sFileSummaryJson;
 } xwork_patch_artifact_options;
 
 typedef struct {
@@ -707,6 +869,8 @@ typedef struct {
     size_t iPatchHunkCount;
     size_t iPatchAddedLineCount;
     size_t iPatchDeletedLineCount;
+    const char *sPatchApplyResultJson;
+    const char *sPatchFileSummaryJson;
     bool bHasCommandIoStats;
     size_t iStdoutByteCount;
     size_t iStderrByteCount;
@@ -813,6 +977,16 @@ typedef struct {
 
 typedef struct {
     const char *sDefaultWorkingDirectory;
+    bool bEnforceFilesystemRoot;
+    const char **psFilesystemAllowPathPrefixes;
+    size_t iFilesystemAllowPathPrefixCount;
+    const char **psFilesystemDenyPathPrefixes;
+    size_t iFilesystemDenyPathPrefixCount;
+    const char **psCommandAllowPatterns;
+    size_t iCommandAllowPatternCount;
+    const char **psCommandDenyPatterns;
+    size_t iCommandDenyPatternCount;
+    bool bDenyDestructiveCommands;
     size_t iMaxReadBytes;
     size_t iMaxProcessInputBytes;
     size_t iMaxProcessEnvEntries;
@@ -821,10 +995,24 @@ typedef struct {
     bool bEnableFilesystemWriteText;
     bool bEnableProcessExec;
     bool bEnableVcsStatus;
+    bool bEnableVcsDiff;
+    bool bEnableVcsLog;
+    bool bEnableVcsBranch;
+    bool bEnableEditorBuffers;
 } xwork_local_host_options;
 
 typedef struct {
     char *sDefaultWorkingDirectory;
+    bool bEnforceFilesystemRoot;
+    char **psFilesystemAllowPathPrefixes;
+    size_t iFilesystemAllowPathPrefixCount;
+    char **psFilesystemDenyPathPrefixes;
+    size_t iFilesystemDenyPathPrefixCount;
+    char **psCommandAllowPatterns;
+    size_t iCommandAllowPatternCount;
+    char **psCommandDenyPatterns;
+    size_t iCommandDenyPatternCount;
+    bool bDenyDestructiveCommands;
     size_t iMaxReadBytes;
     size_t iMaxProcessInputBytes;
     size_t iMaxProcessEnvEntries;
@@ -833,8 +1021,14 @@ typedef struct {
     bool bEnableFilesystemWriteText;
     bool bEnableProcessExec;
     bool bEnableVcsStatus;
+    bool bEnableVcsDiff;
+    bool bEnableVcsLog;
+    bool bEnableVcsBranch;
+    bool bEnableEditorBuffers;
     char *sLastOutputText;
     char *sLastVisibleSummary;
+    void *pEditorBuffers;
+    size_t iNextEditorBufferId;
     void *pTerminalSessions;
     size_t iNextTerminalSessionId;
 } xwork_local_host;
@@ -851,6 +1045,11 @@ typedef xwork_status (*xwork_persistence_store_event_fn)(
 
 typedef xwork_status (*xwork_persistence_store_checkpoint_fn)(
     const xwork_checkpoint *pCheckpoint,
+    const xwork_run_snapshot *pSnapshot,
+    void *pUserData
+);
+
+typedef xwork_status (*xwork_persistence_store_run_snapshot_fn)(
     const xwork_run_snapshot *pSnapshot,
     void *pUserData
 );
@@ -944,6 +1143,7 @@ typedef xwork_status (*xwork_persistence_load_artifact_fn)(
 struct xwork_persistence_backend {
     xwork_persistence_store_event_fn pfnStoreEvent;
     xwork_persistence_store_checkpoint_fn pfnStoreCheckpoint;
+    xwork_persistence_store_run_snapshot_fn pfnStoreRunSnapshot;
     xwork_persistence_store_artifact_fn pfnStoreArtifact;
     xwork_persistence_load_run_snapshot_fn pfnLoadRunSnapshot;
     xwork_persistence_load_checkpoint_snapshot_fn pfnLoadCheckpointSnapshot;
@@ -973,6 +1173,44 @@ struct xwork_event {
     xwork_event_kind eKind;
     xwork_run_state eRunState;
     size_t iSequence;
+};
+
+struct xwork_run_step {
+    const char *sStepId;
+    const char *sRunId;
+    const char *sEventId;
+    const char *sToolId;
+    const char *sApprovalRequestId;
+    const char *sCheckpointId;
+    const char *sSummary;
+    xwork_run_step_kind eKind;
+    xwork_event_kind eEventKind;
+    xwork_checkpoint_kind eCheckpointKind;
+    xwork_run_state eRunState;
+    size_t iSequence;
+};
+
+struct xwork_run_step_list {
+    const xwork_run_step *pItems;
+    size_t iCount;
+    bool bHasMore;
+    size_t iNextAfterSequence;
+};
+
+struct xwork_run_step_query {
+    bool bFilterKind;
+    xwork_run_step_kind eKind;
+    bool bFilterEventKind;
+    xwork_event_kind eEventKind;
+    bool bFilterCheckpointKind;
+    xwork_checkpoint_kind eCheckpointKind;
+    bool bHasAfterSequence;
+    size_t iAfterSequence;
+    bool bHasMinSequence;
+    size_t iMinSequence;
+    bool bHasMaxSequence;
+    size_t iMaxSequence;
+    size_t iLimit;
 };
 
 struct xwork_approval_request {
@@ -1020,6 +1258,8 @@ struct xwork_artifact {
     size_t iPatchHunkCount;
     size_t iPatchAddedLineCount;
     size_t iPatchDeletedLineCount;
+    const char *sPatchApplyResultJson;
+    const char *sPatchFileSummaryJson;
     const char *sCommandText;
     bool bHasCommandIoStats;
     size_t iStdoutByteCount;
@@ -1049,6 +1289,8 @@ typedef struct xwork_run_index_entry {
 struct xwork_run_index_list {
     const xwork_run_index_entry *pItems;
     size_t iCount;
+    bool bHasMore;
+    const char *sNextAfterRunId;
 };
 
 typedef enum {
@@ -1096,6 +1338,8 @@ struct xwork_run_index_query {
     size_t iMinLastCheckpointSequence;
     bool bFilterMaxLastCheckpointSequence;
     size_t iMaxLastCheckpointSequence;
+    const char *sAfterRunId;
+    size_t iLimit;
     xwork_run_index_sort eSort;
 };
 
@@ -1104,6 +1348,19 @@ typedef struct {
      * Callbacks and user data are borrowed for the duration of
      * xwork_run_execute(). For xwork_run_execute_async(), they must remain
      * valid until the async handle completes or is destroyed.
+     *
+     * Model event cancellation order is deterministic: the orchestrator checks
+     * pfnShouldInterrupt/pCancelToken before forwarding an event to
+     * pfnModelEvent. If pfnModelEvent returns false, xwork marks the model turn
+     * cancelled, cancels pCancelToken when one is available, and the run
+     * completes the cancellation path with XWORK_ERROR_CANCELLED.
+     *
+     * Planner boundary:
+     * - XWORK_PLANNER_BOUNDARY does not run a planner. It lets callers attach
+     *   planner output as model-turn system context through sPlannerContextText
+     *   or sPlannerPlanJson.
+     * - eToolChoiceMode maps to xllm tool choice for the next model turn.
+     *   XWORK_TOOL_CHOICE_NAMED requires sToolChoiceToolId.
      */
     xwork_tool_exec_fn pfnToolExec;
     xwork_tool_exec_ex_fn pfnToolExecEx;
@@ -1116,9 +1373,48 @@ typedef struct {
     void *pModelEventUserData;
     xwork_interrupt_check_fn pfnShouldInterrupt;
     void *pInterruptUserData;
+    xwork_planner_mode ePlannerMode;
+    const char *sPlannerContextText;
+    const char *sPlannerPlanJson;
+    xwork_tool_choice_mode eToolChoiceMode;
+    const char *sToolChoiceToolId;
+    bool bAllowParallelToolCalls;
+    /*
+     * Default workspace memory retrieval policy used when
+     * pfnResolveMemoryContext is NULL.
+     *
+     * - iMemorySearchMaxHits maps to xllm_memory_search_options.uMaxHits.
+     * - iMemoryContextMaxBlocks limits how many workspace memory blocks are
+     *   searched and merged for a model turn. Zero means no xwork-side limit.
+     * - iMemoryContextMaxCharsPerHit and iMemoryContextMaxTotalChars map to
+     *   xllm_memory_context_options character budgets. They are stable
+     *   token-budget proxies until xllm exposes tokenizer-backed limits here.
+     * - iMemoryContextPriority and bMemoryContextPinned are forwarded to the
+     *   final model-turn context block.
+     */
+    size_t iMemorySearchMaxHits;
+    size_t iMemoryContextMaxBlocks;
+    size_t iMemoryContextMaxCharsPerHit;
+    size_t iMemoryContextMaxTotalChars;
+    int iMemoryContextPriority;
+    bool bMemoryContextPinned;
     bool bIngestToolResultsToMemory;
     bool bIngestArtifactsToMemory;
+    /*
+     * Artifact memory ingest policy used when bIngestArtifactsToMemory is true.
+     * A zero mask means "no filter" for compatibility.
+     *
+     * Sensitive-looking artifact content is skipped by default. Set
+     * bIngestSensitiveArtifactsToMemory only when the caller has already
+     * redacted or explicitly opted into retaining sensitive material in memory.
+     */
+    unsigned int uArtifactMemoryIngestKindMask;
+    unsigned int uArtifactMemoryIngestOutputClassMask;
+    unsigned int uArtifactMemoryIngestReportClassMask;
+    bool bIngestSensitiveArtifactsToMemory;
     size_t iMaxTurns;
+    size_t iMaxRetries;
+    size_t iRetryBackoffMs;
     bool bAutoApprove;
 } xwork_orchestrator_options;
 
@@ -1151,6 +1447,12 @@ XWORK_API void xwork_host_services_init(xwork_host_services *pServices);
 XWORK_API void xwork_policy_options_init(xwork_policy_options *pOptions);
 XWORK_API void xwork_approval_eval_input_init(xwork_approval_eval_input *pInput);
 XWORK_API void xwork_approval_decision_init(xwork_approval_decision *pDecision);
+XWORK_API void xwork_network_policy_eval_input_init(
+    xwork_network_policy_eval_input *pInput
+);
+XWORK_API void xwork_network_policy_decision_init(
+    xwork_network_policy_decision *pDecision
+);
 XWORK_API void xwork_memory_context_init(xwork_memory_context *pContext);
 XWORK_API void xwork_memory_context_reset(xwork_memory_context *pContext);
 XWORK_API void xwork_session_policy_init(xwork_session_policy *pPolicy);
@@ -1171,6 +1473,11 @@ XWORK_API void xwork_string_list_init(xwork_string_list *pList);
 XWORK_API void xwork_string_list_reset(xwork_string_list *pList);
 XWORK_API void xwork_event_init(xwork_event *pEvent);
 XWORK_API void xwork_event_reset(xwork_event *pEvent);
+XWORK_API void xwork_run_step_init(xwork_run_step *pStep);
+XWORK_API void xwork_run_step_reset(xwork_run_step *pStep);
+XWORK_API void xwork_run_step_list_init(xwork_run_step_list *pList);
+XWORK_API void xwork_run_step_list_reset(xwork_run_step_list *pList);
+XWORK_API void xwork_run_step_query_init(xwork_run_step_query *pQuery);
 XWORK_API void xwork_approval_request_init(xwork_approval_request *pRequest);
 XWORK_API void xwork_approval_request_reset(xwork_approval_request *pRequest);
 XWORK_API void xwork_checkpoint_init(xwork_checkpoint *pCheckpoint);
@@ -1267,6 +1574,12 @@ XWORK_API xwork_status xwork_file_persistence_query_artifact_summaries(
     const char *sRunId,
     const xwork_artifact_summary_query *pQuery,
     xwork_artifact_summary_list *pList
+);
+XWORK_API xwork_status xwork_file_persistence_query_run_steps(
+    const xwork_file_persistence *pStore,
+    const char *sRunId,
+    const xwork_run_step_query *pQuery,
+    xwork_run_step_list *pList
 );
 XWORK_API xwork_status xwork_file_persistence_load_event(
     const xwork_file_persistence *pStore,
@@ -1369,6 +1682,12 @@ XWORK_API xwork_status xwork_runtime_query_persisted_artifact_summaries(
     const char *sRunId,
     const xwork_artifact_summary_query *pQuery,
     xwork_artifact_summary_list *pList
+);
+XWORK_API xwork_status xwork_runtime_query_persisted_run_steps(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const xwork_run_step_query *pQuery,
+    xwork_run_step_list *pList
 );
 XWORK_API xwork_status xwork_runtime_list_persisted_run_summaries(
     const xwork_runtime *pRuntime,
@@ -1591,6 +1910,17 @@ XWORK_API xwork_status xwork_run_get_event(
     size_t iIndex,
     xwork_event *pEvent
 );
+XWORK_API size_t xwork_run_get_step_count(const xwork_run *pRun);
+XWORK_API xwork_status xwork_run_get_step(
+    const xwork_run *pRun,
+    size_t iIndex,
+    xwork_run_step *pStep
+);
+XWORK_API xwork_status xwork_run_query_steps(
+    const xwork_run *pRun,
+    const xwork_run_step_query *pQuery,
+    xwork_run_step_list *pList
+);
 XWORK_API size_t xwork_run_get_checkpoint_count(const xwork_run *pRun);
 XWORK_API xwork_status xwork_run_get_checkpoint(
     const xwork_run *pRun,
@@ -1608,6 +1938,11 @@ XWORK_API xwork_status xwork_policy_evaluate_approval(
     const xwork_policy_options *pPolicy,
     const xwork_approval_eval_input *pInput,
     xwork_approval_decision *pDecision
+);
+XWORK_API xwork_status xwork_policy_evaluate_network_access(
+    const xwork_policy_options *pPolicy,
+    const xwork_network_policy_eval_input *pInput,
+    xwork_network_policy_decision *pDecision
 );
 XWORK_API xwork_status xwork_run_execute(
     xwork_run *pRun,

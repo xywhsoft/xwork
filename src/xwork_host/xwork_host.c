@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #define XWORK__HOST_POPEN popen
 #define XWORK__HOST_PCLOSE pclose
 #endif
@@ -28,6 +29,17 @@
 #define XWORK__LOCAL_HOST_DEFAULT_TERMINAL_COLS 120u
 #define XWORK__LOCAL_HOST_DEFAULT_TERMINAL_ROWS 30u
 #define XWORK__LOCAL_HOST_PROCESS_TIMEOUT_GRACE_MS 100u
+
+typedef struct xwork__local_editor_buffer {
+    char *sBufferId;
+    char *sPath;
+    char *sResolvedPath;
+    char *sText;
+    bool bDirty;
+    size_t iSelectionStart;
+    size_t iSelectionEnd;
+    struct xwork__local_editor_buffer *pNext;
+} xwork__local_editor_buffer;
 
 static const xwork_host_service *xwork__runtime_get_host_service_slot(
     const xwork_runtime *pRuntime,
@@ -47,6 +59,8 @@ static const xwork_host_service *xwork__runtime_get_host_service_slot(
             return &pRuntime->tHostServices.tProcess;
         case XWORK_HOST_VCS:
             return &pRuntime->tHostServices.tVcs;
+        case XWORK_HOST_NETWORK:
+            return &pRuntime->tHostServices.tNetwork;
         case XWORK_HOST_DIAGNOSTICS:
             return &pRuntime->tHostServices.tDiagnostics;
         case XWORK_HOST_EDITOR:
@@ -110,6 +124,550 @@ static char *xwork__local_host_resolve_path(
         pHost ? pHost->sDefaultWorkingDirectory : NULL,
         sPath
     );
+}
+
+static int xwork__local_host_path_char_cmp(char cLeft, char cRight)
+{
+#ifdef _WIN32
+    cLeft = (char)tolower((unsigned char)cLeft);
+    cRight = (char)tolower((unsigned char)cRight);
+#endif
+    return (int)((unsigned char)cLeft) - (int)((unsigned char)cRight);
+}
+
+static bool xwork__local_host_path_is_normalized_absolute(const char *sPath)
+{
+    if ( !sPath || !sPath[0] ) {
+        return false;
+    }
+#ifdef _WIN32
+    if ( isalpha((unsigned char)sPath[0]) && sPath[1] == ':' && sPath[2] == '/' ) {
+        return true;
+    }
+    if ( sPath[0] == '/' && sPath[1] == '/' ) {
+        return true;
+    }
+#endif
+    return sPath[0] == '/';
+}
+
+static bool xwork__local_host_path_starts_with_parent(const char *sPath)
+{
+    return sPath &&
+        sPath[0] == '.' &&
+        sPath[1] == '.' &&
+        (sPath[2] == '\0' || sPath[2] == '/');
+}
+
+static char *xwork__local_host_normalize_path(const char *sPath)
+{
+    char *sWorking;
+    char **psComponents;
+    size_t iLength;
+    size_t iPrefixLength = 0u;
+    size_t iComponentCount = 0u;
+    size_t i;
+    size_t iOutputLength;
+    char *sOutput;
+    char *sOut;
+
+    if ( !sPath || !sPath[0] ) {
+        return NULL;
+    }
+
+    iLength = strlen(sPath);
+    sWorking = xwork__dup_cstr(sPath);
+    if ( !sWorking ) {
+        return NULL;
+    }
+    psComponents = (char **)calloc(iLength + 1u, sizeof(*psComponents));
+    if ( !psComponents ) {
+        free(sWorking);
+        return NULL;
+    }
+
+    for ( i = 0u; sWorking[i] != '\0'; ++i ) {
+        if ( sWorking[i] == '\\' ) {
+            sWorking[i] = '/';
+        }
+    }
+
+#ifdef _WIN32
+    if ( isalpha((unsigned char)sWorking[0]) && sWorking[1] == ':' ) {
+        iPrefixLength = 2u;
+        if ( sWorking[2] == '/' ) {
+            iPrefixLength = 3u;
+        }
+    } else if ( sWorking[0] == '/' && sWorking[1] == '/' ) {
+        iPrefixLength = 2u;
+    } else
+#endif
+    if ( sWorking[0] == '/' ) {
+        iPrefixLength = 1u;
+    }
+
+    i = iPrefixLength;
+    while ( i <= iLength ) {
+        char *sPart = sWorking + i;
+        size_t iPartLength = 0u;
+
+        while ( i + iPartLength < iLength && sWorking[i + iPartLength] != '/' ) {
+            ++iPartLength;
+        }
+        if ( i + iPartLength < iLength ) {
+            sWorking[i + iPartLength] = '\0';
+        }
+
+        if ( iPartLength > 0u && strcmp(sPart, ".") != 0 ) {
+            if ( strcmp(sPart, "..") == 0 ) {
+                if ( iComponentCount > 0u &&
+                     strcmp(psComponents[iComponentCount - 1u], "..") != 0 ) {
+                    --iComponentCount;
+                } else if ( iPrefixLength == 0u ) {
+                    psComponents[iComponentCount++] = sPart;
+                }
+            } else {
+                psComponents[iComponentCount++] = sPart;
+            }
+        }
+
+        i += iPartLength + 1u;
+        if ( i > iLength ) {
+            break;
+        }
+    }
+
+    iOutputLength = iPrefixLength;
+    for ( i = 0u; i < iComponentCount; ++i ) {
+        if ( iOutputLength > 0u && sWorking[iOutputLength - 1u] != '/' ) {
+            ++iOutputLength;
+        } else if ( iOutputLength == 0u && i > 0u ) {
+            ++iOutputLength;
+        }
+        iOutputLength += strlen(psComponents[i]);
+    }
+    if ( iOutputLength == 0u ) {
+        iOutputLength = 1u;
+    }
+
+    sOutput = (char *)calloc(iOutputLength + 1u, sizeof(char));
+    if ( !sOutput ) {
+        free(psComponents);
+        free(sWorking);
+        return NULL;
+    }
+
+    sOut = sOutput;
+    if ( iPrefixLength > 0u ) {
+        memcpy(sOut, sWorking, iPrefixLength);
+        sOut += iPrefixLength;
+    }
+    for ( i = 0u; i < iComponentCount; ++i ) {
+        if ( sOut > sOutput && sOut[-1] != '/' ) {
+            *sOut++ = '/';
+        } else if ( sOut == sOutput && i > 0u ) {
+            *sOut++ = '/';
+        }
+        memcpy(sOut, psComponents[i], strlen(psComponents[i]));
+        sOut += strlen(psComponents[i]);
+    }
+    if ( sOut == sOutput ) {
+        *sOut++ = '.';
+    }
+    *sOut = '\0';
+
+    free(psComponents);
+    free(sWorking);
+    return sOutput;
+}
+
+static bool xwork__local_host_path_has_prefix(const char *sPath, const char *sPrefix)
+{
+    size_t i;
+    size_t iPathLength;
+    size_t iPrefixLength;
+
+    if ( !sPath || !sPrefix || !sPrefix[0] ) {
+        return false;
+    }
+
+    iPathLength = strlen(sPath);
+    iPrefixLength = strlen(sPrefix);
+    if ( iPrefixLength > 1u && sPrefix[iPrefixLength - 1u] == '/' ) {
+        --iPrefixLength;
+    }
+    if ( iPathLength < iPrefixLength ) {
+        return false;
+    }
+
+    for ( i = 0u; i < iPrefixLength; ++i ) {
+        if ( xwork__local_host_path_char_cmp(sPath[i], sPrefix[i]) != 0 ) {
+            return false;
+        }
+    }
+
+    return iPathLength == iPrefixLength || sPath[iPrefixLength] == '/';
+}
+
+static xwork_status xwork__local_host_copy_path_prefixes(
+    char ***ppsTarget,
+    size_t *piTargetCount,
+    const char **psSource,
+    size_t iSourceCount
+)
+{
+    char **psTarget;
+    size_t i;
+
+    if ( !ppsTarget || !piTargetCount ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    *ppsTarget = NULL;
+    *piTargetCount = 0u;
+    if ( !psSource || iSourceCount == 0u ) {
+        return XWORK_OK;
+    }
+
+    psTarget = (char **)calloc(iSourceCount, sizeof(*psTarget));
+    if ( !psTarget ) {
+        return XWORK_ERROR_NO_MEMORY;
+    }
+    for ( i = 0u; i < iSourceCount; ++i ) {
+        if ( psSource[i] && psSource[i][0] ) {
+            psTarget[i] = xwork__dup_cstr(psSource[i]);
+            if ( !psTarget[i] ) {
+                xwork__free_str_array(&psTarget, &iSourceCount);
+                return XWORK_ERROR_NO_MEMORY;
+            }
+        }
+    }
+    *ppsTarget = psTarget;
+    *piTargetCount = iSourceCount;
+    return XWORK_OK;
+}
+
+static void xwork__local_host_free_editor_buffers(xwork_local_host *pHost)
+{
+    xwork__local_editor_buffer *pBuffer;
+
+    if ( !pHost ) {
+        return;
+    }
+
+    pBuffer = (xwork__local_editor_buffer *)pHost->pEditorBuffers;
+    while ( pBuffer ) {
+        xwork__local_editor_buffer *pNext = pBuffer->pNext;
+
+        free(pBuffer->sBufferId);
+        free(pBuffer->sPath);
+        free(pBuffer->sResolvedPath);
+        free(pBuffer->sText);
+        free(pBuffer);
+        pBuffer = pNext;
+    }
+    pHost->pEditorBuffers = NULL;
+}
+
+static xwork__local_editor_buffer *xwork__local_host_find_editor_buffer(
+    xwork_local_host *pHost,
+    const char *sBufferId,
+    const char *sResolvedPath
+)
+{
+    xwork__local_editor_buffer *pBuffer;
+
+    if ( !pHost ) {
+        return NULL;
+    }
+
+    for ( pBuffer = (xwork__local_editor_buffer *)pHost->pEditorBuffers;
+          pBuffer;
+          pBuffer = pBuffer->pNext ) {
+        if ( sBufferId &&
+             sBufferId[0] &&
+             pBuffer->sBufferId &&
+             strcmp(pBuffer->sBufferId, sBufferId) == 0 ) {
+            return pBuffer;
+        }
+        if ( sResolvedPath &&
+             sResolvedPath[0] &&
+             pBuffer->sResolvedPath &&
+             strcmp(pBuffer->sResolvedPath, sResolvedPath) == 0 ) {
+            return pBuffer;
+        }
+    }
+    return NULL;
+}
+
+static bool xwork__local_host_path_prefix_matches(
+    const xwork_local_host *pHost,
+    const char *sNormalizedPath,
+    const char *sPrefix
+)
+{
+    char *sResolvedPrefix = NULL;
+    char *sNormalizedPrefix = NULL;
+    bool bMatches = false;
+
+    if ( !sNormalizedPath || !sPrefix || !sPrefix[0] ) {
+        return false;
+    }
+
+    sResolvedPrefix = xwork__local_host_resolve_path(pHost, sPrefix);
+    if ( sResolvedPrefix ) {
+        sNormalizedPrefix = xwork__local_host_normalize_path(sResolvedPrefix);
+    }
+    if ( sNormalizedPrefix ) {
+        bMatches = xwork__local_host_path_has_prefix(
+            sNormalizedPath,
+            sNormalizedPrefix
+        );
+    }
+    free(sResolvedPrefix);
+    free(sNormalizedPrefix);
+    return bMatches;
+}
+
+static xwork_status xwork__local_host_check_filesystem_path(
+    const xwork_local_host *pHost,
+    const char *sResolvedPath,
+    const char **psFailureMessage
+)
+{
+    char *sNormalizedPath = NULL;
+    char *sNormalizedRootPath = NULL;
+    bool bAllowed;
+    size_t i;
+
+    if ( psFailureMessage ) {
+        *psFailureMessage = NULL;
+    }
+    if ( !pHost || !sResolvedPath || !sResolvedPath[0] ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    sNormalizedPath = xwork__local_host_normalize_path(sResolvedPath);
+    if ( !sNormalizedPath ) {
+        return XWORK_ERROR_NO_MEMORY;
+    }
+
+    if ( pHost->bEnforceFilesystemRoot &&
+         pHost->sDefaultWorkingDirectory &&
+         pHost->sDefaultWorkingDirectory[0] ) {
+        sNormalizedRootPath =
+            xwork__local_host_normalize_path(pHost->sDefaultWorkingDirectory);
+        if ( !sNormalizedRootPath ) {
+            free(sNormalizedPath);
+            return XWORK_ERROR_NO_MEMORY;
+        }
+
+        if ( strcmp(sNormalizedRootPath, ".") == 0 ) {
+            if ( xwork__local_host_path_is_normalized_absolute(sNormalizedPath) ||
+                 xwork__local_host_path_starts_with_parent(sNormalizedPath) ) {
+                if ( psFailureMessage ) {
+                    *psFailureMessage = "path is outside filesystem root";
+                }
+                free(sNormalizedRootPath);
+                free(sNormalizedPath);
+                return XWORK_ERROR_INVALID_STATE;
+            }
+        } else if ( !xwork__local_host_path_has_prefix(
+                        sNormalizedPath,
+                        sNormalizedRootPath
+                    ) ) {
+            if ( psFailureMessage ) {
+                *psFailureMessage = "path is outside filesystem root";
+            }
+            free(sNormalizedRootPath);
+            free(sNormalizedPath);
+            return XWORK_ERROR_INVALID_STATE;
+        }
+    }
+
+    bAllowed = pHost->iFilesystemAllowPathPrefixCount == 0u;
+    for ( i = 0u; !bAllowed && i < pHost->iFilesystemAllowPathPrefixCount; ++i ) {
+        bAllowed = xwork__local_host_path_prefix_matches(
+            pHost,
+            sNormalizedPath,
+            pHost->psFilesystemAllowPathPrefixes[i]
+        );
+    }
+    if ( !bAllowed ) {
+        if ( psFailureMessage ) {
+            *psFailureMessage = "path is not in allowed filesystem prefixes";
+        }
+        free(sNormalizedRootPath);
+        free(sNormalizedPath);
+        return XWORK_ERROR_INVALID_STATE;
+    }
+
+    for ( i = 0u; i < pHost->iFilesystemDenyPathPrefixCount; ++i ) {
+        if ( xwork__local_host_path_prefix_matches(
+                 pHost,
+                 sNormalizedPath,
+                 pHost->psFilesystemDenyPathPrefixes[i]
+             ) ) {
+            if ( psFailureMessage ) {
+                *psFailureMessage = "path is denied by filesystem prefixes";
+            }
+            free(sNormalizedRootPath);
+            free(sNormalizedPath);
+            return XWORK_ERROR_INVALID_STATE;
+        }
+    }
+
+    free(sNormalizedRootPath);
+    free(sNormalizedPath);
+    return XWORK_OK;
+}
+
+static bool xwork__local_host_ascii_contains_ci(
+    const char *sText,
+    const char *sPattern
+)
+{
+    size_t i;
+    size_t j;
+    size_t iTextLength;
+    size_t iPatternLength;
+
+    if ( !sText || !sPattern || !sPattern[0] ) {
+        return false;
+    }
+
+    iTextLength = strlen(sText);
+    iPatternLength = strlen(sPattern);
+    if ( iPatternLength > iTextLength ) {
+        return false;
+    }
+
+    for ( i = 0u; i <= iTextLength - iPatternLength; ++i ) {
+        bool bMatches = true;
+
+        for ( j = 0u; j < iPatternLength; ++j ) {
+            if ( tolower((unsigned char)sText[i + j]) !=
+                 tolower((unsigned char)sPattern[j]) ) {
+                bMatches = false;
+                break;
+            }
+        }
+        if ( bMatches ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool xwork__local_host_command_has_any_pattern(
+    const char *sCommand,
+    char **psPatterns,
+    size_t iPatternCount
+)
+{
+    size_t i;
+
+    if ( !sCommand || !psPatterns || iPatternCount == 0u ) {
+        return false;
+    }
+
+    for ( i = 0u; i < iPatternCount; ++i ) {
+        if ( psPatterns[i] &&
+             psPatterns[i][0] &&
+             xwork__local_host_ascii_contains_ci(sCommand, psPatterns[i]) ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool xwork__local_host_command_looks_destructive(const char *sCommand)
+{
+    static const char *const psDestructivePatterns[] = {
+        "rm -",
+        "rm /",
+        "del ",
+        "erase ",
+        "rd ",
+        "rmdir ",
+        "remove-item",
+        "git clean",
+        "git reset --hard",
+        "git checkout --"
+    };
+    size_t i;
+
+    if ( !sCommand || !sCommand[0] ) {
+        return false;
+    }
+    for ( i = 0u; i < sizeof(psDestructivePatterns) / sizeof(psDestructivePatterns[0]); ++i ) {
+        if ( xwork__local_host_ascii_contains_ci(sCommand, psDestructivePatterns[i]) ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static xwork_status xwork__local_host_check_command_policy(
+    const xwork_local_host *pHost,
+    const char *sCommand,
+    const char **psFailureKind,
+    const char **psFailureMessage
+)
+{
+    bool bAllowed;
+
+    if ( psFailureKind ) {
+        *psFailureKind = NULL;
+    }
+    if ( psFailureMessage ) {
+        *psFailureMessage = NULL;
+    }
+    if ( !pHost || !sCommand || !sCommand[0] ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    bAllowed = pHost->iCommandAllowPatternCount == 0u ||
+        xwork__local_host_command_has_any_pattern(
+            sCommand,
+            pHost->psCommandAllowPatterns,
+            pHost->iCommandAllowPatternCount
+        );
+    if ( !bAllowed ) {
+        if ( psFailureKind ) {
+            *psFailureKind = "command_denied";
+        }
+        if ( psFailureMessage ) {
+            *psFailureMessage = "command is not in allowed command patterns";
+        }
+        return XWORK_ERROR_INVALID_STATE;
+    }
+
+    if ( xwork__local_host_command_has_any_pattern(
+             sCommand,
+             pHost->psCommandDenyPatterns,
+             pHost->iCommandDenyPatternCount
+         ) ) {
+        if ( psFailureKind ) {
+            *psFailureKind = "command_denied";
+        }
+        if ( psFailureMessage ) {
+            *psFailureMessage = "command matches denied command patterns";
+        }
+        return XWORK_ERROR_INVALID_STATE;
+    }
+
+    if ( pHost->bDenyDestructiveCommands &&
+         xwork__local_host_command_looks_destructive(sCommand) ) {
+        if ( psFailureKind ) {
+            *psFailureKind = "destructive_command";
+        }
+        if ( psFailureMessage ) {
+            *psFailureMessage = "command is classified as destructive";
+        }
+        return XWORK_ERROR_INVALID_STATE;
+    }
+
+    return XWORK_OK;
 }
 
 static xwork_status xwork__local_host_json_escape(
@@ -212,6 +770,8 @@ static xwork_status xwork__local_host_json_escape(
     return XWORK_OK;
 }
 
+static char *xwork__local_host_dup_prefix(const char *sText, size_t iLength);
+
 static xwork_status xwork__local_host_string_append(
     char **ppsText,
     size_t *piLength,
@@ -235,6 +795,107 @@ static xwork_status xwork__local_host_string_append(
     memcpy(*ppsText + *piLength, sChunk, iChunkLength + 1u);
     *piLength += iChunkLength;
     return XWORK_OK;
+}
+
+static xwork_status xwork__local_host_append_patch_lines(
+    char **ppsText,
+    size_t *piLength,
+    char cPrefix,
+    const char *sText
+)
+{
+    const char *sCursor;
+    xwork_status iStatus;
+
+    if ( !ppsText || !piLength ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !sText ) {
+        sText = "";
+    }
+
+    sCursor = sText;
+    while ( *sCursor ) {
+        const char *sLineEnd = strchr(sCursor, '\n');
+        char sPrefix[2];
+        char *sLine = NULL;
+        size_t iLineLength;
+
+        sPrefix[0] = cPrefix;
+        sPrefix[1] = '\0';
+        iStatus = xwork__local_host_string_append(ppsText, piLength, sPrefix);
+        if ( iStatus != XWORK_OK ) {
+            return iStatus;
+        }
+
+        iLineLength = sLineEnd ? (size_t)(sLineEnd - sCursor) + 1u : strlen(sCursor);
+        sLine = xwork__local_host_dup_prefix(sCursor, iLineLength);
+        if ( !sLine ) {
+            return XWORK_ERROR_NO_MEMORY;
+        }
+        iStatus = xwork__local_host_string_append(ppsText, piLength, sLine);
+        free(sLine);
+        if ( iStatus != XWORK_OK ) {
+            return iStatus;
+        }
+        if ( !sLineEnd ) {
+            iStatus = xwork__local_host_string_append(ppsText, piLength, "\n");
+            if ( iStatus != XWORK_OK ) {
+                return iStatus;
+            }
+            break;
+        }
+        sCursor = sLineEnd + 1;
+    }
+
+    if ( !sText[0] ) {
+        char sEmptyLine[3];
+
+        sEmptyLine[0] = cPrefix;
+        sEmptyLine[1] = '\n';
+        sEmptyLine[2] = '\0';
+        return xwork__local_host_string_append(ppsText, piLength, sEmptyLine);
+    }
+    return XWORK_OK;
+}
+
+static xwork_status xwork__local_host_build_replacement_patch_text(
+    const char *sPath,
+    const char *sOldText,
+    const char *sNewText,
+    char **ppsPatchText
+)
+{
+    char *sPatchText = NULL;
+    size_t iPatchTextLength = 0u;
+    xwork_status iStatus;
+
+    if ( !ppsPatchText ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    *ppsPatchText = NULL;
+
+    iStatus = xwork__local_host_string_append(&sPatchText, &iPatchTextLength, "--- a/");
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_string_append(&sPatchText, &iPatchTextLength, sPath ? sPath : "");
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_string_append(&sPatchText, &iPatchTextLength, "\n+++ b/");
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_string_append(&sPatchText, &iPatchTextLength, sPath ? sPath : "");
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_string_append(&sPatchText, &iPatchTextLength, "\n@@\n");
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_append_patch_lines(&sPatchText, &iPatchTextLength, '-', sOldText);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_append_patch_lines(&sPatchText, &iPatchTextLength, '+', sNewText);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+
+    *ppsPatchText = sPatchText;
+    return XWORK_OK;
+
+cleanup:
+    free(sPatchText);
+    return iStatus;
 }
 
 static xwork_status xwork__local_host_parse_request_json(
@@ -814,50 +1475,6 @@ cleanup:
     free(sEscapedType);
     free(sEntryJson);
     return iStatus;
-}
-
-static int xwork__local_host_scan_callback(
-    ptr pPath,
-    size_t iPathSize,
-    int bDir,
-    ptr pData,
-    ptr pParam
-)
-{
-    xwork__local_host_scan_context *pContext;
-    char *sPath;
-    xwork_status iStatus;
-    const char *sType;
-
-    (void)pData;
-    if ( !pPath || !pParam || iPathSize == 0u ) {
-        return 0;
-    }
-    if ( bDir == 2 ) {
-        return 0;
-    }
-
-    pContext = (xwork__local_host_scan_context *)pParam;
-    if ( pContext->iStatus != XWORK_OK ) {
-        return 1;
-    }
-
-    sPath = (char *)malloc(iPathSize + 1u);
-    if ( !sPath ) {
-        pContext->iStatus = XWORK_ERROR_NO_MEMORY;
-        return 1;
-    }
-    memcpy(sPath, pPath, iPathSize);
-    sPath[iPathSize] = '\0';
-
-    sType = (bDir == 1) ? "directory" : "file";
-    iStatus = xwork__local_host_append_scan_entry(pContext, sPath, sType);
-    free(sPath);
-    if ( iStatus != XWORK_OK ) {
-        pContext->iStatus = iStatus;
-        return 1;
-    }
-    return 0;
 }
 
 typedef struct {
@@ -1898,6 +2515,169 @@ static xwork_status xwork__local_host_ensure_parent_directories(const char *sPat
     return iStatus;
 }
 
+static xwork_status xwork__local_host_remove_empty_directory(const char *sPath)
+{
+    if ( !sPath || !sPath[0] ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    errno = 0;
+#ifdef _WIN32
+    if ( _rmdir(sPath) == 0 ) {
+        return XWORK_OK;
+    }
+#else
+    if ( rmdir(sPath) == 0 ) {
+        return XWORK_OK;
+    }
+#endif
+    if ( errno == ENOENT ) {
+        return XWORK_ERROR_NOT_FOUND;
+    }
+    if ( errno == EEXIST || errno == ENOTEMPTY ) {
+        return XWORK_ERROR_INVALID_STATE;
+    }
+    return XWORK_ERROR_EXTERNAL_FAILURE;
+}
+
+static xwork_status xwork__local_host_delete_path(
+    const char *sPath,
+    bool bRecursive,
+    const char **psDeletedType
+);
+
+static xwork_status xwork__local_host_delete_directory_contents(const char *sPath)
+{
+    if ( !sPath || !sPath[0] ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+#ifdef _WIN32
+    {
+        WIN32_FIND_DATAA tFindData;
+        HANDLE hFind;
+        char *sFindPath;
+        xwork_status iStatus = XWORK_OK;
+
+        sFindPath = xwork__local_host_join_path(sPath, "*");
+        if ( !sFindPath ) {
+            return XWORK_ERROR_NO_MEMORY;
+        }
+
+        hFind = FindFirstFileA(sFindPath, &tFindData);
+        free(sFindPath);
+        if ( hFind == INVALID_HANDLE_VALUE ) {
+            return XWORK_ERROR_EXTERNAL_FAILURE;
+        }
+
+        do {
+            char *sChildPath;
+
+            if ( strcmp(tFindData.cFileName, ".") == 0 ||
+                 strcmp(tFindData.cFileName, "..") == 0 ) {
+                continue;
+            }
+
+            sChildPath = xwork__local_host_join_path(sPath, tFindData.cFileName);
+            if ( !sChildPath ) {
+                iStatus = XWORK_ERROR_NO_MEMORY;
+                break;
+            }
+            iStatus = xwork__local_host_delete_path(sChildPath, true, NULL);
+            free(sChildPath);
+            if ( iStatus != XWORK_OK ) {
+                break;
+            }
+        } while ( FindNextFileA(hFind, &tFindData) );
+
+        FindClose(hFind);
+        return iStatus;
+    }
+#else
+    {
+        DIR *pDir;
+        struct dirent *pEntry;
+        xwork_status iStatus = XWORK_OK;
+
+        pDir = opendir(sPath);
+        if ( !pDir ) {
+            return errno == ENOENT ? XWORK_ERROR_NOT_FOUND : XWORK_ERROR_EXTERNAL_FAILURE;
+        }
+
+        while ( (pEntry = readdir(pDir)) != NULL ) {
+            char *sChildPath;
+
+            if ( strcmp(pEntry->d_name, ".") == 0 ||
+                 strcmp(pEntry->d_name, "..") == 0 ) {
+                continue;
+            }
+
+            sChildPath = xwork__local_host_join_path(sPath, pEntry->d_name);
+            if ( !sChildPath ) {
+                iStatus = XWORK_ERROR_NO_MEMORY;
+                break;
+            }
+            iStatus = xwork__local_host_delete_path(sChildPath, true, NULL);
+            free(sChildPath);
+            if ( iStatus != XWORK_OK ) {
+                break;
+            }
+        }
+
+        closedir(pDir);
+        return iStatus;
+    }
+#endif
+}
+
+static xwork_status xwork__local_host_delete_path(
+    const char *sPath,
+    bool bRecursive,
+    const char **psDeletedType
+)
+{
+    const char *sType = "other";
+    size_t iSizeBytes = 0u;
+    long long iMtimeUnix = 0;
+    xwork_status iStatus;
+
+    if ( !sPath || !sPath[0] ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( psDeletedType ) {
+        *psDeletedType = "other";
+    }
+
+    iStatus = xwork__local_host_stat_path(sPath, &sType, &iSizeBytes, &iMtimeUnix);
+    (void)iSizeBytes;
+    (void)iMtimeUnix;
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+    if ( psDeletedType ) {
+        *psDeletedType = sType;
+    }
+
+    if ( strcmp(sType, "directory") == 0 ) {
+        if ( bRecursive ) {
+            iStatus = xwork__local_host_delete_directory_contents(sPath);
+            if ( iStatus != XWORK_OK ) {
+                return iStatus;
+            }
+        }
+        return xwork__local_host_remove_empty_directory(sPath);
+    }
+
+    errno = 0;
+    if ( remove(sPath) == 0 ) {
+        return XWORK_OK;
+    }
+    if ( errno == ENOENT ) {
+        return XWORK_ERROR_NOT_FOUND;
+    }
+    return XWORK_ERROR_EXTERNAL_FAILURE;
+}
+
 static char *xwork__local_host_quote_shell_arg(const char *sText)
 {
     if ( !sText ) {
@@ -2459,7 +3239,8 @@ static xwork_status xwork__local_host_set_terminal_state_result(
 
     if ( bOk ) {
         sResultText = xwork__dup_printf(
-            "{\"ok\":true,\"session_id\":\"%s\",\"session_name\":\"%s\",\"command\":\"%s\",\"cwd\":\"%s\","
+            "{\"schema\":\"" XWORK_TERMINAL_STATE_SCHEMA_V1 "\","
+            "\"ok\":true,\"session_id\":\"%s\",\"session_name\":\"%s\",\"command\":\"%s\",\"cwd\":\"%s\","
             "\"session_index\":%zu,\"stdin_closed\":%s,"
             "\"running\":%s,\"done\":%s,\"removed\":%s,"
             "\"terminal_cols\":%zu,\"terminal_rows\":%zu,"
@@ -2512,7 +3293,8 @@ static xwork_status xwork__local_host_set_terminal_state_result(
         );
         if ( iStatus != XWORK_OK ) goto cleanup;
         sResultText = xwork__dup_printf(
-            "{\"ok\":false,\"session_id\":\"%s\",\"session_name\":\"%s\",\"command\":\"%s\",\"cwd\":\"%s\","
+            "{\"schema\":\"" XWORK_TERMINAL_STATE_SCHEMA_V1 "\","
+            "\"ok\":false,\"session_id\":\"%s\",\"session_name\":\"%s\",\"command\":\"%s\",\"cwd\":\"%s\","
             "\"session_index\":%zu,\"stdin_closed\":%s,"
             "\"running\":%s,\"done\":%s,\"removed\":%s,"
             "\"terminal_cols\":%zu,\"terminal_rows\":%zu,"
@@ -2758,7 +3540,8 @@ static xwork_status xwork__local_host_set_terminal_list_result(
 
     if ( bOk ) {
         sResultText = xwork__dup_printf(
-            "{\"ok\":true,\"session_count\":%zu,\"total_session_count\":%zu,%s\"sessions\":%s}",
+            "{\"schema\":\"" XWORK_TERMINAL_INVENTORY_SCHEMA_V1 "\","
+            "\"ok\":true,\"session_count\":%zu,\"total_session_count\":%zu,%s\"sessions\":%s}",
             iSessionCount,
             iTotalSessionCount,
             sExtraJsonFields ? sExtraJsonFields : "",
@@ -2776,7 +3559,8 @@ static xwork_status xwork__local_host_set_terminal_list_result(
         );
         if ( iStatus != XWORK_OK ) goto cleanup;
         sResultText = xwork__dup_printf(
-            "{\"ok\":false,\"session_count\":%zu,\"total_session_count\":%zu,%s\"sessions\":%s,"
+            "{\"schema\":\"" XWORK_TERMINAL_INVENTORY_SCHEMA_V1 "\","
+            "\"ok\":false,\"session_count\":%zu,\"total_session_count\":%zu,%s\"sessions\":%s,"
             "\"error_kind\":\"%s\",\"error\":\"%s\"}",
             iSessionCount,
             iTotalSessionCount,
@@ -2914,6 +3698,144 @@ cleanup:
     free(sEscapedPath);
     free(sEscapedResolvedPath);
     free(sEscapedText);
+    free(sEscapedErrorKind);
+    free(sEscapedErrorMessage);
+    free(sOutputText);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_set_editor_buffer_result(
+    xwork_local_host *pHost,
+    const char *sOperation,
+    const xwork__local_editor_buffer *pBuffer,
+    bool bChanged,
+    const char *sVisibleSummary,
+    xwork_tool_result *pResult
+)
+{
+    char *sEscapedOperation = NULL;
+    char *sEscapedBufferId = NULL;
+    char *sEscapedPath = NULL;
+    char *sEscapedResolvedPath = NULL;
+    char *sEscapedText = NULL;
+    char *sOutputText = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !pBuffer || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    iStatus = xwork__local_host_json_escape(sOperation ? sOperation : "", &sEscapedOperation);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(pBuffer->sBufferId ? pBuffer->sBufferId : "", &sEscapedBufferId);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(pBuffer->sPath ? pBuffer->sPath : "", &sEscapedPath);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(pBuffer->sResolvedPath ? pBuffer->sResolvedPath : "", &sEscapedResolvedPath);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(pBuffer->sText ? pBuffer->sText : "", &sEscapedText);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+
+    sOutputText = xwork__dup_printf(
+        "{\"ok\":true,\"operation\":\"%s\",\"buffer_id\":\"%s\","
+        "\"path\":\"%s\",\"resolved_path\":\"%s\",\"dirty\":%s,"
+        "\"selection_start\":%llu,\"selection_end\":%llu,"
+        "\"changed\":%s,\"text_size_bytes\":%llu,\"text\":\"%s\"}",
+        sEscapedOperation,
+        sEscapedBufferId,
+        sEscapedPath,
+        sEscapedResolvedPath,
+        pBuffer->bDirty ? "true" : "false",
+        (unsigned long long)pBuffer->iSelectionStart,
+        (unsigned long long)pBuffer->iSelectionEnd,
+        bChanged ? "true" : "false",
+        (unsigned long long)(pBuffer->sText ? strlen(pBuffer->sText) : 0u),
+        sEscapedText
+    );
+    if ( !sOutputText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_set_result(
+        pHost,
+        sOutputText,
+        sVisibleSummary ? sVisibleSummary : "editor buffer operation ok",
+        pResult
+    );
+
+cleanup:
+    free(sEscapedOperation);
+    free(sEscapedBufferId);
+    free(sEscapedPath);
+    free(sEscapedResolvedPath);
+    free(sEscapedText);
+    free(sOutputText);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_set_editor_error_result(
+    xwork_local_host *pHost,
+    const char *sOperation,
+    const char *sBufferId,
+    const char *sPath,
+    const char *sResolvedPath,
+    const char *sErrorKind,
+    const char *sErrorMessage,
+    const char *sVisibleSummary,
+    xwork_tool_result *pResult
+)
+{
+    char *sEscapedBufferId = NULL;
+    char *sEscapedPath = NULL;
+    char *sEscapedResolvedPath = NULL;
+    char *sEscapedErrorKind = NULL;
+    char *sEscapedErrorMessage = NULL;
+    char *sOutputText = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    iStatus = xwork__local_host_json_escape(sBufferId ? sBufferId : "", &sEscapedBufferId);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(sPath ? sPath : "", &sEscapedPath);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(sResolvedPath ? sResolvedPath : "", &sEscapedResolvedPath);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(sErrorKind ? sErrorKind : "external_failure", &sEscapedErrorKind);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(sErrorMessage ? sErrorMessage : "editor buffer operation failed", &sEscapedErrorMessage);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+
+    sOutputText = xwork__dup_printf(
+        "{\"ok\":false,\"operation\":\"%s\",\"buffer_id\":\"%s\","
+        "\"path\":\"%s\",\"resolved_path\":\"%s\",\"error_kind\":\"%s\","
+        "\"error\":\"%s\"}",
+        sOperation ? sOperation : "",
+        sEscapedBufferId,
+        sEscapedPath,
+        sEscapedResolvedPath,
+        sEscapedErrorKind,
+        sEscapedErrorMessage
+    );
+    if ( !sOutputText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_set_result(
+        pHost,
+        sOutputText,
+        sVisibleSummary ? sVisibleSummary : "editor buffer operation failed",
+        pResult
+    );
+
+cleanup:
+    free(sEscapedBufferId);
+    free(sEscapedPath);
+    free(sEscapedResolvedPath);
     free(sEscapedErrorKind);
     free(sEscapedErrorMessage);
     free(sOutputText);
@@ -3216,6 +4138,251 @@ cleanup:
     return iStatus;
 }
 
+static xwork_status xwork__local_host_set_filesystem_mutation_result(
+    xwork_local_host *pHost,
+    const char *sOperationName,
+    const char *sPath,
+    const char *sResolvedPath,
+    const char *sTargetPath,
+    const char *sResolvedTargetPath,
+    const char *sType,
+    bool bRecursive,
+    bool bDryRun,
+    bool bOverwrite,
+    bool bCreateDirs,
+    bool bChanged,
+    bool bExisted,
+    bool bOk,
+    const char *sVisibleSummary,
+    const char *sErrorKind,
+    const char *sErrorMessage,
+    xwork_tool_result *pResult
+)
+{
+    char *sEscapedOperation = NULL;
+    char *sEscapedPath = NULL;
+    char *sEscapedResolvedPath = NULL;
+    char *sEscapedTargetPath = NULL;
+    char *sEscapedResolvedTargetPath = NULL;
+    char *sEscapedType = NULL;
+    char *sEscapedErrorKind = NULL;
+    char *sEscapedErrorMessage = NULL;
+    char *sOutputText = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !sOperationName || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    iStatus = xwork__local_host_json_escape(sOperationName, &sEscapedOperation);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(sPath ? sPath : "", &sEscapedPath);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(
+        sResolvedPath ? sResolvedPath : "",
+        &sEscapedResolvedPath
+    );
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(
+        sTargetPath ? sTargetPath : "",
+        &sEscapedTargetPath
+    );
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(
+        sResolvedTargetPath ? sResolvedTargetPath : "",
+        &sEscapedResolvedTargetPath
+    );
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(sType ? sType : "other", &sEscapedType);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+
+    if ( bOk ) {
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":true,\"operation\":\"%s\",\"path\":\"%s\","
+            "\"resolved_path\":\"%s\",\"target_path\":\"%s\","
+            "\"resolved_target_path\":\"%s\",\"type\":\"%s\","
+            "\"recursive\":%s,\"dry_run\":%s,\"overwrite\":%s,"
+            "\"create_dirs\":%s,\"changed\":%s,\"existed\":%s}",
+            sEscapedOperation,
+            sEscapedPath,
+            sEscapedResolvedPath,
+            sEscapedTargetPath,
+            sEscapedResolvedTargetPath,
+            sEscapedType,
+            bRecursive ? "true" : "false",
+            bDryRun ? "true" : "false",
+            bOverwrite ? "true" : "false",
+            bCreateDirs ? "true" : "false",
+            bChanged ? "true" : "false",
+            bExisted ? "true" : "false"
+        );
+    } else {
+        iStatus = xwork__local_host_json_escape(
+            sErrorKind ? sErrorKind : "external_failure",
+            &sEscapedErrorKind
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        iStatus = xwork__local_host_json_escape(
+            sErrorMessage ? sErrorMessage : "filesystem operation failed",
+            &sEscapedErrorMessage
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":false,\"operation\":\"%s\",\"path\":\"%s\","
+            "\"resolved_path\":\"%s\",\"target_path\":\"%s\","
+            "\"resolved_target_path\":\"%s\",\"type\":\"%s\","
+            "\"recursive\":%s,\"dry_run\":%s,\"overwrite\":%s,"
+            "\"create_dirs\":%s,\"changed\":%s,\"existed\":%s,"
+            "\"error_kind\":\"%s\",\"error\":\"%s\"}",
+            sEscapedOperation,
+            sEscapedPath,
+            sEscapedResolvedPath,
+            sEscapedTargetPath,
+            sEscapedResolvedTargetPath,
+            sEscapedType,
+            bRecursive ? "true" : "false",
+            bDryRun ? "true" : "false",
+            bOverwrite ? "true" : "false",
+            bCreateDirs ? "true" : "false",
+            bChanged ? "true" : "false",
+            bExisted ? "true" : "false",
+            sEscapedErrorKind,
+            sEscapedErrorMessage
+        );
+    }
+    if ( !sOutputText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_set_result(
+        pHost,
+        sOutputText,
+        sVisibleSummary
+            ? sVisibleSummary
+            : (bOk ? "filesystem operation ok" : "filesystem operation failed"),
+        pResult
+    );
+
+cleanup:
+    free(sEscapedOperation);
+    free(sEscapedPath);
+    free(sEscapedResolvedPath);
+    free(sEscapedTargetPath);
+    free(sEscapedResolvedTargetPath);
+    free(sEscapedType);
+    free(sEscapedErrorKind);
+    free(sEscapedErrorMessage);
+    free(sOutputText);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_set_filesystem_patch_result(
+    xwork_local_host *pHost,
+    const char *sPath,
+    const char *sResolvedPath,
+    const char *sPatchText,
+    size_t iBytesBefore,
+    size_t iBytesAfter,
+    bool bDryRun,
+    bool bChanged,
+    bool bOk,
+    const char *sVisibleSummary,
+    const char *sErrorKind,
+    const char *sErrorMessage,
+    xwork_tool_result *pResult
+)
+{
+    char *sEscapedPath = NULL;
+    char *sEscapedResolvedPath = NULL;
+    char *sEscapedPatchText = NULL;
+    char *sEscapedErrorKind = NULL;
+    char *sEscapedErrorMessage = NULL;
+    char *sOutputText = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    iStatus = xwork__local_host_json_escape(sPath ? sPath : "", &sEscapedPath);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(
+        sResolvedPath ? sResolvedPath : "",
+        &sEscapedResolvedPath
+    );
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(
+        sPatchText ? sPatchText : "",
+        &sEscapedPatchText
+    );
+    if ( iStatus != XWORK_OK ) goto cleanup;
+
+    if ( bOk ) {
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":true,\"operation\":\"apply_patch\",\"path\":\"%s\","
+            "\"resolved_path\":\"%s\",\"dry_run\":%s,\"changed\":%s,"
+            "\"bytes_before\":%llu,\"bytes_after\":%llu,"
+            "\"patch_text\":\"%s\"}",
+            sEscapedPath,
+            sEscapedResolvedPath,
+            bDryRun ? "true" : "false",
+            bChanged ? "true" : "false",
+            (unsigned long long)iBytesBefore,
+            (unsigned long long)iBytesAfter,
+            sEscapedPatchText
+        );
+    } else {
+        iStatus = xwork__local_host_json_escape(
+            sErrorKind ? sErrorKind : "external_failure",
+            &sEscapedErrorKind
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        iStatus = xwork__local_host_json_escape(
+            sErrorMessage ? sErrorMessage : "filesystem.apply_patch failed",
+            &sEscapedErrorMessage
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":false,\"operation\":\"apply_patch\",\"path\":\"%s\","
+            "\"resolved_path\":\"%s\",\"dry_run\":%s,\"changed\":%s,"
+            "\"bytes_before\":%llu,\"bytes_after\":%llu,"
+            "\"patch_text\":\"%s\",\"error_kind\":\"%s\",\"error\":\"%s\"}",
+            sEscapedPath,
+            sEscapedResolvedPath,
+            bDryRun ? "true" : "false",
+            bChanged ? "true" : "false",
+            (unsigned long long)iBytesBefore,
+            (unsigned long long)iBytesAfter,
+            sEscapedPatchText,
+            sEscapedErrorKind,
+            sEscapedErrorMessage
+        );
+    }
+    if ( !sOutputText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_set_result(
+        pHost,
+        sOutputText,
+        sVisibleSummary
+            ? sVisibleSummary
+            : (bOk ? "filesystem.apply_patch ok" : "filesystem.apply_patch failed"),
+        pResult
+    );
+
+cleanup:
+    free(sEscapedPath);
+    free(sEscapedResolvedPath);
+    free(sEscapedPatchText);
+    free(sEscapedErrorKind);
+    free(sEscapedErrorMessage);
+    free(sOutputText);
+    return iStatus;
+}
+
 static xwork_status xwork__local_host_invoke_filesystem(
     xwork_local_host *pHost,
     const char *sRequestJson,
@@ -3269,6 +4436,16 @@ static xwork_status xwork__local_host_invoke_filesystem(
     sResolvedPath = xwork__local_host_resolve_path(pHost, sPath);
     if ( !sResolvedPath ) {
         iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_check_filesystem_path(
+        pHost,
+        sResolvedPath,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "path_denied";
+        sFailureSummary = "filesystem.read_text denied by path policy";
         goto cleanup;
     }
 
@@ -3345,21 +4522,130 @@ static xwork_status xwork__local_host_scan_directory(
     xwork__local_host_scan_context *pScan
 )
 {
-    int iScanned;
-
     if ( !sResolvedPath || !sResolvedPath[0] || !pScan ) {
         return XWORK_ERROR_INVALID_ARGUMENT;
     }
+#ifdef _WIN32
+    {
+        WIN32_FIND_DATAA tFindData;
+        HANDLE hFind;
+        char *sFindPath;
+        xwork_status iStatus = XWORK_OK;
 
-    pScan->iStatus = XWORK_OK;
-    iScanned = xrtDirScan(
-        (str)sResolvedPath,
-        bRecursive ? TRUE : FALSE,
-        (ptr)xwork__local_host_scan_callback,
-        pScan
-    );
-    (void)iScanned;
-    return pScan->iStatus;
+        sFindPath = xwork__local_host_join_path(sResolvedPath, "*");
+        if ( !sFindPath ) {
+            return XWORK_ERROR_NO_MEMORY;
+        }
+
+        hFind = FindFirstFileA(sFindPath, &tFindData);
+        free(sFindPath);
+        if ( hFind == INVALID_HANDLE_VALUE ) {
+            return XWORK_ERROR_EXTERNAL_FAILURE;
+        }
+
+        do {
+            char *sChildPath;
+            bool bIsDirectory;
+
+            if ( strcmp(tFindData.cFileName, ".") == 0 ||
+                 strcmp(tFindData.cFileName, "..") == 0 ) {
+                continue;
+            }
+
+            sChildPath = xwork__local_host_join_path(
+                sResolvedPath,
+                tFindData.cFileName
+            );
+            if ( !sChildPath ) {
+                iStatus = XWORK_ERROR_NO_MEMORY;
+                break;
+            }
+
+            bIsDirectory =
+                (tFindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            iStatus = xwork__local_host_append_scan_entry(
+                pScan,
+                sChildPath,
+                bIsDirectory ? "directory" : "file"
+            );
+            if ( iStatus == XWORK_OK && bRecursive && bIsDirectory ) {
+                iStatus = xwork__local_host_scan_directory(
+                    sChildPath,
+                    bRecursive,
+                    pScan
+                );
+            }
+            free(sChildPath);
+            if ( iStatus != XWORK_OK ) {
+                break;
+            }
+        } while ( FindNextFileA(hFind, &tFindData) );
+
+        FindClose(hFind);
+        return iStatus;
+    }
+#else
+    {
+        DIR *pDir;
+        struct dirent *pEntry;
+        xwork_status iStatus = XWORK_OK;
+
+        pDir = opendir(sResolvedPath);
+        if ( !pDir ) {
+            return errno == ENOENT ? XWORK_ERROR_NOT_FOUND : XWORK_ERROR_EXTERNAL_FAILURE;
+        }
+
+        while ( (pEntry = readdir(pDir)) != NULL ) {
+            char *sChildPath;
+            const char *sType = "other";
+            size_t iSizeBytes = 0u;
+            long long iMtimeUnix = 0;
+            bool bIsDirectory;
+
+            if ( strcmp(pEntry->d_name, ".") == 0 ||
+                 strcmp(pEntry->d_name, "..") == 0 ) {
+                continue;
+            }
+
+            sChildPath = xwork__local_host_join_path(sResolvedPath, pEntry->d_name);
+            if ( !sChildPath ) {
+                iStatus = XWORK_ERROR_NO_MEMORY;
+                break;
+            }
+
+            iStatus = xwork__local_host_stat_path(
+                sChildPath,
+                &sType,
+                &iSizeBytes,
+                &iMtimeUnix
+            );
+            (void)iSizeBytes;
+            (void)iMtimeUnix;
+            if ( iStatus == XWORK_OK ) {
+                bIsDirectory = strcmp(sType, "directory") == 0;
+                iStatus = xwork__local_host_append_scan_entry(
+                    pScan,
+                    sChildPath,
+                    sType
+                );
+                if ( iStatus == XWORK_OK && bRecursive && bIsDirectory ) {
+                    iStatus = xwork__local_host_scan_directory(
+                        sChildPath,
+                        bRecursive,
+                        pScan
+                    );
+                }
+            }
+            free(sChildPath);
+            if ( iStatus != XWORK_OK ) {
+                break;
+            }
+        }
+
+        closedir(pDir);
+        return iStatus;
+    }
+#endif
 }
 
 static xwork_status xwork__local_host_invoke_filesystem_stat(
@@ -3403,6 +4689,16 @@ static xwork_status xwork__local_host_invoke_filesystem_stat(
     sResolvedPath = xwork__local_host_resolve_path(pHost, sPath);
     if ( !sResolvedPath ) {
         iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_check_filesystem_path(
+        pHost,
+        sResolvedPath,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "path_denied";
+        sFailureSummary = "filesystem.stat denied by path policy";
         goto cleanup;
     }
 
@@ -3574,6 +4870,16 @@ static xwork_status xwork__local_host_invoke_filesystem_scan(
         iStatus = XWORK_ERROR_NO_MEMORY;
         goto cleanup;
     }
+    iStatus = xwork__local_host_check_filesystem_path(
+        pHost,
+        sResolvedPath,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "path_denied";
+        sFailureSummary = "filesystem scan denied by path policy";
+        goto cleanup;
+    }
 
     iStatus = xwork__local_host_stat_path(
         sResolvedPath,
@@ -3740,6 +5046,16 @@ static xwork_status xwork__local_host_invoke_filesystem_write_text(
         iStatus = XWORK_ERROR_NO_MEMORY;
         goto cleanup;
     }
+    iStatus = xwork__local_host_check_filesystem_path(
+        pHost,
+        sResolvedPath,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "path_denied";
+        sFailureSummary = "filesystem.write_text denied by path policy";
+        goto cleanup;
+    }
     if ( bHasCreateDirs && bCreateDirs ) {
         iStatus = xwork__local_host_ensure_parent_directories(sResolvedPath);
         if ( iStatus != XWORK_OK ) {
@@ -3820,6 +5136,812 @@ cleanup:
         xvoUnref(tRequest);
     }
     free(sResolvedPath);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_invoke_filesystem_mkdir(
+    xwork_local_host *pHost,
+    const char *sRequestJson,
+    xwork_tool_result *pResult
+)
+{
+    xvalue tRequest = NULL;
+    const char *sPath;
+    const char *sType = "directory";
+    char *sResolvedPath = NULL;
+    size_t iSizeBytes = 0u;
+    long long iMtimeUnix = 0;
+    bool bRecursive = false;
+    bool bExistOk = true;
+    bool bDryRun = false;
+    bool bHasRecursive = false;
+    bool bHasExistOk = false;
+    bool bHasDryRun = false;
+    bool bExisted = false;
+    bool bChanged = false;
+    const char *sFailureKind = NULL;
+    const char *sFailureSummary = NULL;
+    const char *sFailureMessage = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pHost->bEnableFilesystemWriteText ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+
+    iStatus = xwork__local_host_parse_request_json(sRequestJson, &tRequest);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    sPath = xwork__local_host_request_get_text(tRequest, "path");
+    if ( !sPath || !sPath[0] ) {
+        iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.mkdir invalid request";
+        sFailureMessage = "path is required";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_request_get_bool(tRequest, "recursive", &bHasRecursive, &bRecursive);
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.mkdir invalid request";
+        sFailureMessage = "recursive must be boolean";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_request_get_bool(tRequest, "exist_ok", &bHasExistOk, &bExistOk);
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.mkdir invalid request";
+        sFailureMessage = "exist_ok must be boolean";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_request_get_bool(tRequest, "dry_run", &bHasDryRun, &bDryRun);
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.mkdir invalid request";
+        sFailureMessage = "dry_run must be boolean";
+        goto cleanup;
+    }
+    (void)bHasRecursive;
+    (void)bHasExistOk;
+    (void)bHasDryRun;
+
+    sResolvedPath = xwork__local_host_resolve_path(pHost, sPath);
+    if ( !sResolvedPath ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_check_filesystem_path(
+        pHost,
+        sResolvedPath,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "path_denied";
+        sFailureSummary = "filesystem.mkdir denied by path policy";
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_stat_path(sResolvedPath, &sType, &iSizeBytes, &iMtimeUnix);
+    (void)iSizeBytes;
+    (void)iMtimeUnix;
+    if ( iStatus == XWORK_OK ) {
+        bExisted = true;
+        if ( strcmp(sType, "directory") == 0 && bExistOk ) {
+            iStatus = XWORK_OK;
+            goto success;
+        }
+        iStatus = XWORK_ERROR_ALREADY_EXISTS;
+        sFailureKind = "already_exists";
+        sFailureSummary = "filesystem.mkdir failed (target exists)";
+        sFailureMessage = "path already exists";
+        goto cleanup;
+    }
+    if ( iStatus != XWORK_ERROR_NOT_FOUND ) {
+        sFailureKind = "stat_failed";
+        sFailureSummary = "filesystem.mkdir failed";
+        sFailureMessage = "failed to stat path";
+        goto cleanup;
+    }
+
+    if ( !bDryRun ) {
+        iStatus = bRecursive
+            ? xwork__local_host_ensure_directory_tree(sResolvedPath)
+            : xwork__local_host_create_directory(sResolvedPath);
+        if ( iStatus != XWORK_OK ) {
+            sFailureKind = "mkdir_failed";
+            sFailureSummary = "filesystem.mkdir failed";
+            sFailureMessage = bRecursive
+                ? "failed to create directory tree"
+                : "failed to create directory";
+            goto cleanup;
+        }
+        bChanged = true;
+    }
+    iStatus = XWORK_OK;
+
+success:
+    iStatus = xwork__local_host_set_filesystem_mutation_result(
+        pHost,
+        XWORK_HOST_FILESYSTEM_MKDIR,
+        sPath,
+        sResolvedPath,
+        "",
+        "",
+        "directory",
+        bRecursive,
+        bDryRun,
+        false,
+        bRecursive,
+        bChanged,
+        bExisted,
+        true,
+        "filesystem.mkdir ok",
+        NULL,
+        NULL,
+        pResult
+    );
+
+cleanup:
+    if ( iStatus != XWORK_OK && sFailureKind ) {
+        (void)xwork__local_host_set_filesystem_mutation_result(
+            pHost,
+            XWORK_HOST_FILESYSTEM_MKDIR,
+            sPath ? sPath : "",
+            sResolvedPath ? sResolvedPath : sPath,
+            "",
+            "",
+            sType,
+            bRecursive,
+            bDryRun,
+            false,
+            bRecursive,
+            bChanged,
+            bExisted,
+            false,
+            sFailureSummary,
+            sFailureKind,
+            sFailureMessage,
+            pResult
+        );
+    }
+    if ( tRequest ) {
+        xvoUnref(tRequest);
+    }
+    free(sResolvedPath);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_invoke_filesystem_move(
+    xwork_local_host *pHost,
+    const char *sRequestJson,
+    xwork_tool_result *pResult
+)
+{
+    xvalue tRequest = NULL;
+    const char *sPath;
+    const char *sTargetPath;
+    const char *sType = "other";
+    char *sResolvedPath = NULL;
+    char *sResolvedTargetPath = NULL;
+    size_t iSizeBytes = 0u;
+    long long iMtimeUnix = 0;
+    bool bOverwrite = false;
+    bool bCreateDirs = false;
+    bool bRecursive = false;
+    bool bDryRun = false;
+    bool bHasOverwrite = false;
+    bool bHasCreateDirs = false;
+    bool bHasRecursive = false;
+    bool bHasDryRun = false;
+    bool bTargetExisted = false;
+    bool bChanged = false;
+    const char *sFailureKind = NULL;
+    const char *sFailureSummary = NULL;
+    const char *sFailureMessage = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pHost->bEnableFilesystemWriteText ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+
+    iStatus = xwork__local_host_parse_request_json(sRequestJson, &tRequest);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    sPath = xwork__local_host_request_get_text(tRequest, "source_path");
+    if ( !sPath ) sPath = xwork__local_host_request_get_text(tRequest, "from");
+    if ( !sPath ) sPath = xwork__local_host_request_get_text(tRequest, "path");
+    sTargetPath = xwork__local_host_request_get_text(tRequest, "target_path");
+    if ( !sTargetPath ) sTargetPath = xwork__local_host_request_get_text(tRequest, "to");
+    if ( !sTargetPath ) sTargetPath = xwork__local_host_request_get_text(tRequest, "destination_path");
+    if ( !sPath || !sPath[0] || !sTargetPath || !sTargetPath[0] ) {
+        iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.move invalid request";
+        sFailureMessage = "source_path/path and target_path are required";
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_request_get_bool(tRequest, "overwrite", &bHasOverwrite, &bOverwrite);
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.move invalid request";
+        sFailureMessage = "overwrite must be boolean";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_request_get_bool(tRequest, "create_dirs", &bHasCreateDirs, &bCreateDirs);
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.move invalid request";
+        sFailureMessage = "create_dirs must be boolean";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_request_get_bool(tRequest, "recursive", &bHasRecursive, &bRecursive);
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.move invalid request";
+        sFailureMessage = "recursive must be boolean";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_request_get_bool(tRequest, "dry_run", &bHasDryRun, &bDryRun);
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.move invalid request";
+        sFailureMessage = "dry_run must be boolean";
+        goto cleanup;
+    }
+    (void)bHasOverwrite;
+    (void)bHasCreateDirs;
+    (void)bHasRecursive;
+    (void)bHasDryRun;
+
+    sResolvedPath = xwork__local_host_resolve_path(pHost, sPath);
+    sResolvedTargetPath = xwork__local_host_resolve_path(pHost, sTargetPath);
+    if ( !sResolvedPath || !sResolvedTargetPath ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_check_filesystem_path(
+        pHost,
+        sResolvedPath,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "path_denied";
+        sFailureSummary = "filesystem.move denied by path policy";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_check_filesystem_path(
+        pHost,
+        sResolvedTargetPath,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "path_denied";
+        sFailureSummary = "filesystem.move denied by path policy";
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_stat_path(sResolvedPath, &sType, &iSizeBytes, &iMtimeUnix);
+    (void)iSizeBytes;
+    (void)iMtimeUnix;
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = (iStatus == XWORK_ERROR_NOT_FOUND) ? "not_found" : "stat_failed";
+        sFailureSummary = (iStatus == XWORK_ERROR_NOT_FOUND)
+            ? "filesystem.move not found"
+            : "filesystem.move failed";
+        sFailureMessage = (iStatus == XWORK_ERROR_NOT_FOUND)
+            ? "source path does not exist"
+            : "failed to stat source path";
+        goto cleanup;
+    }
+
+    {
+        const char *sTargetType = "other";
+        size_t iTargetSizeBytes = 0u;
+        long long iTargetMtimeUnix = 0;
+        xwork_status iTargetStatus = xwork__local_host_stat_path(
+            sResolvedTargetPath,
+            &sTargetType,
+            &iTargetSizeBytes,
+            &iTargetMtimeUnix
+        );
+        (void)iTargetSizeBytes;
+        (void)iTargetMtimeUnix;
+        if ( iTargetStatus == XWORK_OK ) {
+            bTargetExisted = true;
+            if ( !bOverwrite ) {
+                iStatus = XWORK_ERROR_ALREADY_EXISTS;
+                sFailureKind = "already_exists";
+                sFailureSummary = "filesystem.move failed (target exists)";
+                sFailureMessage = "target path already exists";
+                goto cleanup;
+            }
+            if ( !bDryRun ) {
+                iStatus = xwork__local_host_delete_path(
+                    sResolvedTargetPath,
+                    bRecursive,
+                    NULL
+                );
+                if ( iStatus != XWORK_OK ) {
+                    sFailureKind = (iStatus == XWORK_ERROR_INVALID_STATE)
+                        ? "target_not_empty"
+                        : "overwrite_failed";
+                    sFailureSummary = "filesystem.move failed (overwrite)";
+                    sFailureMessage = (iStatus == XWORK_ERROR_INVALID_STATE)
+                        ? "target directory is not empty; recursive is required"
+                        : "failed to remove existing target";
+                    goto cleanup;
+                }
+            }
+        } else if ( iTargetStatus != XWORK_ERROR_NOT_FOUND ) {
+            iStatus = iTargetStatus;
+            sFailureKind = "target_stat_failed";
+            sFailureSummary = "filesystem.move failed";
+            sFailureMessage = "failed to stat target path";
+            goto cleanup;
+        }
+    }
+
+    if ( bCreateDirs ) {
+        iStatus = xwork__local_host_ensure_parent_directories(sResolvedTargetPath);
+        if ( iStatus != XWORK_OK ) {
+            sFailureKind = "create_dirs_failed";
+            sFailureSummary = "filesystem.move failed (create_dirs)";
+            sFailureMessage = "failed to create target parent directories";
+            goto cleanup;
+        }
+    } else {
+        char *sParentDirectory = xwork__local_host_parent_directory(sResolvedTargetPath);
+
+        if ( sParentDirectory ) {
+            if ( !xwork__local_host_directory_exists(sParentDirectory) ) {
+                free(sParentDirectory);
+                iStatus = XWORK_ERROR_NOT_FOUND;
+                sFailureKind = "parent_not_found";
+                sFailureSummary = "filesystem.move failed (parent directory not found)";
+                sFailureMessage = "target parent directory does not exist";
+                goto cleanup;
+            }
+            free(sParentDirectory);
+        }
+    }
+
+    if ( !bDryRun ) {
+        errno = 0;
+        if ( rename(sResolvedPath, sResolvedTargetPath) != 0 ) {
+            iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
+            sFailureKind = "move_failed";
+            sFailureSummary = "filesystem.move failed";
+            sFailureMessage = "failed to move path";
+            goto cleanup;
+        }
+        bChanged = true;
+    }
+    iStatus = xwork__local_host_set_filesystem_mutation_result(
+        pHost,
+        XWORK_HOST_FILESYSTEM_MOVE,
+        sPath,
+        sResolvedPath,
+        sTargetPath,
+        sResolvedTargetPath,
+        sType,
+        bRecursive,
+        bDryRun,
+        bOverwrite,
+        bCreateDirs,
+        bChanged,
+        bTargetExisted,
+        true,
+        "filesystem.move ok",
+        NULL,
+        NULL,
+        pResult
+    );
+
+cleanup:
+    if ( iStatus != XWORK_OK && sFailureKind ) {
+        (void)xwork__local_host_set_filesystem_mutation_result(
+            pHost,
+            XWORK_HOST_FILESYSTEM_MOVE,
+            sPath ? sPath : "",
+            sResolvedPath ? sResolvedPath : sPath,
+            sTargetPath ? sTargetPath : "",
+            sResolvedTargetPath ? sResolvedTargetPath : sTargetPath,
+            sType,
+            bRecursive,
+            bDryRun,
+            bOverwrite,
+            bCreateDirs,
+            bChanged,
+            bTargetExisted,
+            false,
+            sFailureSummary,
+            sFailureKind,
+            sFailureMessage,
+            pResult
+        );
+    }
+    if ( tRequest ) {
+        xvoUnref(tRequest);
+    }
+    free(sResolvedPath);
+    free(sResolvedTargetPath);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_invoke_filesystem_delete(
+    xwork_local_host *pHost,
+    const char *sRequestJson,
+    xwork_tool_result *pResult
+)
+{
+    xvalue tRequest = NULL;
+    const char *sPath;
+    const char *sType = "other";
+    char *sResolvedPath = NULL;
+    size_t iSizeBytes = 0u;
+    long long iMtimeUnix = 0;
+    bool bRecursive = false;
+    bool bDryRun = false;
+    bool bHasRecursive = false;
+    bool bHasDryRun = false;
+    bool bChanged = false;
+    bool bExisted = false;
+    const char *sFailureKind = NULL;
+    const char *sFailureSummary = NULL;
+    const char *sFailureMessage = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pHost->bEnableFilesystemWriteText ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+
+    iStatus = xwork__local_host_parse_request_json(sRequestJson, &tRequest);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    sPath = xwork__local_host_request_get_text(tRequest, "path");
+    if ( !sPath || !sPath[0] ) {
+        iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.delete invalid request";
+        sFailureMessage = "path is required";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_request_get_bool(tRequest, "recursive", &bHasRecursive, &bRecursive);
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.delete invalid request";
+        sFailureMessage = "recursive must be boolean";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_request_get_bool(tRequest, "dry_run", &bHasDryRun, &bDryRun);
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.delete invalid request";
+        sFailureMessage = "dry_run must be boolean";
+        goto cleanup;
+    }
+    (void)bHasRecursive;
+    (void)bHasDryRun;
+
+    sResolvedPath = xwork__local_host_resolve_path(pHost, sPath);
+    if ( !sResolvedPath ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_check_filesystem_path(
+        pHost,
+        sResolvedPath,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "path_denied";
+        sFailureSummary = "filesystem.delete denied by path policy";
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_stat_path(sResolvedPath, &sType, &iSizeBytes, &iMtimeUnix);
+    (void)iSizeBytes;
+    (void)iMtimeUnix;
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = (iStatus == XWORK_ERROR_NOT_FOUND) ? "not_found" : "stat_failed";
+        sFailureSummary = (iStatus == XWORK_ERROR_NOT_FOUND)
+            ? "filesystem.delete not found"
+            : "filesystem.delete failed";
+        sFailureMessage = (iStatus == XWORK_ERROR_NOT_FOUND)
+            ? "path does not exist"
+            : "failed to stat path";
+        goto cleanup;
+    }
+    bExisted = true;
+
+    if ( !bDryRun ) {
+        iStatus = xwork__local_host_delete_path(sResolvedPath, bRecursive, &sType);
+        if ( iStatus != XWORK_OK ) {
+            sFailureKind = (iStatus == XWORK_ERROR_INVALID_STATE)
+                ? "directory_not_empty"
+                : "delete_failed";
+            sFailureSummary = "filesystem.delete failed";
+            sFailureMessage = (iStatus == XWORK_ERROR_INVALID_STATE)
+                ? "directory is not empty; recursive is required"
+                : "failed to delete path";
+            goto cleanup;
+        }
+        bChanged = true;
+    }
+
+    iStatus = xwork__local_host_set_filesystem_mutation_result(
+        pHost,
+        XWORK_HOST_FILESYSTEM_DELETE,
+        sPath,
+        sResolvedPath,
+        "",
+        "",
+        sType,
+        bRecursive,
+        bDryRun,
+        false,
+        false,
+        bChanged,
+        bExisted,
+        true,
+        "filesystem.delete ok",
+        NULL,
+        NULL,
+        pResult
+    );
+
+cleanup:
+    if ( iStatus != XWORK_OK && sFailureKind ) {
+        (void)xwork__local_host_set_filesystem_mutation_result(
+            pHost,
+            XWORK_HOST_FILESYSTEM_DELETE,
+            sPath ? sPath : "",
+            sResolvedPath ? sResolvedPath : sPath,
+            "",
+            "",
+            sType,
+            bRecursive,
+            bDryRun,
+            false,
+            false,
+            bChanged,
+            bExisted,
+            false,
+            sFailureSummary,
+            sFailureKind,
+            sFailureMessage,
+            pResult
+        );
+    }
+    if ( tRequest ) {
+        xvoUnref(tRequest);
+    }
+    free(sResolvedPath);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_invoke_filesystem_apply_patch(
+    xwork_local_host *pHost,
+    const char *sRequestJson,
+    xwork_tool_result *pResult
+)
+{
+    xvalue tRequest = NULL;
+    const char *sPath;
+    const char *sOldText;
+    const char *sNewText;
+    char *sResolvedPath = NULL;
+    char *sCurrentText = NULL;
+    char *sNextText = NULL;
+    char *sPatchText = NULL;
+    const char *sMatch;
+    size_t iFileSizeBytes = 0u;
+    size_t iBytesRead = 0u;
+    size_t iBytesWritten = 0u;
+    size_t iPrefixLength;
+    size_t iOldLength;
+    size_t iNewLength;
+    size_t iSuffixLength;
+    bool bTruncated = false;
+    bool bEof = false;
+    bool bDryRun = false;
+    bool bHasDryRun = false;
+    bool bChanged = false;
+    const char *sFailureKind = NULL;
+    const char *sFailureSummary = NULL;
+    const char *sFailureMessage = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pHost->bEnableFilesystemWriteText || !pHost->bEnableFilesystemReadText ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+
+    iStatus = xwork__local_host_parse_request_json(sRequestJson, &tRequest);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    sPath = xwork__local_host_request_get_text(tRequest, "path");
+    sOldText = xwork__local_host_request_get_text(tRequest, "old_text");
+    sNewText = xwork__local_host_request_get_text(tRequest, "new_text");
+    if ( !sPath || !sPath[0] || !sOldText || !sOldText[0] || !sNewText ) {
+        iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.apply_patch invalid request";
+        sFailureMessage = "path, non-empty old_text, and new_text are required";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_request_get_bool(tRequest, "dry_run", &bHasDryRun, &bDryRun);
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.apply_patch invalid request";
+        sFailureMessage = "dry_run must be boolean";
+        goto cleanup;
+    }
+    (void)bHasDryRun;
+
+    sResolvedPath = xwork__local_host_resolve_path(pHost, sPath);
+    if ( !sResolvedPath ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_check_filesystem_path(
+        pHost,
+        sResolvedPath,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "path_denied";
+        sFailureSummary = "filesystem.apply_patch denied by path policy";
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_read_text_file(
+        sResolvedPath,
+        0u,
+        (size_t)-1,
+        &sCurrentText,
+        &iFileSizeBytes,
+        &iBytesRead,
+        &bTruncated,
+        &bEof
+    );
+    if ( iStatus != XWORK_OK ) {
+        if ( iStatus == XWORK_ERROR_NOT_FOUND ) {
+            sFailureKind = "not_found";
+            sFailureSummary = "filesystem.apply_patch not found";
+            sFailureMessage = "path does not exist";
+        } else {
+            sFailureKind = "read_failed";
+            sFailureSummary = "filesystem.apply_patch failed";
+            sFailureMessage = "failed to read file";
+        }
+        goto cleanup;
+    }
+    (void)iBytesRead;
+    (void)bTruncated;
+    (void)bEof;
+
+    sMatch = strstr(sCurrentText, sOldText);
+    if ( !sMatch ) {
+        iStatus = XWORK_ERROR_INVALID_STATE;
+        sFailureKind = "conflict";
+        sFailureSummary = "filesystem.apply_patch conflict";
+        sFailureMessage = "old_text was not found in file";
+        goto cleanup;
+    }
+
+    iPrefixLength = (size_t)(sMatch - sCurrentText);
+    iOldLength = strlen(sOldText);
+    iNewLength = strlen(sNewText);
+    iSuffixLength = strlen(sMatch + iOldLength);
+    sNextText = (char *)malloc(iPrefixLength + iNewLength + iSuffixLength + 1u);
+    if ( !sNextText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    memcpy(sNextText, sCurrentText, iPrefixLength);
+    memcpy(sNextText + iPrefixLength, sNewText, iNewLength);
+    memcpy(
+        sNextText + iPrefixLength + iNewLength,
+        sMatch + iOldLength,
+        iSuffixLength + 1u
+    );
+
+    iStatus = xwork__local_host_build_replacement_patch_text(
+        sPath,
+        sOldText,
+        sNewText,
+        &sPatchText
+    );
+    if ( iStatus != XWORK_OK ) {
+        goto cleanup;
+    }
+
+    if ( !bDryRun ) {
+        iStatus = xwork__local_host_write_text_file(
+            sResolvedPath,
+            sNextText,
+            false,
+            &iBytesWritten
+        );
+        if ( iStatus != XWORK_OK ) {
+            sFailureKind = "write_failed";
+            sFailureSummary = "filesystem.apply_patch failed";
+            sFailureMessage = "failed to write patched file";
+            goto cleanup;
+        }
+        (void)iBytesWritten;
+        bChanged = true;
+    }
+
+    iStatus = xwork__local_host_set_filesystem_patch_result(
+        pHost,
+        sPath,
+        sResolvedPath,
+        sPatchText,
+        iFileSizeBytes,
+        strlen(sNextText),
+        bDryRun,
+        bChanged,
+        true,
+        "filesystem.apply_patch ok",
+        NULL,
+        NULL,
+        pResult
+    );
+
+cleanup:
+    if ( iStatus != XWORK_OK && sFailureKind ) {
+        if ( !sPatchText && sPath && sOldText && sNewText ) {
+            (void)xwork__local_host_build_replacement_patch_text(
+                sPath,
+                sOldText,
+                sNewText,
+                &sPatchText
+            );
+        }
+        (void)xwork__local_host_set_filesystem_patch_result(
+            pHost,
+            sPath ? sPath : "",
+            sResolvedPath ? sResolvedPath : sPath,
+            sPatchText ? sPatchText : "",
+            iFileSizeBytes,
+            sNextText ? strlen(sNextText) : 0u,
+            bDryRun,
+            bChanged,
+            false,
+            sFailureSummary,
+            sFailureKind,
+            sFailureMessage,
+            pResult
+        );
+    }
+    if ( tRequest ) {
+        xvoUnref(tRequest);
+    }
+    free(sResolvedPath);
+    free(sCurrentText);
+    free(sNextText);
+    free(sPatchText);
     return iStatus;
 }
 
@@ -3912,6 +6034,16 @@ static xwork_status xwork__local_host_invoke_process(
         sFailureKind = "invalid_request";
         sFailureSummary = "process.exec invalid request";
         sFailureMessage = "cwd must not be empty";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_check_command_policy(
+        pHost,
+        sCommand,
+        &sFailureKind,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureSummary = "process.exec denied by command policy";
         goto cleanup;
     }
     sInputText = xwork__local_host_request_get_text(tRequest, "stdin_text");
@@ -4621,6 +6753,16 @@ static xwork_status xwork__local_host_invoke_start_terminal(
         sFailureKind = "invalid_request";
         sFailureSummary = "process.start_terminal invalid request";
         sFailureMessage = "cwd must not be empty";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_check_command_policy(
+        pHost,
+        sCommand,
+        &sFailureKind,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureSummary = "process.start_terminal denied by command policy";
         goto cleanup;
     }
     iStatus = xwork__local_host_request_get_positive_size_strict(
@@ -6108,8 +8250,64 @@ cleanup:
     return iStatus;
 }
 
+static char *xwork__local_host_vcs_extract_branch(const char *sStatus)
+{
+    const char *sStart;
+    const char *sEnd;
+    size_t iLength;
+    char *sBranch;
+
+    if ( !sStatus || strncmp(sStatus, "## ", 3u) != 0 ) {
+        return xwork__dup_cstr("");
+    }
+
+    sStart = sStatus + 3u;
+    sEnd = sStart;
+    while ( *sEnd &&
+            *sEnd != '\r' &&
+            *sEnd != '\n' &&
+            *sEnd != ' ' &&
+            strncmp(sEnd, "...", 3u) != 0 ) {
+        ++sEnd;
+    }
+    iLength = (size_t)(sEnd - sStart);
+    sBranch = (char *)malloc(iLength + 1u);
+    if ( !sBranch ) {
+        return NULL;
+    }
+    memcpy(sBranch, sStart, iLength);
+    sBranch[iLength] = '\0';
+    return sBranch;
+}
+
+static bool xwork__local_host_vcs_status_is_dirty(const char *sStatus)
+{
+    const char *sLine;
+
+    if ( !sStatus || !sStatus[0] ) {
+        return false;
+    }
+
+    sLine = sStatus;
+    while ( *sLine ) {
+        if ( strncmp(sLine, "## ", 3u) != 0 &&
+             *sLine != '\r' &&
+             *sLine != '\n' ) {
+            return true;
+        }
+        while ( *sLine && *sLine != '\n' ) {
+            ++sLine;
+        }
+        if ( *sLine == '\n' ) {
+            ++sLine;
+        }
+    }
+    return false;
+}
+
 static xwork_status xwork__local_host_invoke_vcs(
     xwork_local_host *pHost,
+    const char *sOperationId,
     const char *sRequestJson,
     xwork_tool_result *pResult
 )
@@ -6123,17 +8321,44 @@ static xwork_status xwork__local_host_invoke_vcs(
     char *sEscapedPath = NULL;
     char *sEscapedResolvedPath = NULL;
     char *sEscapedOutput = NULL;
+    char *sEscapedBranch = NULL;
+    char *sEscapedFailureMessage = NULL;
+    char *sFailureOutputText = NULL;
+    char *sBranch = NULL;
     char *sOutputText = NULL;
+    const char *sOutputKey = "status";
+    const char *sSummary = "vcs.status ok";
+    const char *sCommandText = NULL;
+    const char *sFailureKind = NULL;
+    const char *sFailureSummary = NULL;
+    const char *sFailureMessage = NULL;
     bool bTruncated = false;
+    bool bStaged = false;
+    bool bHasStaged = false;
+    bool bDirty = false;
     size_t iRequestMaxBytes = 0u;
     size_t iCaptureLimit;
+    size_t iLimit = 20u;
+    bool bHasLimit = false;
     int iExitCode = -1;
     xwork_status iStatus;
 
     if ( !pHost || !pResult ) {
         return XWORK_ERROR_INVALID_ARGUMENT;
     }
-    if ( !pHost->bEnableVcsStatus ) {
+    if ( !sOperationId ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    if ( (strcmp(sOperationId, XWORK_HOST_VCS_STATUS) == 0 && !pHost->bEnableVcsStatus) ||
+         (strcmp(sOperationId, XWORK_HOST_VCS_DIFF) == 0 && !pHost->bEnableVcsDiff) ||
+         (strcmp(sOperationId, XWORK_HOST_VCS_LOG) == 0 && !pHost->bEnableVcsLog) ||
+         (strcmp(sOperationId, XWORK_HOST_VCS_BRANCH) == 0 && !pHost->bEnableVcsBranch) ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    if ( strcmp(sOperationId, XWORK_HOST_VCS_STATUS) != 0 &&
+         strcmp(sOperationId, XWORK_HOST_VCS_DIFF) != 0 &&
+         strcmp(sOperationId, XWORK_HOST_VCS_LOG) != 0 &&
+         strcmp(sOperationId, XWORK_HOST_VCS_BRANCH) != 0 ) {
         return XWORK_ERROR_UNSUPPORTED;
     }
 
@@ -6144,6 +8369,33 @@ static xwork_status xwork__local_host_invoke_vcs(
 
     if ( xwork__local_host_request_get_text(tRequest, "path") ) {
         sPath = xwork__local_host_request_get_text(tRequest, "path");
+    }
+    iStatus = xwork__local_host_request_get_bool(
+        tRequest,
+        "staged",
+        &bHasStaged,
+        &bStaged
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "vcs request invalid";
+        goto cleanup;
+    }
+    if ( !bHasStaged ) {
+        (void)xwork__local_host_request_get_bool(
+            tRequest,
+            "cached",
+            &bHasStaged,
+            &bStaged
+        );
+    }
+    if ( xwork__local_host_request_get_size(tRequest, "limit", &iLimit) ) {
+        bHasLimit = true;
+        if ( iLimit == 0u ) {
+            iLimit = 1u;
+        } else if ( iLimit > 200u ) {
+            iLimit = 200u;
+        }
     }
 
     (void)xwork__local_host_request_get_size(tRequest, "max_output_bytes", &iRequestMaxBytes);
@@ -6157,18 +8409,69 @@ static xwork_status xwork__local_host_invoke_vcs(
         iStatus = XWORK_ERROR_NO_MEMORY;
         goto cleanup;
     }
+    iStatus = xwork__local_host_check_filesystem_path(
+        pHost,
+        sResolvedPath,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "path_denied";
+        sFailureSummary = "vcs operation denied by path policy";
+        goto cleanup;
+    }
 
     sQuotedPath = xwork__local_host_quote_shell_arg(sResolvedPath);
     if ( !sQuotedPath ) {
         iStatus = XWORK_ERROR_INVALID_ARGUMENT;
         goto cleanup;
     }
-    sCommand = xwork__dup_printf(
-        "git -C %s status --short --branch 2>&1",
-        sQuotedPath
-    );
+    if ( strcmp(sOperationId, XWORK_HOST_VCS_STATUS) == 0 ) {
+        sOutputKey = "status";
+        sSummary = "vcs.status ok";
+        sCommandText = "git status --short --branch";
+        sCommand = xwork__dup_printf(
+            "git -C %s status --short --branch 2>&1",
+            sQuotedPath
+        );
+    } else if ( strcmp(sOperationId, XWORK_HOST_VCS_DIFF) == 0 ) {
+        sOutputKey = "diff";
+        sSummary = "vcs.diff ok";
+        sCommandText = bStaged ? "git diff --staged --no-ext-diff" : "git diff --no-ext-diff";
+        sCommand = xwork__dup_printf(
+            "git -C %s diff %s--no-ext-diff 2>&1",
+            sQuotedPath,
+            bStaged ? "--staged " : ""
+        );
+    } else if ( strcmp(sOperationId, XWORK_HOST_VCS_LOG) == 0 ) {
+        sOutputKey = "log";
+        sSummary = "vcs.log ok";
+        sCommandText = "git log --oneline";
+        sCommand = xwork__dup_printf(
+            "git -C %s log --oneline -n %lu 2>&1",
+            sQuotedPath,
+            (unsigned long)(bHasLimit ? iLimit : 20u)
+        );
+    } else {
+        sOutputKey = "branch_status";
+        sSummary = "vcs.branch ok";
+        sCommandText = "git status --short --branch";
+        sCommand = xwork__dup_printf(
+            "git -C %s status --short --branch 2>&1",
+            sQuotedPath
+        );
+    }
     if ( !sCommand ) {
         iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_check_command_policy(
+        pHost,
+        sCommand,
+        &sFailureKind,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureSummary = "vcs operation denied by command policy";
         goto cleanup;
     }
 
@@ -6183,8 +8486,19 @@ static xwork_status xwork__local_host_invoke_vcs(
         goto cleanup;
     }
     if ( iExitCode != 0 ) {
+        sFailureKind = "git_failed";
+        sFailureSummary = "vcs operation failed";
         iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
         goto cleanup;
+    }
+
+    if ( strcmp(sOperationId, XWORK_HOST_VCS_BRANCH) == 0 ) {
+        sBranch = xwork__local_host_vcs_extract_branch(sOutput);
+        if ( !sBranch ) {
+            iStatus = XWORK_ERROR_NO_MEMORY;
+            goto cleanup;
+        }
+        bDirty = xwork__local_host_vcs_status_is_dirty(sOutput);
     }
 
     iStatus = xwork__local_host_json_escape(sPath, &sEscapedPath);
@@ -6193,15 +8507,39 @@ static xwork_status xwork__local_host_invoke_vcs(
     if ( iStatus != XWORK_OK ) goto cleanup;
     iStatus = xwork__local_host_json_escape(sOutput, &sEscapedOutput);
     if ( iStatus != XWORK_OK ) goto cleanup;
+    if ( sBranch ) {
+        iStatus = xwork__local_host_json_escape(sBranch, &sEscapedBranch);
+        if ( iStatus != XWORK_OK ) goto cleanup;
+    }
 
-    sOutputText = xwork__dup_printf(
-        "{\"ok\":true,\"path\":\"%s\",\"resolved_path\":\"%s\",\"status\":\"%s\","
-        "\"truncated\":%s}",
-        sEscapedPath,
-        sEscapedResolvedPath,
-        sEscapedOutput,
-        bTruncated ? "true" : "false"
-    );
+    if ( strcmp(sOperationId, XWORK_HOST_VCS_BRANCH) == 0 ) {
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":true,\"operation\":\"%s\",\"path\":\"%s\",\"resolved_path\":\"%s\","
+            "\"branch\":\"%s\",\"dirty\":%s,\"branch_status\":\"%s\",\"truncated\":%s}",
+            sOperationId,
+            sEscapedPath,
+            sEscapedResolvedPath,
+            sEscapedBranch ? sEscapedBranch : "",
+            bDirty ? "true" : "false",
+            sEscapedOutput,
+            bTruncated ? "true" : "false"
+        );
+    } else {
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":true,\"operation\":\"%s\",\"path\":\"%s\",\"resolved_path\":\"%s\","
+            "\"command\":\"%s\",\"staged\":%s,\"limit\":%lu,\"%s\":\"%s\","
+            "\"truncated\":%s}",
+            sOperationId,
+            sEscapedPath,
+            sEscapedResolvedPath,
+            sCommandText ? sCommandText : "",
+            bStaged ? "true" : "false",
+            (unsigned long)(bHasLimit ? iLimit : 0u),
+            sOutputKey,
+            sEscapedOutput,
+            bTruncated ? "true" : "false"
+        );
+    }
     if ( !sOutputText ) {
         iStatus = XWORK_ERROR_NO_MEMORY;
         goto cleanup;
@@ -6210,11 +8548,44 @@ static xwork_status xwork__local_host_invoke_vcs(
     iStatus = xwork__local_host_set_result(
         pHost,
         sOutputText,
-        "vcs.status ok",
+        sSummary,
         pResult
     );
 
 cleanup:
+    if ( iStatus != XWORK_OK && sFailureKind ) {
+        if ( !sEscapedPath ) {
+            (void)xwork__local_host_json_escape(sPath ? sPath : "", &sEscapedPath);
+        }
+        if ( !sEscapedResolvedPath ) {
+            (void)xwork__local_host_json_escape(
+                sResolvedPath ? sResolvedPath : "",
+                &sEscapedResolvedPath
+            );
+        }
+        (void)xwork__local_host_json_escape(
+            sFailureMessage ? sFailureMessage : "",
+            &sEscapedFailureMessage
+        );
+        sFailureOutputText = xwork__dup_printf(
+            "{\"ok\":false,\"operation\":\"%s\",\"path\":\"%s\","
+            "\"resolved_path\":\"%s\",\"error_kind\":\"%s\","
+            "\"error_message\":\"%s\"}",
+            sOperationId ? sOperationId : "",
+            sEscapedPath ? sEscapedPath : "",
+            sEscapedResolvedPath ? sEscapedResolvedPath : "",
+            sFailureKind,
+            sEscapedFailureMessage ? sEscapedFailureMessage : ""
+        );
+        if ( sFailureOutputText ) {
+            (void)xwork__local_host_set_result(
+                pHost,
+                sFailureOutputText,
+                sFailureSummary ? sFailureSummary : "vcs operation failed",
+                pResult
+            );
+        }
+    }
     if ( tRequest ) {
         xvoUnref(tRequest);
     }
@@ -6225,6 +8596,10 @@ cleanup:
     free(sEscapedPath);
     free(sEscapedResolvedPath);
     free(sEscapedOutput);
+    free(sEscapedBranch);
+    free(sEscapedFailureMessage);
+    free(sFailureOutputText);
+    free(sBranch);
     free(sOutputText);
     return iStatus;
 }
@@ -6277,6 +8652,410 @@ static xwork_status xwork__local_host_invoke_filesystem_cb(
             XWORK_HOST_FILESYSTEM_GLOB,
             true,
             true,
+            pResult
+        );
+    }
+    if ( strcmp(sOperationId, XWORK_HOST_FILESYSTEM_MKDIR) == 0 ) {
+        return xwork__local_host_invoke_filesystem_mkdir(
+            (xwork_local_host *)pUserData,
+            sRequestJson,
+            pResult
+        );
+    }
+    if ( strcmp(sOperationId, XWORK_HOST_FILESYSTEM_MOVE) == 0 ) {
+        return xwork__local_host_invoke_filesystem_move(
+            (xwork_local_host *)pUserData,
+            sRequestJson,
+            pResult
+        );
+    }
+    if ( strcmp(sOperationId, XWORK_HOST_FILESYSTEM_DELETE) == 0 ) {
+        return xwork__local_host_invoke_filesystem_delete(
+            (xwork_local_host *)pUserData,
+            sRequestJson,
+            pResult
+        );
+    }
+    if ( strcmp(sOperationId, XWORK_HOST_FILESYSTEM_APPLY_PATCH) == 0 ) {
+        return xwork__local_host_invoke_filesystem_apply_patch(
+            (xwork_local_host *)pUserData,
+            sRequestJson,
+            pResult
+        );
+    }
+    return XWORK_ERROR_UNSUPPORTED;
+}
+
+static xwork_status xwork__local_host_invoke_editor_open_buffer(
+    xwork_local_host *pHost,
+    const char *sRequestJson,
+    xwork_tool_result *pResult
+)
+{
+    xvalue tRequest = NULL;
+    const char *sPath;
+    const char *sFailureMessage = NULL;
+    char *sResolvedPath = NULL;
+    char *sText = NULL;
+    xwork__local_editor_buffer *pBuffer;
+    size_t iFileSizeBytes = 0u;
+    size_t iBytesRead = 0u;
+    size_t iSelectionStart = 0u;
+    size_t iSelectionEnd = 0u;
+    bool bTruncated = false;
+    bool bEof = false;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pHost->bEnableEditorBuffers ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+
+    iStatus = xwork__local_host_parse_request_json(sRequestJson, &tRequest);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    sPath = xwork__local_host_request_get_text(tRequest, "path");
+    if ( !sPath || !sPath[0] ) {
+        iStatus = xwork__local_host_set_editor_error_result(
+            pHost,
+            XWORK_HOST_EDITOR_OPEN_BUFFER,
+            NULL,
+            sPath,
+            NULL,
+            "invalid_request",
+            "path is required",
+            "editor.open_buffer invalid request",
+            pResult
+        );
+        goto cleanup;
+    }
+    (void)xwork__local_host_request_get_size(tRequest, "selection_start", &iSelectionStart);
+    (void)xwork__local_host_request_get_size(tRequest, "selection_end", &iSelectionEnd);
+
+    sResolvedPath = xwork__local_host_resolve_path(pHost, sPath);
+    if ( !sResolvedPath ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_check_filesystem_path(
+        pHost,
+        sResolvedPath,
+        &sFailureMessage
+    );
+    if ( iStatus != XWORK_OK ) {
+        (void)xwork__local_host_set_editor_error_result(
+            pHost,
+            XWORK_HOST_EDITOR_OPEN_BUFFER,
+            NULL,
+            sPath,
+            sResolvedPath,
+            "path_denied",
+            sFailureMessage,
+            "editor.open_buffer denied by path policy",
+            pResult
+        );
+        goto cleanup;
+    }
+
+    pBuffer = xwork__local_host_find_editor_buffer(pHost, NULL, sResolvedPath);
+    if ( !pBuffer ) {
+        iStatus = xwork__local_host_read_text_file(
+            sResolvedPath,
+            0u,
+            pHost->iMaxReadBytes ? pHost->iMaxReadBytes : XWORK__LOCAL_HOST_DEFAULT_READ_BYTES,
+            &sText,
+            &iFileSizeBytes,
+            &iBytesRead,
+            &bTruncated,
+            &bEof
+        );
+        if ( iStatus != XWORK_OK ) {
+            (void)xwork__local_host_set_editor_error_result(
+                pHost,
+                XWORK_HOST_EDITOR_OPEN_BUFFER,
+                NULL,
+                sPath,
+                sResolvedPath,
+                "read_failed",
+                "failed to read buffer text",
+                "editor.open_buffer failed",
+                pResult
+            );
+            goto cleanup;
+        }
+
+        pBuffer = (xwork__local_editor_buffer *)calloc(1u, sizeof(*pBuffer));
+        if ( !pBuffer ) {
+            iStatus = XWORK_ERROR_NO_MEMORY;
+            goto cleanup;
+        }
+        pBuffer->sBufferId = xwork__dup_printf(
+            "buffer-%llu",
+            (unsigned long long)(++pHost->iNextEditorBufferId)
+        );
+        pBuffer->sPath = xwork__dup_cstr(sPath);
+        pBuffer->sResolvedPath = xwork__dup_cstr(sResolvedPath);
+        pBuffer->sText = sText;
+        sText = NULL;
+        if ( !pBuffer->sBufferId ||
+             !pBuffer->sPath ||
+             !pBuffer->sResolvedPath ||
+             !pBuffer->sText ) {
+            free(pBuffer->sBufferId);
+            free(pBuffer->sPath);
+            free(pBuffer->sResolvedPath);
+            free(pBuffer->sText);
+            free(pBuffer);
+            iStatus = XWORK_ERROR_NO_MEMORY;
+            goto cleanup;
+        }
+        pBuffer->pNext = (xwork__local_editor_buffer *)pHost->pEditorBuffers;
+        pHost->pEditorBuffers = pBuffer;
+    }
+
+    if ( iSelectionEnd < iSelectionStart ) {
+        iSelectionEnd = iSelectionStart;
+    }
+    if ( pBuffer->sText && iSelectionStart > strlen(pBuffer->sText) ) {
+        iSelectionStart = strlen(pBuffer->sText);
+    }
+    if ( pBuffer->sText && iSelectionEnd > strlen(pBuffer->sText) ) {
+        iSelectionEnd = strlen(pBuffer->sText);
+    }
+    pBuffer->iSelectionStart = iSelectionStart;
+    pBuffer->iSelectionEnd = iSelectionEnd;
+
+    iStatus = xwork__local_host_set_editor_buffer_result(
+        pHost,
+        XWORK_HOST_EDITOR_OPEN_BUFFER,
+        pBuffer,
+        false,
+        "editor.open_buffer ok",
+        pResult
+    );
+
+cleanup:
+    if ( tRequest ) {
+        xvoUnref(tRequest);
+    }
+    free(sResolvedPath);
+    free(sText);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_invoke_editor_apply_edit(
+    xwork_local_host *pHost,
+    const char *sRequestJson,
+    xwork_tool_result *pResult
+)
+{
+    xvalue tRequest = NULL;
+    const char *sBufferId;
+    const char *sPath;
+    const char *sNewText;
+    const char *sFailureMessage = NULL;
+    char *sResolvedPath = NULL;
+    char *sUpdatedText = NULL;
+    xwork__local_editor_buffer *pBuffer;
+    size_t iRangeStart = 0u;
+    size_t iRangeEnd = 0u;
+    size_t iTextLength;
+    size_t iNewTextLength;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pHost->bEnableEditorBuffers ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+
+    iStatus = xwork__local_host_parse_request_json(sRequestJson, &tRequest);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    sBufferId = xwork__local_host_request_get_text(tRequest, "buffer_id");
+    sPath = xwork__local_host_request_get_text(tRequest, "path");
+    sNewText = xwork__local_host_request_get_text(tRequest, "new_text");
+    (void)xwork__local_host_request_get_size(tRequest, "range_start", &iRangeStart);
+    (void)xwork__local_host_request_get_size(tRequest, "range_end", &iRangeEnd);
+
+    if ( (!sBufferId || !sBufferId[0]) && (!sPath || !sPath[0]) ) {
+        iStatus = xwork__local_host_set_editor_error_result(
+            pHost,
+            XWORK_HOST_EDITOR_APPLY_EDIT,
+            sBufferId,
+            sPath,
+            NULL,
+            "invalid_request",
+            "buffer_id or path is required",
+            "editor.apply_edit invalid request",
+            pResult
+        );
+        goto cleanup;
+    }
+    if ( !sNewText ) {
+        iStatus = xwork__local_host_set_editor_error_result(
+            pHost,
+            XWORK_HOST_EDITOR_APPLY_EDIT,
+            sBufferId,
+            sPath,
+            NULL,
+            "invalid_request",
+            "new_text is required",
+            "editor.apply_edit invalid request",
+            pResult
+        );
+        goto cleanup;
+    }
+
+    if ( sPath && sPath[0] ) {
+        sResolvedPath = xwork__local_host_resolve_path(pHost, sPath);
+        if ( !sResolvedPath ) {
+            iStatus = XWORK_ERROR_NO_MEMORY;
+            goto cleanup;
+        }
+        iStatus = xwork__local_host_check_filesystem_path(
+            pHost,
+            sResolvedPath,
+            &sFailureMessage
+        );
+        if ( iStatus != XWORK_OK ) {
+            (void)xwork__local_host_set_editor_error_result(
+                pHost,
+                XWORK_HOST_EDITOR_APPLY_EDIT,
+                sBufferId,
+                sPath,
+                sResolvedPath,
+                "path_denied",
+                sFailureMessage,
+                "editor.apply_edit denied by path policy",
+                pResult
+            );
+            goto cleanup;
+        }
+    }
+
+    pBuffer = xwork__local_host_find_editor_buffer(pHost, sBufferId, sResolvedPath);
+    if ( !pBuffer ) {
+        iStatus = xwork__local_host_set_editor_error_result(
+            pHost,
+            XWORK_HOST_EDITOR_APPLY_EDIT,
+            sBufferId,
+            sPath,
+            sResolvedPath,
+            "not_found",
+            "buffer not found",
+            "editor.apply_edit failed",
+            pResult
+        );
+        goto cleanup;
+    }
+
+    iTextLength = pBuffer->sText ? strlen(pBuffer->sText) : 0u;
+    iNewTextLength = strlen(sNewText);
+    if ( iRangeEnd < iRangeStart ) {
+        iStatus = xwork__local_host_set_editor_error_result(
+            pHost,
+            XWORK_HOST_EDITOR_APPLY_EDIT,
+            sBufferId,
+            sPath,
+            sResolvedPath,
+            "invalid_request",
+            "range_end must be >= range_start",
+            "editor.apply_edit invalid request",
+            pResult
+        );
+        goto cleanup;
+    }
+    if ( iRangeStart > iTextLength || iRangeEnd > iTextLength ) {
+        iStatus = xwork__local_host_set_editor_error_result(
+            pHost,
+            XWORK_HOST_EDITOR_APPLY_EDIT,
+            sBufferId,
+            sPath,
+            sResolvedPath,
+            "invalid_request",
+            "edit range is outside buffer",
+            "editor.apply_edit invalid request",
+            pResult
+        );
+        goto cleanup;
+    }
+
+    sUpdatedText = (char *)calloc(
+        iTextLength - (iRangeEnd - iRangeStart) + iNewTextLength + 1u,
+        sizeof(char)
+    );
+    if ( !sUpdatedText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    if ( iRangeStart > 0u ) {
+        memcpy(sUpdatedText, pBuffer->sText, iRangeStart);
+    }
+    if ( iNewTextLength > 0u ) {
+        memcpy(sUpdatedText + iRangeStart, sNewText, iNewTextLength);
+    }
+    if ( iRangeEnd < iTextLength ) {
+        memcpy(
+            sUpdatedText + iRangeStart + iNewTextLength,
+            pBuffer->sText + iRangeEnd,
+            iTextLength - iRangeEnd
+        );
+    }
+
+    free(pBuffer->sText);
+    pBuffer->sText = sUpdatedText;
+    sUpdatedText = NULL;
+    pBuffer->bDirty = true;
+    pBuffer->iSelectionStart = iRangeStart;
+    pBuffer->iSelectionEnd = iRangeStart + iNewTextLength;
+
+    iStatus = xwork__local_host_set_editor_buffer_result(
+        pHost,
+        XWORK_HOST_EDITOR_APPLY_EDIT,
+        pBuffer,
+        true,
+        "editor.apply_edit ok",
+        pResult
+    );
+
+cleanup:
+    if ( tRequest ) {
+        xvoUnref(tRequest);
+    }
+    free(sResolvedPath);
+    free(sUpdatedText);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_invoke_editor_cb(
+    const char *sOperationId,
+    const char *sRequestJson,
+    xwork_tool_result *pResult,
+    void *pUserData
+)
+{
+    if ( !sOperationId ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    if ( strcmp(sOperationId, XWORK_HOST_EDITOR_OPEN_BUFFER) == 0 ) {
+        return xwork__local_host_invoke_editor_open_buffer(
+            (xwork_local_host *)pUserData,
+            sRequestJson,
+            pResult
+        );
+    }
+    if ( strcmp(sOperationId, XWORK_HOST_EDITOR_APPLY_EDIT) == 0 ) {
+        return xwork__local_host_invoke_editor_apply_edit(
+            (xwork_local_host *)pUserData,
+            sRequestJson,
             pResult
         );
     }
@@ -6380,11 +9159,16 @@ static xwork_status xwork__local_host_invoke_vcs_cb(
     void *pUserData
 )
 {
-    if ( !sOperationId || strcmp(sOperationId, XWORK_HOST_VCS_STATUS) != 0 ) {
+    if ( !sOperationId ||
+         (strcmp(sOperationId, XWORK_HOST_VCS_STATUS) != 0 &&
+          strcmp(sOperationId, XWORK_HOST_VCS_DIFF) != 0 &&
+          strcmp(sOperationId, XWORK_HOST_VCS_LOG) != 0 &&
+          strcmp(sOperationId, XWORK_HOST_VCS_BRANCH) != 0) ) {
         return XWORK_ERROR_UNSUPPORTED;
     }
     return xwork__local_host_invoke_vcs(
         (xwork_local_host *)pUserData,
+        sOperationId,
         sRequestJson,
         pResult
     );
@@ -6416,6 +9200,10 @@ void xwork_local_host_options_init(xwork_local_host_options *pOptions)
         pOptions->bEnableFilesystemWriteText = true;
         pOptions->bEnableProcessExec = true;
         pOptions->bEnableVcsStatus = true;
+        pOptions->bEnableVcsDiff = true;
+        pOptions->bEnableVcsLog = true;
+        pOptions->bEnableVcsBranch = true;
+        pOptions->bEnableEditorBuffers = true;
     }
 }
 
@@ -6433,7 +9221,24 @@ void xwork_local_host_reset(xwork_local_host *pHost)
     }
 
     xwork__local_host_reset_terminal_sessions(pHost);
+    xwork__local_host_free_editor_buffers(pHost);
     xwork__free_cstr(&pHost->sDefaultWorkingDirectory);
+    xwork__free_str_array(
+        &pHost->psFilesystemAllowPathPrefixes,
+        &pHost->iFilesystemAllowPathPrefixCount
+    );
+    xwork__free_str_array(
+        &pHost->psFilesystemDenyPathPrefixes,
+        &pHost->iFilesystemDenyPathPrefixCount
+    );
+    xwork__free_str_array(
+        &pHost->psCommandAllowPatterns,
+        &pHost->iCommandAllowPatternCount
+    );
+    xwork__free_str_array(
+        &pHost->psCommandDenyPatterns,
+        &pHost->iCommandDenyPatternCount
+    );
     xwork__free_cstr(&pHost->sLastOutputText);
     xwork__free_cstr(&pHost->sLastVisibleSummary);
     xwork_local_host_init(pHost);
@@ -6445,6 +9250,8 @@ xwork_status xwork_local_host_configure_services(
     xwork_host_services *pServices
 )
 {
+    xwork_status iStatus;
+
     if ( !pHost || !pOptions || !pServices ) {
         return XWORK_ERROR_INVALID_ARGUMENT;
     }
@@ -6459,6 +9266,49 @@ xwork_status xwork_local_host_configure_services(
         }
     }
 
+    pHost->bEnforceFilesystemRoot = pOptions->bEnforceFilesystemRoot;
+    iStatus = xwork__local_host_copy_path_prefixes(
+        &pHost->psFilesystemAllowPathPrefixes,
+        &pHost->iFilesystemAllowPathPrefixCount,
+        pOptions->psFilesystemAllowPathPrefixes,
+        pOptions->iFilesystemAllowPathPrefixCount
+    );
+    if ( iStatus != XWORK_OK ) {
+        xwork_local_host_reset(pHost);
+        return iStatus;
+    }
+    iStatus = xwork__local_host_copy_path_prefixes(
+        &pHost->psFilesystemDenyPathPrefixes,
+        &pHost->iFilesystemDenyPathPrefixCount,
+        pOptions->psFilesystemDenyPathPrefixes,
+        pOptions->iFilesystemDenyPathPrefixCount
+    );
+    if ( iStatus != XWORK_OK ) {
+        xwork_local_host_reset(pHost);
+        return iStatus;
+    }
+    iStatus = xwork__local_host_copy_path_prefixes(
+        &pHost->psCommandAllowPatterns,
+        &pHost->iCommandAllowPatternCount,
+        pOptions->psCommandAllowPatterns,
+        pOptions->iCommandAllowPatternCount
+    );
+    if ( iStatus != XWORK_OK ) {
+        xwork_local_host_reset(pHost);
+        return iStatus;
+    }
+    iStatus = xwork__local_host_copy_path_prefixes(
+        &pHost->psCommandDenyPatterns,
+        &pHost->iCommandDenyPatternCount,
+        pOptions->psCommandDenyPatterns,
+        pOptions->iCommandDenyPatternCount
+    );
+    if ( iStatus != XWORK_OK ) {
+        xwork_local_host_reset(pHost);
+        return iStatus;
+    }
+    pHost->bDenyDestructiveCommands = pOptions->bDenyDestructiveCommands;
+
     pHost->iMaxReadBytes = pOptions->iMaxReadBytes;
     pHost->iMaxProcessInputBytes = pOptions->iMaxProcessInputBytes;
     pHost->iMaxProcessEnvEntries = pOptions->iMaxProcessEnvEntries;
@@ -6467,10 +9317,15 @@ xwork_status xwork_local_host_configure_services(
     pHost->bEnableFilesystemWriteText = pOptions->bEnableFilesystemWriteText;
     pHost->bEnableProcessExec = pOptions->bEnableProcessExec;
     pHost->bEnableVcsStatus = pOptions->bEnableVcsStatus;
+    pHost->bEnableVcsDiff = pOptions->bEnableVcsDiff;
+    pHost->bEnableVcsLog = pOptions->bEnableVcsLog;
+    pHost->bEnableVcsBranch = pOptions->bEnableVcsBranch;
+    pHost->bEnableEditorBuffers = pOptions->bEnableEditorBuffers;
 
     xwork_host_service_init(&pServices->tFilesystem);
     xwork_host_service_init(&pServices->tProcess);
     xwork_host_service_init(&pServices->tVcs);
+    xwork_host_service_init(&pServices->tEditor);
 
     if ( pHost->bEnableFilesystemReadText || pHost->bEnableFilesystemWriteText ) {
         pServices->tFilesystem.pfnInvoke = xwork__local_host_invoke_filesystem_cb;
@@ -6481,9 +9336,16 @@ xwork_status xwork_local_host_configure_services(
         pServices->tProcess.pfnInvokeEx = xwork__local_host_invoke_process_cb_ex;
         pServices->tProcess.pUserData = pHost;
     }
-    if ( pHost->bEnableVcsStatus ) {
+    if ( pHost->bEnableVcsStatus ||
+         pHost->bEnableVcsDiff ||
+         pHost->bEnableVcsLog ||
+         pHost->bEnableVcsBranch ) {
         pServices->tVcs.pfnInvoke = xwork__local_host_invoke_vcs_cb;
         pServices->tVcs.pUserData = pHost;
+    }
+    if ( pHost->bEnableEditorBuffers ) {
+        pServices->tEditor.pfnInvoke = xwork__local_host_invoke_editor_cb;
+        pServices->tEditor.pUserData = pHost;
     }
 
     return XWORK_OK;

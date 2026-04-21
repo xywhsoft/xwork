@@ -28,7 +28,20 @@
 typedef struct {
     int iTurnCount;
     const char *sExpectedMemoryText;
+    const char *sExpectedPlannerText;
+    const char *sExpectedToolChoiceToolId;
     int iObservedMemoryTurns;
+    int iObservedPlannerTurns;
+    int iTransientProviderFailuresRemaining;
+    int iProviderErrorsRemaining;
+    int iExpectedMemoryContextPriority;
+    uint32 uMockInputTokens;
+    xllm_error_code eProviderErrorCode;
+    xllm_tool_choice_mode eExpectedToolChoiceMode;
+    const char *sProviderErrorMessage;
+    bool bExpectToolChoice;
+    bool bExpectMemoryContextMetadata;
+    bool bExpectedMemoryContextPinned;
     bool bTerminalWriteEof;
     bool bTerminalListFlow;
 } xwork_mock_adapter_ctx;
@@ -37,6 +50,11 @@ typedef struct {
     int iExecCount;
     int iExecExCount;
     int iCancelCheckCount;
+    int iRetryableFailuresRemaining;
+    int iNonRetryableFailuresRemaining;
+    bool bEmitOutputArtifact;
+    xwork_artifact_output_class eOutputArtifactClass;
+    const char *sOutputArtifactText;
 } xwork_mock_tool_exec_ctx;
 
 typedef struct {
@@ -55,18 +73,38 @@ typedef struct {
 
 typedef struct {
     int iEventCount;
+    int iStartCount;
+    int iOutputBeginCount;
+    int iOutputEndCount;
+    int iEndCount;
     int iTextDeltaCount;
+    int iToolCallDeltaCount;
+    int iToolCallReadyCount;
+    int iUsageCount;
+    int iErrorCount;
+    int iUnexpectedPayloadCount;
     bool bCancelOnTextDelta;
 } xwork_mock_model_event_ctx;
 
 typedef struct {
     int iStoreEventCount;
     int iStoreCheckpointCount;
+    int iStoreRunSnapshotCount;
     int iStoreArtifactCount;
     int iLoadSnapshotCount;
     bool bHasSnapshot;
     xwork_run_snapshot tSnapshot;
 } xwork_mock_persistence_ctx;
+
+typedef struct {
+    xwork_run_async *pAsync;
+    int iPollCount;
+    int iRunningCount;
+    int iCompletedCount;
+    xwork_status eLastStatus;
+    xwork_status eLastRunStatus;
+    bool bLastCompleted;
+} xwork_async_observer_ctx;
 
 #define XWORK_TEST_STRINGIFY_INNER(x) #x
 #define XWORK_TEST_STRINGIFY(x) XWORK_TEST_STRINGIFY_INNER(x)
@@ -111,6 +149,8 @@ typedef struct {
 #define XWORK_TEST_PROCESS_NONZERO_EXPECTED "xwork-local-process-nonzero"
 #define XWORK_TEST_PROCESS_STDOUT_EXPECTED "xwork-local-process-stdout"
 #define XWORK_TEST_PROCESS_STDERR_EXPECTED "xwork-local-process-stderr"
+#define XWORK_TEST_PROCESS_TEST_COMMAND "echo xwork-local-test-pass"
+#define XWORK_TEST_PROCESS_TEST_EXPECTED "xwork-local-test-pass"
 #define XWORK_TEST_PROCESS_TERMINAL_EXPECTED "xwork-local-process-terminal"
 #define XWORK_TEST_PROCESS_TERMINAL_SESSION_EXPECTED "xwork-terminal-session"
 #define XWORK_TEST_PROCESS_NONZERO_EXIT_CODE 3
@@ -234,6 +274,106 @@ static void xwork_test_assert_report_class(
     }
 }
 
+static void xwork_test_assert_report_schema(
+    const xwork_artifact *pArtifact,
+    const char *sReportKind,
+    const char *sStatus,
+    const char *sSubjectRef
+)
+{
+    char sNeedle[256];
+
+    assert(pArtifact != NULL);
+    assert(pArtifact->sContentText != NULL);
+    assert(strstr(pArtifact->sContentText, "\"schema\":\"" XWORK_REPORT_SCHEMA_V1 "\"") != NULL);
+    if ( sReportKind ) {
+        assert(
+            snprintf(
+                sNeedle,
+                sizeof(sNeedle),
+                "\"report_kind\":\"%s\"",
+                sReportKind
+            ) > 0
+        );
+        assert(strstr(pArtifact->sContentText, sNeedle) != NULL);
+    }
+    if ( sStatus ) {
+        assert(snprintf(sNeedle, sizeof(sNeedle), "\"status\":\"%s\"", sStatus) > 0);
+        assert(strstr(pArtifact->sContentText, sNeedle) != NULL);
+    }
+    if ( sSubjectRef ) {
+        assert(
+            snprintf(
+                sNeedle,
+                sizeof(sNeedle),
+                "\"subject_ref\":\"%s\"",
+                sSubjectRef
+            ) > 0
+        );
+        assert(strstr(pArtifact->sContentText, sNeedle) != NULL);
+    }
+}
+
+static void xwork_test_assert_mock_patch_approval_metadata(
+    const xwork_approval_request *pRequest
+)
+{
+    assert(pRequest != NULL);
+    assert(pRequest->sRequestId != NULL);
+    assert(strcmp(pRequest->sToolId, "mock.apply_patch") == 0);
+    assert(strcmp(pRequest->sReason, "Tool approval mode is set to always.") == 0);
+    assert(strcmp(pRequest->sScope, "workspace_write") == 0);
+    assert(strcmp(pRequest->sActionSummary, "Apply a mock workspace patch.") == 0);
+    assert(pRequest->eRiskLevel == XWORK_RISK_MEDIUM);
+}
+
+static void xwork_test_assert_process_diagnostics_artifact(
+    const xwork_artifact *pArtifact,
+    const char *sCommand,
+    const char *sStatus,
+    const char *sSeverity,
+    const char *sExpectedMessage,
+    size_t iDiagnosticCount
+)
+{
+    char sCountNeedle[64];
+
+    assert(pArtifact != NULL);
+    assert(pArtifact->eKind == XWORK_ARTIFACT_REPORT);
+    assert(strcmp(pArtifact->sName, "process.diagnostics.json") == 0);
+    assert(strcmp(pArtifact->sMimeType, "application/json") == 0);
+    xwork_test_assert_report_class(
+        pArtifact,
+        XWORK_ARTIFACT_REPORT_DIAGNOSTICS,
+        sCommand
+    );
+    assert(pArtifact->sContentText != NULL);
+    assert(strstr(pArtifact->sContentText, "\"schema\":\"" XWORK_DIAGNOSTICS_SCHEMA_V1 "\"") != NULL);
+    assert(strstr(pArtifact->sContentText, "\"source\":\"process.exec\"") != NULL);
+    snprintf(
+        sCountNeedle,
+        sizeof(sCountNeedle),
+        "\"diagnostic_count\":%lu",
+        (unsigned long)iDiagnosticCount
+    );
+    assert(strstr(pArtifact->sContentText, sCountNeedle) != NULL);
+    if ( sStatus ) {
+        char sStatusNeedle[64];
+
+        snprintf(sStatusNeedle, sizeof(sStatusNeedle), "\"status\":\"%s\"", sStatus);
+        assert(strstr(pArtifact->sContentText, sStatusNeedle) != NULL);
+    }
+    if ( sSeverity ) {
+        char sSeverityNeedle[64];
+
+        snprintf(sSeverityNeedle, sizeof(sSeverityNeedle), "\"severity\":\"%s\"", sSeverity);
+        assert(strstr(pArtifact->sContentText, sSeverityNeedle) != NULL);
+    }
+    if ( sExpectedMessage ) {
+        assert(strstr(pArtifact->sContentText, sExpectedMessage) != NULL);
+    }
+}
+
 static void xwork_test_assert_summary_report_class(
     const xwork_artifact_summary *pSummary,
     xwork_artifact_report_class eReportClass,
@@ -272,12 +412,110 @@ static void xwork_test_assert_readme_patch_summary_stats(
     assert(pSummary->iPatchDeletedLineCount == 0u);
 }
 
+static void xwork_test_assert_patch_apply_schema(const xwork_artifact *pArtifact)
+{
+    assert(pArtifact != NULL);
+    assert(pArtifact->sPatchApplyResultJson != NULL);
+    assert(
+        strstr(
+            pArtifact->sPatchApplyResultJson,
+            "\"schema\":\"" XWORK_PATCH_APPLY_RESULT_SCHEMA_V1 "\""
+        ) != NULL
+    );
+    assert(strstr(pArtifact->sPatchApplyResultJson, "\"ok\":true") != NULL);
+    assert(pArtifact->sPatchFileSummaryJson != NULL);
+    assert(
+        strstr(
+            pArtifact->sPatchFileSummaryJson,
+            "\"schema\":\"" XWORK_PATCH_FILE_SUMMARY_SCHEMA_V1 "\""
+        ) != NULL
+    );
+    assert(strstr(pArtifact->sPatchFileSummaryJson, "\"added_lines\":1") != NULL);
+}
+
+static void xwork_test_assert_patch_apply_summary_schema(
+    const xwork_artifact_summary *pSummary
+)
+{
+    assert(pSummary != NULL);
+    assert(pSummary->sPatchApplyResultJson != NULL);
+    assert(
+        strstr(
+            pSummary->sPatchApplyResultJson,
+            "\"schema\":\"" XWORK_PATCH_APPLY_RESULT_SCHEMA_V1 "\""
+        ) != NULL
+    );
+    assert(pSummary->sPatchFileSummaryJson != NULL);
+    assert(
+        strstr(
+            pSummary->sPatchFileSummaryJson,
+            "\"schema\":\"" XWORK_PATCH_FILE_SUMMARY_SCHEMA_V1 "\""
+        ) != NULL
+    );
+}
+
 static void xwork_test_remove_empty_directory(const char *sPath)
 {
     if ( !sPath || !sPath[0] ) {
         return;
     }
     (void)XWORK_TEST_RMDIR(sPath);
+}
+
+static void xwork_test_write_text_file(const char *sPath, const char *sText)
+{
+    FILE *pFile;
+
+    assert(sPath != NULL);
+    assert(sText != NULL);
+
+    pFile = fopen(sPath, "wb");
+    assert(pFile != NULL);
+    assert(fputs(sText, pFile) >= 0);
+    assert(fclose(pFile) == 0);
+}
+
+static void xwork_test_write_future_snapshot_header(const char *sPath)
+{
+    FILE *pFile;
+
+    assert(sPath != NULL);
+
+    pFile = fopen(sPath, "wb");
+    assert(pFile != NULL);
+    assert(
+        xwork__file_write_bytes(
+            pFile,
+            xwork__snapshot_magic,
+            sizeof(xwork__snapshot_magic)
+        ) == XWORK_OK
+    );
+    assert(
+        xwork__file_write_u64(
+            pFile,
+            (uint64_t)XWORK_PERSISTENCE_FORMAT_VERSION + 1u
+        ) == XWORK_OK
+    );
+    assert(fclose(pFile) == 0);
+}
+
+static void xwork_test_assert_event_log_header(const char *sRunDir)
+{
+    char *sEventsPath;
+    FILE *pFile;
+    char *sLine = NULL;
+
+    assert(sRunDir != NULL);
+    sEventsPath = xwork__build_events_log_path(sRunDir);
+    assert(sEventsPath != NULL);
+
+    pFile = fopen(sEventsPath, "rb");
+    assert(pFile != NULL);
+    assert(xwork__read_line_owned(pFile, &sLine) == XWORK_OK);
+    assert(strcmp(sLine, "#xwork-events\t1") == 0);
+    free(sLine);
+    assert(fclose(pFile) == 0);
+    free(sEventsPath);
 }
 
 static void xwork_test_init_custom_session_policy(xwork_session_policy *pPolicy)
@@ -290,6 +528,10 @@ static void xwork_test_init_custom_session_policy(xwork_session_policy *pPolicy)
     pPolicy->bEnableAutoCompact = false;
     pPolicy->fCompactTriggerRatio = 0.60;
     pPolicy->iCompactTriggerTurns = 5u;
+    pPolicy->iReserveOutputTokens = 16u;
+    pPolicy->iKeepRecentTurns = 2u;
+    pPolicy->bKeepActiveToolChain = true;
+    pPolicy->eCompactStrategy = XWORK_SESSION_COMPACT_TRUNCATE;
 }
 
 static int xwork_test_create_memory(
@@ -430,6 +672,22 @@ static xwork_status xwork_test_snapshot_copy_artifacts(
         iStatus = xwork__artifact_snapshot_replace_cstr(
             &pArtifacts[i].sContentText,
             pSource->pArtifacts[i].sContentText
+        );
+        if ( iStatus != XWORK_OK ) {
+            xwork__run_snapshot_reset_artifacts(pTarget);
+            return iStatus;
+        }
+        iStatus = xwork__artifact_snapshot_replace_cstr(
+            &pArtifacts[i].sPatchApplyResultJson,
+            pSource->pArtifacts[i].sPatchApplyResultJson
+        );
+        if ( iStatus != XWORK_OK ) {
+            xwork__run_snapshot_reset_artifacts(pTarget);
+            return iStatus;
+        }
+        iStatus = xwork__artifact_snapshot_replace_cstr(
+            &pArtifacts[i].sPatchFileSummaryJson,
+            pSource->pArtifacts[i].sPatchFileSummaryJson
         );
         if ( iStatus != XWORK_OK ) {
             xwork__run_snapshot_reset_artifacts(pTarget);
@@ -712,6 +970,28 @@ static xwork_status xwork_mock_persistence_store_checkpoint(
     return XWORK_OK;
 }
 
+static xwork_status xwork_mock_persistence_store_run_snapshot(
+    const xwork_run_snapshot *pSnapshot,
+    void *pUserData
+)
+{
+    xwork_mock_persistence_ctx *pCtx = (xwork_mock_persistence_ctx *)pUserData;
+    xwork_status iStatus;
+
+    if ( !pSnapshot || !pCtx ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    ++pCtx->iStoreRunSnapshotCount;
+    iStatus = xwork_test_snapshot_copy(&pCtx->tSnapshot, pSnapshot);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    pCtx->bHasSnapshot = true;
+    return XWORK_OK;
+}
+
 static xwork_status xwork_mock_persistence_store_artifact(
     const xwork_artifact *pArtifact,
     void *pUserData
@@ -764,6 +1044,9 @@ static int32 xwork_mock_count_tokens(
 
     if ( pResult ) {
         memset(pResult, 0, sizeof(*pResult));
+        if ( pCtx ) {
+            pResult->uInputTokens = ((const xwork_mock_adapter_ctx *)pCtx)->uMockInputTokens;
+        }
     }
     return XRT_NET_OK;
 }
@@ -1062,6 +1345,19 @@ static int32 xwork_mock_emit_model_events(
             }
         } else if ( pOutput->eKind == XLLM_OUTPUT_TOOL_CALL ) {
             memset(&tEvent, 0, sizeof(tEvent));
+            tEvent.eType = XLLM_EVENT_TOOL_CALL_DELTA;
+            tEvent.bSynthetic = true;
+            tEvent.uOutputIndex = (uint32)i;
+            tEvent.as.tToolCallDelta.sCallId = pOutput->as.tToolCall.sCallId;
+            tEvent.as.tToolCallDelta.sToolId = pOutput->as.tToolCall.sToolId;
+            tEvent.as.tToolCallDelta.sToolName = pOutput->as.tToolCall.sToolName;
+            tEvent.as.tToolCallDelta.sArgumentsDelta =
+                pOutput->as.tToolCall.sArgumentsJson;
+            if ( !pOptions->pfnOnEvent(&tEvent, pOptions->pUserData) ) {
+                return XRT_NET_CANCELLED;
+            }
+
+            memset(&tEvent, 0, sizeof(tEvent));
             tEvent.eType = XLLM_EVENT_TOOL_CALL_READY;
             tEvent.bSynthetic = true;
             tEvent.uOutputIndex = (uint32)i;
@@ -1081,8 +1377,35 @@ static int32 xwork_mock_emit_model_events(
     }
 
     memset(&tEvent, 0, sizeof(tEvent));
+    tEvent.eType = XLLM_EVENT_USAGE;
+    tEvent.bSynthetic = true;
+    tEvent.as.tUsage.tUsage.uInputTokens = 7u;
+    tEvent.as.tUsage.tUsage.uOutputTokens = 3u;
+    if ( !pOptions->pfnOnEvent(&tEvent, pOptions->pUserData) ) {
+        return XRT_NET_CANCELLED;
+    }
+
+    memset(&tEvent, 0, sizeof(tEvent));
     tEvent.eType = XLLM_EVENT_END;
     tEvent.bSynthetic = true;
+    return pOptions->pfnOnEvent(&tEvent, pOptions->pUserData)
+        ? XRT_NET_OK
+        : XRT_NET_CANCELLED;
+}
+
+static int32 xwork_mock_emit_model_error_event(const xllm_call_options *pOptions)
+{
+    xllm_event tEvent;
+
+    if ( !pOptions || !pOptions->pfnOnEvent ) {
+        return XRT_NET_OK;
+    }
+
+    memset(&tEvent, 0, sizeof(tEvent));
+    tEvent.eType = XLLM_EVENT_ERROR;
+    tEvent.bSynthetic = true;
+    tEvent.as.tError.tError.eCode = XLLM_ERROR_UPSTREAM_5XX;
+    tEvent.as.tError.tError.sMessage = "mock streaming provider error";
     return pOptions->pfnOnEvent(&tEvent, pOptions->pUserData)
         ? XRT_NET_OK
         : XRT_NET_CANCELLED;
@@ -1108,13 +1431,38 @@ static int32 xwork_mock_adapter_chat(
     const char *sToolText;
     const char *sToolId;
 
-    (void)pError;
-
     if ( !pState || !pProfile || !pRequest || !ppResponse ) {
         return XRT_NET_ERROR;
     }
 
     *ppResponse = NULL;
+    if ( pState->iProviderErrorsRemaining > 0 ) {
+        --pState->iProviderErrorsRemaining;
+        if ( pError ) {
+            pError->eCode = pState->eProviderErrorCode;
+            pError->sMessage = xwork_test_dup_cstr(
+                pState->sProviderErrorMessage
+                    ? pState->sProviderErrorMessage
+                    : "mock provider error"
+            );
+        }
+        return XRT_NET_ERROR;
+    }
+    if ( pState->iTransientProviderFailuresRemaining > 0 ) {
+        --pState->iTransientProviderFailuresRemaining;
+        return XRT_NET_ERROR;
+    }
+    if ( pState->bExpectToolChoice ) {
+        if ( pRequest->tToolPolicy.eMode != pState->eExpectedToolChoiceMode ) {
+            return XRT_NET_ERROR;
+        }
+        if ( pState->sExpectedToolChoiceToolId &&
+             (!pRequest->tToolPolicy.sToolName ||
+              strcmp(pRequest->tToolPolicy.sToolName, pState->sExpectedToolChoiceToolId) != 0) ) {
+            return XRT_NET_ERROR;
+        }
+    }
+
     bHasInlineSystemMessage = (
         pRequest->iMessageCount > 0u &&
         pRequest->pMessages[0].eRole == XLLM_ROLE_SYSTEM
@@ -1127,18 +1475,53 @@ static int32 xwork_mock_adapter_chat(
         bHasSystemMessage = sSystemText != NULL;
     }
     if ( bHasSystemMessage ) {
-        if ( !pState->sExpectedMemoryText ||
-             !sSystemText ||
-             strstr(sSystemText, pState->sExpectedMemoryText) == NULL ) {
+        if ( !pState->sExpectedMemoryText && !pState->sExpectedPlannerText ) {
             return XRT_NET_ERROR;
         }
-        ++pState->iObservedMemoryTurns;
+        if ( pState->sExpectedMemoryText &&
+             (!sSystemText ||
+              strstr(sSystemText, pState->sExpectedMemoryText) == NULL) ) {
+            return XRT_NET_ERROR;
+        }
+        if ( pState->bExpectMemoryContextMetadata ) {
+            if ( bHasInlineSystemMessage ||
+                 !pRequest->pContextBlocks ||
+                 pRequest->iContextBlockCount == 0u ||
+                 pRequest->pContextBlocks[0].iPriority != pState->iExpectedMemoryContextPriority ||
+                 pRequest->pContextBlocks[0].bPinned != pState->bExpectedMemoryContextPinned ) {
+                return XRT_NET_ERROR;
+            }
+        }
+        if ( pState->sExpectedPlannerText &&
+             (!sSystemText ||
+              strstr(sSystemText, pState->sExpectedPlannerText) == NULL) ) {
+            return XRT_NET_ERROR;
+        }
+        if ( pState->sExpectedMemoryText ) {
+            ++pState->iObservedMemoryTurns;
+        }
+        if ( pState->sExpectedPlannerText ) {
+            ++pState->iObservedPlannerTurns;
+        }
     } else if ( pState->sExpectedMemoryText ) {
+        return XRT_NET_ERROR;
+    } else if ( pState->sExpectedPlannerText ) {
         return XRT_NET_ERROR;
     }
 
     iUserIndex = bHasInlineSystemMessage ? 1u : 0u;
     sInstruction = xwork_mock_first_text(&pRequest->pMessages[iUserIndex]);
+    if ( sInstruction &&
+         strstr(sInstruction, "Emit a streaming provider error.") != NULL ) {
+        if ( xwork_mock_emit_model_error_event(pOptions) != XRT_NET_OK ) {
+            return XRT_NET_CANCELLED;
+        }
+        if ( pError ) {
+            pError->eCode = XLLM_ERROR_UPSTREAM_5XX;
+            pError->sMessage = xwork_test_dup_cstr("mock streaming provider error");
+        }
+        return XRT_NET_ERROR;
+    }
 
     if ( pState->iTurnCount == 0 ) {
         pState->bTerminalWriteEof = false;
@@ -1306,6 +1689,14 @@ static int32 xwork_mock_adapter_chat(
                 "\"merge_stderr\":false,\"include_events\":true}"
             );
         } else if ( sInstruction &&
+                    strstr(sInstruction, "Run the local test command through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-process-test",
+                "process.exec",
+                "{\"command\":\"" XWORK_TEST_PROCESS_TEST_COMMAND "\"}"
+            );
+        } else if ( sInstruction &&
                     strstr(sInstruction, "Run the local process in terminal mode through host service.") != NULL ) {
             *ppResponse = xwork_mock_build_tool_call_response(
                 pProfile->sId,
@@ -1361,6 +1752,21 @@ static int32 xwork_mock_adapter_chat(
                 "mock-response-vcs",
                 "vcs.status",
                 "{\"path\":\".\"}"
+            );
+        } else if ( sInstruction &&
+                    strstr(sInstruction, "Edit an open editor buffer through host service.") != NULL ) {
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-editor-open",
+                XWORK_TOOL_EDITOR_OPEN_BUFFER,
+                "{\"path\":\"tests/local_host_editor_orchestrator_smoke.txt\","
+                "\"selection_start\":1,\"selection_end\":5}"
+            );
+        } else if ( sInstruction &&
+                    strstr(sInstruction, "Return a compactable final answer.") != NULL ) {
+            *ppResponse = xwork_mock_build_final_response(
+                pProfile->sId,
+                "Mock compactable final answer."
             );
         } else {
             *ppResponse = xwork_mock_build_tool_call_response(
@@ -1810,6 +2216,11 @@ static int32 xwork_mock_adapter_chat(
                     pProfile->sId,
                     "Host service process non-zero completed."
                 );
+            } else if ( strstr(sToolText, XWORK_TEST_PROCESS_TEST_EXPECTED) != NULL ) {
+                *ppResponse = xwork_mock_build_final_response(
+                    pProfile->sId,
+                    "Host service process test completed."
+                );
             } else if ( strstr(sToolText, "\"cwd\":\"./tests\"") != NULL ) {
                 if ( strstr(sToolText, "tests") == NULL ) {
                     return XRT_NET_ERROR;
@@ -1835,6 +2246,36 @@ static int32 xwork_mock_adapter_chat(
             *ppResponse = xwork_mock_build_final_response(
                 pProfile->sId,
                 "Host service vcs completed."
+            );
+        } else if ( strcmp(sToolId, XWORK_TOOL_EDITOR_OPEN_BUFFER) == 0 ) {
+            if ( strstr(sToolText, "\"ok\":true") == NULL ||
+                 strstr(sToolText, "\"operation\":\"open_buffer\"") == NULL ||
+                 strstr(sToolText, "\"dirty\":false") == NULL ||
+                 strstr(sToolText, "\"selection_start\":1") == NULL ||
+                 strstr(sToolText, "\"selection_end\":5") == NULL ||
+                 strstr(sToolText, "\"text\":\"xwork-editor\"") == NULL ) {
+                return XRT_NET_ERROR;
+            }
+            *ppResponse = xwork_mock_build_tool_call_response(
+                pProfile->sId,
+                "mock-response-editor-apply",
+                XWORK_TOOL_EDITOR_APPLY_EDIT,
+                "{\"path\":\"tests/local_host_editor_orchestrator_smoke.txt\","
+                "\"range_start\":1,\"range_end\":1,\"new_text\":\"-edit\"}"
+            );
+        } else if ( strcmp(sToolId, XWORK_TOOL_EDITOR_APPLY_EDIT) == 0 ) {
+            if ( strstr(sToolText, "\"ok\":true") == NULL ||
+                 strstr(sToolText, "\"operation\":\"apply_edit\"") == NULL ||
+                 strstr(sToolText, "\"dirty\":true") == NULL ||
+                 strstr(sToolText, "\"changed\":true") == NULL ||
+                 strstr(sToolText, "\"selection_start\":1") == NULL ||
+                 strstr(sToolText, "\"selection_end\":6") == NULL ||
+                 strstr(sToolText, "\"text\":\"x-editwork-editor\"") == NULL ) {
+                return XRT_NET_ERROR;
+            }
+            *ppResponse = xwork_mock_build_final_response(
+                pProfile->sId,
+                "Host service editor buffer completed."
             );
         } else {
             return XRT_NET_ERROR;
@@ -1910,9 +2351,62 @@ static bool xwork_mock_model_event(
         return true;
     }
     ++pCtx->iEventCount;
-    if ( pEvent->eType == XLLM_EVENT_TEXT_DELTA ) {
-        ++pCtx->iTextDeltaCount;
-        return !pCtx->bCancelOnTextDelta;
+    switch ( pEvent->eType ) {
+        case XLLM_EVENT_START:
+            ++pCtx->iStartCount;
+            if ( !pEvent->sResponseId || !pEvent->sModel ) {
+                ++pCtx->iUnexpectedPayloadCount;
+            }
+            break;
+        case XLLM_EVENT_OUTPUT_BEGIN:
+            ++pCtx->iOutputBeginCount;
+            break;
+        case XLLM_EVENT_OUTPUT_END:
+            ++pCtx->iOutputEndCount;
+            break;
+        case XLLM_EVENT_END:
+            ++pCtx->iEndCount;
+            break;
+        case XLLM_EVENT_TEXT_DELTA:
+            ++pCtx->iTextDeltaCount;
+            if ( !pEvent->sText || !pEvent->sText[0] ) {
+                ++pCtx->iUnexpectedPayloadCount;
+            }
+            return !pCtx->bCancelOnTextDelta;
+        case XLLM_EVENT_TOOL_CALL_DELTA:
+            ++pCtx->iToolCallDeltaCount;
+            if ( !pEvent->sToolCallId ||
+                 strcmp(pEvent->sToolCallId, "tool-call-1") != 0 ||
+                 !pEvent->sToolId ||
+                 strcmp(pEvent->sToolId, "mock.apply_patch") != 0 ||
+                 !pEvent->sArgumentsDelta ||
+                 strstr(pEvent->sArgumentsDelta, "\"path\":\"README.md\"") == NULL ) {
+                ++pCtx->iUnexpectedPayloadCount;
+            }
+            break;
+        case XLLM_EVENT_TOOL_CALL_READY:
+            ++pCtx->iToolCallReadyCount;
+            if ( !pEvent->sToolCallId ||
+                 strcmp(pEvent->sToolCallId, "tool-call-1") != 0 ||
+                 !pEvent->sToolId ||
+                 strcmp(pEvent->sToolId, "mock.apply_patch") != 0 ||
+                 !pEvent->sArgumentsDelta ||
+                 strstr(pEvent->sArgumentsDelta, "\"path\":\"README.md\"") == NULL ) {
+                ++pCtx->iUnexpectedPayloadCount;
+            }
+            break;
+        case XLLM_EVENT_USAGE:
+            ++pCtx->iUsageCount;
+            break;
+        case XLLM_EVENT_ERROR:
+            ++pCtx->iErrorCount;
+            if ( !pEvent->sText ||
+                 strcmp(pEvent->sText, "mock streaming provider error") != 0 ) {
+                ++pCtx->iUnexpectedPayloadCount;
+            }
+            break;
+        default:
+            break;
     }
     return true;
 }
@@ -1926,6 +2420,7 @@ static xwork_status xwork_mock_tool_exec(
 {
     xwork_mock_tool_exec_ctx *pCtx = (xwork_mock_tool_exec_ctx *)pUserData;
     xwork_patch_artifact_options tArtifactOptions;
+    xwork_output_artifact_options tOutputArtifactOptions;
     xwork_artifact tArtifact;
     xwork_status iStatus;
 
@@ -1939,6 +2434,20 @@ static xwork_status xwork_mock_tool_exec(
 
     if ( pCtx ) {
         ++pCtx->iExecCount;
+        if ( pCtx->iRetryableFailuresRemaining > 0 ) {
+            --pCtx->iRetryableFailuresRemaining;
+            pResult->sOutputText = "{\"ok\":false,\"error_kind\":\"transient\"}";
+            pResult->sVisibleSummary = "mock.apply_patch transient failure.";
+            pResult->bRetryable = true;
+            return XWORK_ERROR_EXTERNAL_FAILURE;
+        }
+        if ( pCtx->iNonRetryableFailuresRemaining > 0 ) {
+            --pCtx->iNonRetryableFailuresRemaining;
+            pResult->sOutputText = "{\"ok\":false,\"error_kind\":\"permanent\"}";
+            pResult->sVisibleSummary = "mock.apply_patch permanent failure.";
+            pResult->bRetryable = false;
+            return XWORK_ERROR_EXTERNAL_FAILURE;
+        }
     }
 
     xwork_patch_artifact_options_init(&tArtifactOptions);
@@ -1951,13 +2460,49 @@ static xwork_status xwork_mock_tool_exec(
         "+++ b/README.md\n"
         "@@\n"
         "+xwork smoke patch\n";
+    tArtifactOptions.sApplyResultJson =
+        "{\"schema\":\"" XWORK_PATCH_APPLY_RESULT_SCHEMA_V1 "\","
+        "\"tool\":\"mock.apply_patch\",\"path\":\"workspace://README.md\","
+        "\"ok\":true,\"dry_run\":false,\"changed\":true,"
+        "\"bytes_before\":0,\"bytes_after\":0,\"error_kind\":\"\",\"error\":\"\"}";
+    tArtifactOptions.sFileSummaryJson =
+        "{\"schema\":\"" XWORK_PATCH_FILE_SUMMARY_SCHEMA_V1 "\","
+        "\"files\":[{\"path\":\"workspace://README.md\","
+        "\"change_kind\":\"modify\",\"hunks\":1,"
+        "\"added_lines\":1,\"deleted_lines\":0}]}";
     iStatus = xwork_run_emit_patch_artifact(pRun, &tArtifactOptions, &tArtifact);
     if ( iStatus == XWORK_OK ) {
         xwork_test_assert_readme_patch_stats(&tArtifact);
+        xwork_test_assert_patch_apply_schema(&tArtifact);
     }
     xwork_artifact_reset(&tArtifact);
     if ( iStatus != XWORK_OK ) {
         return iStatus;
+    }
+
+    if ( pCtx && pCtx->bEmitOutputArtifact ) {
+        xwork_output_artifact_options_init(&tOutputArtifactOptions);
+        xwork_artifact_init(&tArtifact);
+        tOutputArtifactOptions.sName = "mock-output.txt";
+        tOutputArtifactOptions.sMimeType = "text/plain";
+        tOutputArtifactOptions.sStorageRef = "workspace://mock-output.txt";
+        tOutputArtifactOptions.sSummary = pCtx->sOutputArtifactText ?
+            pCtx->sOutputArtifactText :
+            "Mock output artifact captured.";
+        tOutputArtifactOptions.eOutputClass = pCtx->eOutputArtifactClass;
+        tOutputArtifactOptions.sOutputRole = "test-output";
+        tOutputArtifactOptions.sOutputText = pCtx->sOutputArtifactText ?
+            pCtx->sOutputArtifactText :
+            "xwork-memory-ingest-output-safe";
+        iStatus = xwork_run_emit_output_artifact(
+            pRun,
+            &tOutputArtifactOptions,
+            &tArtifact
+        );
+        xwork_artifact_reset(&tArtifact);
+        if ( iStatus != XWORK_OK ) {
+            return iStatus;
+        }
     }
 
     pResult->sOutputText = "{\"ok\":true,\"changed_files\":[\"README.md\"]}";
@@ -2017,6 +2562,42 @@ static xwork_status xwork_mock_slow_tool_exec_ex(
     return xwork_mock_tool_exec(pRun, pCall, pResult, pUserData);
 }
 
+static uint32 xwork_async_observer_thread(ptr pParam)
+{
+    xwork_async_observer_ctx *pCtx = (xwork_async_observer_ctx *)pParam;
+    xwork_status eRunStatus = XWORK_OK;
+    bool bCompleted = false;
+    int i;
+
+    if ( !pCtx || !pCtx->pAsync ) {
+        return 1u;
+    }
+
+    for ( i = 0; i < 8; ++i ) {
+        pCtx->eLastStatus = xwork_run_async_get_status(
+            pCtx->pAsync,
+            &eRunStatus,
+            &bCompleted
+        );
+        pCtx->eLastRunStatus = eRunStatus;
+        pCtx->bLastCompleted = bCompleted;
+        ++pCtx->iPollCount;
+
+        if ( pCtx->eLastStatus != XWORK_OK ) {
+            return 2u;
+        }
+        if ( bCompleted ) {
+            ++pCtx->iCompletedCount;
+            return 0u;
+        }
+
+        ++pCtx->iRunningCount;
+        xrtSleep(1u);
+    }
+
+    return 0u;
+}
+
 static xwork_status xwork_mock_host_invoke(
     const char *sOperationId,
     const char *sRequestJson,
@@ -2062,6 +2643,7 @@ int main(void)
     xllm_runtime *pLlmRuntime = NULL;
     xllm_memory *pWorkspaceMemory = NULL;
     xllm_memory *pFileWorkspaceMemory = NULL;
+    xllm_memory *pPolicyWorkspaceMemory = NULL;
     xllm_adapter tAdapter;
     xllm_profile tProfile;
     xwork_runtime_options tRuntimeOptions;
@@ -2094,6 +2676,7 @@ int main(void)
     xwork_workspace *pProfileBootstrapWorkspace = NULL;
     xwork_workspace *pWorkspace = NULL;
     xwork_workspace *pMemoryWorkspace = NULL;
+    xwork_workspace *pMemoryPolicyWorkspace = NULL;
     xwork_workspace *pFileWorkspace = NULL;
     xwork_workspace *pFileRecoverWorkspace = NULL;
     xwork_workspace *pLocalHostWorkspace = NULL;
@@ -2106,6 +2689,7 @@ int main(void)
     xwork_run *pRun = NULL;
     xwork_run *pInterruptedRun = NULL;
     xwork_run *pStreamRun = NULL;
+    xwork_run *pStreamErrorRun = NULL;
     xwork_run *pStreamCancelledRun = NULL;
     xwork_run *pAsyncRun = NULL;
     xwork_run_async *pAsync = NULL;
@@ -2134,6 +2718,8 @@ int main(void)
     xwork_artifact tLoadedArtifact;
     xwork_run_summary tLoadedSummary;
     xwork_run_summary_list tPersistedRunSummaries;
+    xwork_run_step_list tRunSteps;
+    xwork_run_step_query tRunStepQuery;
     xwork_artifact_summary_list tPersistedArtifactSummaries;
     xwork_artifact_summary_query tArtifactSummaryQuery;
     xwork_workspace_memory_sync_summary tMemorySyncSummary;
@@ -2160,11 +2746,20 @@ int main(void)
     char *sFirstArtifactId = NULL;
     bool bTerminalOutputCaptured = false;
     bool bAsyncCompleted = false;
+    xthread aAsyncObserverThreads[4] = { NULL, NULL, NULL, NULL };
+    xwork_async_observer_ctx aAsyncObserverCtx[4];
     size_t iSavedMaxProcessInputBytes = 0u;
     size_t iSavedMaxProcessEnvEntries = 0u;
+    size_t iStressIndex;
+    size_t iAsyncObserverIndex;
     int iWaitPoll;
     char sFilePersistenceRoot[256];
+    char sPersistencePath[512];
     char sTerminalStorageRefPrefix[256];
+    char sStressArtifactName[64];
+    char sStressArtifactStorageRef[96];
+    char sStressArtifactSummary[96];
+    char sStressArtifactText[256];
     const char *asWorkspaceIds[1];
     const char *sLocalHostMissingPath = "tests/local_host_missing_smoke.txt";
     const char *sLocalHostWritePath = "tests/local_host_write_smoke.txt";
@@ -2174,6 +2769,21 @@ int main(void)
         "tests/local_host_nested/create_dirs/local_host_create_dirs_smoke.txt";
     const char *sLocalHostCreateDirsDir = "tests/local_host_nested/create_dirs";
     const char *sLocalHostCreateDirsParentDir = "tests/local_host_nested";
+    const char *sLocalHostMkdirDir = "tests/local_host_mkdir_smoke";
+    const char *sLocalHostMkdirNestedDir = "tests/local_host_mkdir_nested/a/b";
+    const char *sLocalHostMkdirNestedParentDir = "tests/local_host_mkdir_nested/a";
+    const char *sLocalHostMkdirNestedRootDir = "tests/local_host_mkdir_nested";
+    const char *sLocalHostMoveSourcePath = "tests/local_host_move_source_smoke.txt";
+    const char *sLocalHostMoveTargetPath = "tests/local_host_move_target_smoke.txt";
+    const char *sLocalHostDeleteFilePath = "tests/local_host_delete_file_smoke.txt";
+    const char *sLocalHostDeleteDir = "tests/local_host_delete_dir_smoke";
+    const char *sLocalHostDeleteDirFilePath =
+        "tests/local_host_delete_dir_smoke/local_host_delete_child.txt";
+    const char *sLocalHostPatchPath = "tests/local_host_apply_patch_smoke.txt";
+    const char *sLocalHostEditorBufferPath =
+        "tests/local_host_editor_buffer_smoke.txt";
+    const char *sLocalHostEditorOrchestratorPath =
+        "tests/local_host_editor_orchestrator_smoke.txt";
     const char *sLocalHostOrchestratorWritePath =
         "tests/local_host_orchestrator_write_smoke.txt";
     const char *sLocalHostOrchestratorAppendPath =
@@ -2186,6 +2796,14 @@ int main(void)
         "tests/local_host_nested/orchestrator";
     const char *sMemorySyncWorkspaceDir = "tests/memory_sync_workspace";
     const char *sMemorySyncWorkspaceFile = "tests/memory_sync_workspace/sync_note.md";
+    const char *sMemoryPolicyWorkspaceDir = "tests/memory_policy_workspace";
+    const char *sMemoryPolicyKeepFile = "tests/memory_policy_workspace/keep.md";
+    const char *sMemoryPolicyTmpFile = "tests/memory_policy_workspace/skip.tmp";
+    const char *sMemoryPolicyIgnoredExtFile =
+        "tests/memory_policy_workspace/ignored.secret";
+    const char *sMemoryPolicyIgnoredNameFile =
+        "tests/memory_policy_workspace/ignored-name.md";
+    const char *sMemoryPolicyLargeFile = "tests/memory_policy_workspace/large.md";
 
     memset(&tAdapterCtx, 0, sizeof(tAdapterCtx));
     memset(&tToolExecCtx, 0, sizeof(tToolExecCtx));
@@ -2210,6 +2828,8 @@ int main(void)
     xwork_artifact_init(&tLoadedArtifact);
     xwork_run_summary_init(&tLoadedSummary);
     xwork_run_summary_list_init(&tPersistedRunSummaries);
+    xwork_run_step_list_init(&tRunSteps);
+    xwork_run_step_query_init(&tRunStepQuery);
     xwork_artifact_summary_list_init(&tPersistedArtifactSummaries);
     xwork_artifact_summary_query_init(&tArtifactSummaryQuery);
     xwork_workspace_memory_sync_summary_init(&tMemorySyncSummary);
@@ -2227,14 +2847,37 @@ int main(void)
     (void)remove(sLocalHostAppendPath);
     (void)remove(sLocalHostCreatePath);
     (void)remove(sLocalHostCreateDirsPath);
+    (void)remove(sLocalHostMoveSourcePath);
+    (void)remove(sLocalHostMoveTargetPath);
+    (void)remove(sLocalHostDeleteFilePath);
+    (void)remove(sLocalHostDeleteDirFilePath);
+    (void)remove(sLocalHostPatchPath);
+    (void)remove(sLocalHostEditorBufferPath);
+    (void)remove(sLocalHostEditorOrchestratorPath);
     (void)remove(sLocalHostOrchestratorWritePath);
     (void)remove(sLocalHostOrchestratorAppendPath);
     (void)remove(sLocalHostOrchestratorCreatePath);
     (void)remove(sLocalHostOrchestratorCreateDirsPath);
     (void)remove(sMemorySyncWorkspaceFile);
+    (void)remove(sMemoryPolicyKeepFile);
+    (void)remove(sMemoryPolicyTmpFile);
+    (void)remove(sMemoryPolicyIgnoredExtFile);
+    (void)remove(sMemoryPolicyIgnoredNameFile);
+    (void)remove(sMemoryPolicyLargeFile);
+    (void)remove(sMemoryPolicyKeepFile);
+    (void)remove(sMemoryPolicyTmpFile);
+    (void)remove(sMemoryPolicyIgnoredExtFile);
+    (void)remove(sMemoryPolicyIgnoredNameFile);
+    (void)remove(sMemoryPolicyLargeFile);
     xwork_test_remove_empty_directory(sLocalHostCreateDirsDir);
+    xwork_test_remove_empty_directory(sLocalHostMkdirDir);
+    xwork_test_remove_empty_directory(sLocalHostMkdirNestedDir);
+    xwork_test_remove_empty_directory(sLocalHostMkdirNestedParentDir);
+    xwork_test_remove_empty_directory(sLocalHostMkdirNestedRootDir);
+    xwork_test_remove_empty_directory(sLocalHostDeleteDir);
     xwork_test_remove_empty_directory(sLocalHostOrchestratorCreateDirsDir);
     xwork_test_remove_empty_directory(sLocalHostCreateDirsParentDir);
+    xwork_test_remove_empty_directory(sMemoryPolicyWorkspaceDir);
     xwork_test_remove_empty_directory(sMemorySyncWorkspaceDir);
 
     assert(XWORK_TEST_MKDIR(sMemorySyncWorkspaceDir) == 0);
@@ -2250,6 +2893,58 @@ int main(void)
         );
         assert(fclose(pSyncFile) == 0);
     }
+    assert(XWORK_TEST_MKDIR(sMemoryPolicyWorkspaceDir) == 0);
+    xwork_test_write_text_file(
+        sMemoryPolicyKeepFile,
+        "xwork-memory-policy-keep: include this markdown file.\n"
+    );
+    xwork_test_write_text_file(
+        sMemoryPolicyTmpFile,
+        "xwork-memory-policy-tmp: this tmp file must stay out.\n"
+    );
+    xwork_test_write_text_file(
+        sMemoryPolicyIgnoredExtFile,
+        "xwork-memory-policy-secret: this secret file must stay out.\n"
+    );
+    xwork_test_write_text_file(
+        sMemoryPolicyIgnoredNameFile,
+        "xwork-memory-policy-ignored-name: this named file must stay out.\n"
+    );
+    xwork_test_write_text_file(
+        sMemoryPolicyLargeFile,
+        "xwork-memory-policy-large: this file is intentionally above the byte limit.\n"
+    );
+
+    assert(strcmp(xwork_status_cstr(XWORK_OK), "XWORK_OK") == 0);
+    assert(
+        strcmp(
+            xwork_status_cstr(XWORK_ERROR_INVALID_ARGUMENT),
+            "XWORK_ERROR_INVALID_ARGUMENT"
+        ) == 0
+    );
+    assert(strcmp(xwork_status_cstr(XWORK_ERROR_NO_MEMORY), "XWORK_ERROR_NO_MEMORY") == 0);
+    assert(strcmp(xwork_status_cstr(XWORK_ERROR_NOT_FOUND), "XWORK_ERROR_NOT_FOUND") == 0);
+    assert(
+        strcmp(
+            xwork_status_cstr(XWORK_ERROR_ALREADY_EXISTS),
+            "XWORK_ERROR_ALREADY_EXISTS"
+        ) == 0
+    );
+    assert(
+        strcmp(
+            xwork_status_cstr(XWORK_ERROR_INVALID_STATE),
+            "XWORK_ERROR_INVALID_STATE"
+        ) == 0
+    );
+    assert(
+        strcmp(
+            xwork_status_cstr(XWORK_ERROR_EXTERNAL_FAILURE),
+            "XWORK_ERROR_EXTERNAL_FAILURE"
+        ) == 0
+    );
+    assert(strcmp(xwork_status_cstr(XWORK_ERROR_UNSUPPORTED), "XWORK_ERROR_UNSUPPORTED") == 0);
+    assert(strcmp(xwork_status_cstr(XWORK_ERROR_CANCELLED), "XWORK_ERROR_CANCELLED") == 0);
+    assert(strcmp(xwork_status_cstr((xwork_status)999), "XWORK_STATUS_UNKNOWN") == 0);
 
     xllm_runtime_options_init(&tLlmRuntimeOptions);
     assert(xllm_runtime_create(&tLlmRuntimeOptions, &pLlmRuntime) == XRT_NET_OK);
@@ -2275,6 +2970,17 @@ int main(void)
             &pFileWorkspaceMemory
         ) == XRT_NET_OK
     );
+    assert(
+        xwork_test_create_memory(
+            pLlmRuntime,
+            "workspace-memory-policy",
+            "policy-bootstrap",
+            "Policy Bootstrap",
+            "workspace://policy-bootstrap.md",
+            "workspace-memory:policy-bootstrap",
+            &pPolicyWorkspaceMemory
+        ) == XRT_NET_OK
+    );
 
     memset(&tAdapter, 0, sizeof(tAdapter));
     tAdapter.sName = "mock";
@@ -2295,6 +3001,8 @@ int main(void)
         XLLM_CAP_TEXT_OUT |
         XLLM_CAP_TOOL_CALL_OUT |
         XLLM_CAP_TOOL_RESULT_IN;
+    tProfile.tModels.tText.tCaps.uMaxInputTokens = 128u;
+    tProfile.tModels.tText.tCaps.uRecommendedOutputReserve = 16u;
     assert(xllm_register_profile(pLlmRuntime, &tProfile) == XRT_NET_OK);
 
     xwork_host_services_init(&tHostServices);
@@ -2303,6 +3011,7 @@ int main(void)
     xwork_persistence_backend_init(&tPersistenceBackend);
     tPersistenceBackend.pfnStoreEvent = xwork_mock_persistence_store_event;
     tPersistenceBackend.pfnStoreCheckpoint = xwork_mock_persistence_store_checkpoint;
+    tPersistenceBackend.pfnStoreRunSnapshot = xwork_mock_persistence_store_run_snapshot;
     tPersistenceBackend.pfnStoreArtifact = xwork_mock_persistence_store_artifact;
     tPersistenceBackend.pfnLoadRunSnapshot = xwork_mock_persistence_load_run_snapshot;
     tPersistenceBackend.pUserData = &tPersistenceCtx;
@@ -2319,6 +3028,7 @@ int main(void)
     assert(xwork_runtime_create(&tRuntimeOptions, &pRuntime) == XWORK_OK);
     assert(xwork_runtime_get_host_services(pRuntime) != NULL);
     assert(xwork_runtime_get_host_services(pRuntime)->tFilesystem.pfnInvoke == xwork_mock_host_invoke);
+    assert(xwork_runtime_get_host_services(pRuntime)->tNetwork.pfnInvoke == NULL);
     assert(xwork_runtime_get_persistence_backend(pRuntime) != NULL);
     assert(
         xwork_runtime_get_persistence_backend(pRuntime)->pfnStoreCheckpoint ==
@@ -2349,11 +3059,109 @@ int main(void)
     assert(tApprovalDecision.bAutoApproved);
     assert(tApprovalDecision.eRiskLevel == XWORK_RISK_MEDIUM);
 
+    xwork_approval_eval_input_init(&tApprovalInput);
+    tApprovalInput.eAutonomy = XWORK_AUTONOMY_AUTO;
+    tApprovalInput.eApprovalMode = XWORK_APPROVAL_ALWAYS;
+    tApprovalInput.eSideEffect = XWORK_SIDE_EFFECT_PROCESS_EXEC;
+    tApprovalInput.bAutoApproveRequested = true;
+    tApprovalInput.bHasRiskLevelOverride = true;
+    tApprovalInput.eRiskLevelOverride = XWORK_RISK_CRITICAL;
+    tApprovalInput.sRiskScopeOverride = "destructive_command";
+    tApprovalInput.sRiskReasonOverride = "Tool arguments are classified as destructive.";
+    tPolicyCopy.eAutoApproveRiskLimit = XWORK_RISK_HIGH;
+    xwork_approval_decision_init(&tApprovalDecision);
+    assert(xwork_policy_evaluate_approval(&tPolicyCopy, &tApprovalInput, &tApprovalDecision) == XWORK_OK);
+    assert(tApprovalDecision.bRequiresApproval);
+    assert(!tApprovalDecision.bAutoApproved);
+    assert(tApprovalDecision.eRiskLevel == XWORK_RISK_CRITICAL);
+    assert(strcmp(tApprovalDecision.sScope, "destructive_command") == 0);
+    assert(strcmp(tApprovalDecision.sReason, "Tool arguments are classified as destructive.") == 0);
+
+    xwork_approval_eval_input_init(&tApprovalInput);
+    tApprovalInput.eAutonomy = XWORK_AUTONOMY_AUTO;
+    tApprovalInput.eApprovalMode = XWORK_APPROVAL_ALWAYS;
+    tApprovalInput.eSideEffect = XWORK_SIDE_EFFECT_WORKSPACE_WRITE;
+    tApprovalInput.bAutoApproveRequested = true;
+    tApprovalInput.bHasRiskLevelOverride = true;
+    tApprovalInput.eRiskLevelOverride = XWORK_RISK_CRITICAL;
+    tApprovalInput.sRiskScopeOverride = "destructive_filesystem";
+    tApprovalInput.sRiskReasonOverride = "Filesystem arguments are classified as destructive.";
+    xwork_approval_decision_init(&tApprovalDecision);
+    assert(xwork_policy_evaluate_approval(&tPolicyCopy, &tApprovalInput, &tApprovalDecision) == XWORK_OK);
+    assert(tApprovalDecision.bRequiresApproval);
+    assert(!tApprovalDecision.bAutoApproved);
+    assert(tApprovalDecision.eRiskLevel == XWORK_RISK_CRITICAL);
+    assert(strcmp(tApprovalDecision.sScope, "destructive_filesystem") == 0);
+    assert(strcmp(tApprovalDecision.sReason, "Filesystem arguments are classified as destructive.") == 0);
+
+    assert(
+        xwork_runtime_invoke_host_service(
+            pRuntime,
+            XWORK_HOST_NETWORK,
+            "fetch",
+            "{\"url\":\"https://example.com\"}",
+            &tHostResult
+        ) == XWORK_ERROR_UNSUPPORTED
+    );
+
+    {
+        const char *psNetworkAllowHosts[] = {"api.example.com"};
+        const char *psNetworkDenyHosts[] = {"blocked.example.com"};
+        xwork_policy_options tNetworkPolicy;
+        xwork_network_policy_eval_input tNetworkInput;
+        xwork_network_policy_decision tNetworkDecision;
+
+        xwork_policy_options_init(&tNetworkPolicy);
+        tNetworkPolicy.psNetworkAllowHostPatterns = psNetworkAllowHosts;
+        tNetworkPolicy.iNetworkAllowHostPatternCount =
+            sizeof(psNetworkAllowHosts) / sizeof(psNetworkAllowHosts[0]);
+        tNetworkPolicy.psNetworkDenyHostPatterns = psNetworkDenyHosts;
+        tNetworkPolicy.iNetworkDenyHostPatternCount =
+            sizeof(psNetworkDenyHosts) / sizeof(psNetworkDenyHosts[0]);
+        tNetworkPolicy.bDenyNetworkByDefault = true;
+
+        xwork_network_policy_eval_input_init(&tNetworkInput);
+        tNetworkInput.sHost = "api.example.com";
+        xwork_network_policy_decision_init(&tNetworkDecision);
+        assert(
+            xwork_policy_evaluate_network_access(
+                &tNetworkPolicy,
+                &tNetworkInput,
+                &tNetworkDecision
+            ) == XWORK_OK
+        );
+        assert(tNetworkDecision.bAllowed);
+        assert(tNetworkDecision.eRiskLevel == XWORK_RISK_HIGH);
+        assert(strcmp(tNetworkDecision.sScope, "network_access") == 0);
+
+        tNetworkInput.sHost = "blocked.example.com";
+        assert(
+            xwork_policy_evaluate_network_access(
+                &tNetworkPolicy,
+                &tNetworkInput,
+                &tNetworkDecision
+            ) == XWORK_OK
+        );
+        assert(!tNetworkDecision.bAllowed);
+        assert(strcmp(tNetworkDecision.sReason, "Network host matches denied host patterns.") == 0);
+
+        tNetworkInput.sHost = "other.example.com";
+        assert(
+            xwork_policy_evaluate_network_access(
+                &tNetworkPolicy,
+                &tNetworkInput,
+                &tNetworkDecision
+            ) == XWORK_OK
+        );
+        assert(!tNetworkDecision.bAllowed);
+    }
+
     xwork_profile_init(&tInteractiveProfile);
     assert(xwork_profile_get_builtin(XWORK_PROFILE_XCODE, &tInteractiveProfile) == XWORK_OK);
     assert(strcmp(tInteractiveProfile.sProfileId, XWORK_PROFILE_XCODE) == 0);
     assert(tInteractiveProfile.eAutonomy == XWORK_AUTONOMY_SEMI_AUTO);
     assert(tInteractiveProfile.tPolicy.eAutoApproveRiskLimit == XWORK_RISK_LOW);
+    assert(tInteractiveProfile.tPolicy.bDenyNetworkByDefault);
     assert(strcmp(tInteractiveProfile.sDefaultLlmProfileId, XWORK_PROFILE_XCODE) == 0);
     assert(strcmp(tInteractiveProfile.sDefaultSessionProfileId, XWORK_PROFILE_XCODE) == 0);
     assert(tInteractiveProfile.tSessionPolicy.bEnableAutoCompact);
@@ -2362,6 +3170,22 @@ int main(void)
     assert(tInteractiveProfile.iDefaultMaxTurns == 8u);
     assert(!tInteractiveProfile.bDefaultAutoApprove);
     assert(!tInteractiveProfile.bEnableWorkspaceMemory);
+    assert(tInteractiveProfile.ePlannerMode == XWORK_PLANNER_OFF);
+    xwork_approval_eval_input_init(&tApprovalInput);
+    tApprovalInput.eAutonomy = tInteractiveProfile.eAutonomy;
+    tApprovalInput.eApprovalMode = XWORK_APPROVAL_DEFAULT;
+    tApprovalInput.eSideEffect = XWORK_SIDE_EFFECT_PROCESS_EXEC;
+    tApprovalInput.bAutoApproveRequested = tInteractiveProfile.bDefaultAutoApprove;
+    assert(
+        xwork_policy_evaluate_approval(
+            &tInteractiveProfile.tPolicy,
+            &tApprovalInput,
+            &tApprovalDecision
+        ) == XWORK_OK
+    );
+    assert(tApprovalDecision.bRequiresApproval);
+    assert(!tApprovalDecision.bAutoApproved);
+    assert(tApprovalDecision.eRiskLevel == XWORK_RISK_HIGH);
 
     xwork_runtime_options_init(&tProfileRuntimeOptions);
     assert(xwork_profile_apply_runtime_options(&tInteractiveProfile, &tProfileRuntimeOptions) == XWORK_OK);
@@ -2426,6 +3250,7 @@ int main(void)
     );
     assert(tProfileExecOptions.iMaxTurns == 8u);
     assert(!tProfileExecOptions.bAutoApprove);
+    assert(tProfileExecOptions.ePlannerMode == XWORK_PLANNER_OFF);
     xwork_xllm_profile_options_init(&tProfileLlmOptions);
     xwork_xllm_bootstrap_options_init(&tProfileBootstrapOptions);
     assert(
@@ -2480,6 +3305,7 @@ int main(void)
     assert(strcmp(tAutonomousProfile.sProfileId, XWORK_PROFILE_XCLAW) == 0);
     assert(tAutonomousProfile.eAutonomy == XWORK_AUTONOMY_AUTO);
     assert(tAutonomousProfile.tPolicy.eAutoApproveRiskLimit == XWORK_RISK_HIGH);
+    assert(tAutonomousProfile.tPolicy.bDenyNetworkByDefault);
     assert(strcmp(tAutonomousProfile.sDefaultLlmProfileId, XWORK_PROFILE_XCLAW) == 0);
     assert(strcmp(tAutonomousProfile.sDefaultSessionProfileId, XWORK_PROFILE_XCLAW) == 0);
     assert(tAutonomousProfile.tSessionPolicy.bEnableAutoCompact);
@@ -2488,6 +3314,22 @@ int main(void)
     assert(tAutonomousProfile.iDefaultMaxTurns == 32u);
     assert(tAutonomousProfile.bDefaultAutoApprove);
     assert(tAutonomousProfile.bEnableWorkspaceMemory);
+    assert(tAutonomousProfile.ePlannerMode == XWORK_PLANNER_BOUNDARY);
+    xwork_approval_eval_input_init(&tApprovalInput);
+    tApprovalInput.eAutonomy = tAutonomousProfile.eAutonomy;
+    tApprovalInput.eApprovalMode = XWORK_APPROVAL_DEFAULT;
+    tApprovalInput.eSideEffect = XWORK_SIDE_EFFECT_PROCESS_EXEC;
+    tApprovalInput.bAutoApproveRequested = tAutonomousProfile.bDefaultAutoApprove;
+    assert(
+        xwork_policy_evaluate_approval(
+            &tAutonomousProfile.tPolicy,
+            &tApprovalInput,
+            &tApprovalDecision
+        ) == XWORK_OK
+    );
+    assert(!tApprovalDecision.bRequiresApproval);
+    assert(!tApprovalDecision.bAutoApproved);
+    assert(tApprovalDecision.eRiskLevel == XWORK_RISK_HIGH);
     xwork_runtime_options_init(&tProfileRuntimeOptions);
     assert(xwork_profile_apply_runtime_options(&tAutonomousProfile, &tProfileRuntimeOptions) == XWORK_OK);
     assert(tProfileRuntimeOptions.tPolicy.eAutoApproveRiskLimit == XWORK_RISK_HIGH);
@@ -2524,6 +3366,7 @@ int main(void)
     );
     assert(tProfileExecOptions.iMaxTurns == 32u);
     assert(tProfileExecOptions.bAutoApprove);
+    assert(tProfileExecOptions.ePlannerMode == XWORK_PLANNER_BOUNDARY);
     assert(xwork_profile_get_builtin("missing-profile", &tInteractiveProfile) == XWORK_ERROR_NOT_FOUND);
 
     xwork_workspace_options_init(&tWorkspaceOptions);
@@ -2576,6 +3419,133 @@ int main(void)
         xllm_memory_search_result_reset(&tMemorySearchResult);
         xllm_error_free(&tMemoryError);
     }
+
+    xwork_workspace_options_init(&tWorkspaceOptions);
+    tWorkspaceOptions.sWorkspaceId = "memory-policy";
+    tWorkspaceOptions.sRootPath = sMemoryPolicyWorkspaceDir;
+    tWorkspaceOptions.bEnableMemory = true;
+    tWorkspaceOptions.pMemory = pPolicyWorkspaceMemory;
+    tWorkspaceOptions.sMemorySyncAllowedExtensions = ".md,.secret";
+    tWorkspaceOptions.sMemorySyncIgnoredExtensions = ".secret";
+    tWorkspaceOptions.sMemorySyncIgnoredPathPatterns = "ignored-name";
+    tWorkspaceOptions.sMemorySyncIgnoredFiles = "ignored-name.md";
+    tWorkspaceOptions.iMemorySyncMaxFileBytes = 64u;
+    assert(
+        xwork_runtime_add_workspace(
+            pRuntime,
+            &tWorkspaceOptions,
+            &pMemoryPolicyWorkspace
+        ) == XWORK_OK
+    );
+    assert(xwork_workspace_sync_memory(pMemoryPolicyWorkspace, &tMemorySyncSummary) == XWORK_OK);
+    assert(tMemorySyncSummary.iVisitedFileCount >= 5u);
+    assert(tMemorySyncSummary.iIngestedFileCount == 1u);
+    assert(tMemorySyncSummary.iSkippedFileCount >= 4u);
+    assert(tMemorySyncSummary.iFailedFileCount == 0u);
+    {
+        xllm_memory_search_options tMemorySearchOptions;
+        xllm_memory_search_result tMemorySearchResult;
+        xllm_error tMemoryError;
+        size_t i;
+        bool bFoundExcludedText;
+
+        xllm_memory_search_options_init(&tMemorySearchOptions);
+        memset(&tMemorySearchResult, 0, sizeof(tMemorySearchResult));
+        xllm_error_init(&tMemoryError);
+
+        tMemorySearchOptions.sQuery = "xwork-memory-policy-keep";
+        assert(
+            xllm_memory_search(
+                pPolicyWorkspaceMemory,
+                &tMemorySearchOptions,
+                &tMemorySearchResult,
+                &tMemoryError
+            ) == XRT_NET_OK
+        );
+        assert(tMemorySearchResult.iHitCount > 0u);
+        xllm_memory_search_result_reset(&tMemorySearchResult);
+
+        tMemorySearchOptions.sQuery = "xwork-memory-policy-tmp";
+        assert(
+            xllm_memory_search(
+                pPolicyWorkspaceMemory,
+                &tMemorySearchOptions,
+                &tMemorySearchResult,
+                &tMemoryError
+            ) == XRT_NET_OK
+        );
+        bFoundExcludedText = false;
+        for ( i = 0u; i < tMemorySearchResult.iHitCount; ++i ) {
+            if ( tMemorySearchResult.pHits[i].sText &&
+                 strstr(tMemorySearchResult.pHits[i].sText, "xwork-memory-policy-tmp") ) {
+                bFoundExcludedText = true;
+            }
+        }
+        assert(!bFoundExcludedText);
+        xllm_memory_search_result_reset(&tMemorySearchResult);
+
+        tMemorySearchOptions.sQuery = "xwork-memory-policy-secret";
+        assert(
+            xllm_memory_search(
+                pPolicyWorkspaceMemory,
+                &tMemorySearchOptions,
+                &tMemorySearchResult,
+                &tMemoryError
+            ) == XRT_NET_OK
+        );
+        bFoundExcludedText = false;
+        for ( i = 0u; i < tMemorySearchResult.iHitCount; ++i ) {
+            if ( tMemorySearchResult.pHits[i].sText &&
+                 strstr(tMemorySearchResult.pHits[i].sText, "xwork-memory-policy-secret") ) {
+                bFoundExcludedText = true;
+            }
+        }
+        assert(!bFoundExcludedText);
+        xllm_memory_search_result_reset(&tMemorySearchResult);
+
+        tMemorySearchOptions.sQuery = "xwork-memory-policy-ignored-name";
+        assert(
+            xllm_memory_search(
+                pPolicyWorkspaceMemory,
+                &tMemorySearchOptions,
+                &tMemorySearchResult,
+                &tMemoryError
+            ) == XRT_NET_OK
+        );
+        bFoundExcludedText = false;
+        for ( i = 0u; i < tMemorySearchResult.iHitCount; ++i ) {
+            if ( tMemorySearchResult.pHits[i].sText &&
+                 strstr(
+                     tMemorySearchResult.pHits[i].sText,
+                     "xwork-memory-policy-ignored-name"
+                 ) ) {
+                bFoundExcludedText = true;
+            }
+        }
+        assert(!bFoundExcludedText);
+        xllm_memory_search_result_reset(&tMemorySearchResult);
+
+        tMemorySearchOptions.sQuery = "xwork-memory-policy-large";
+        assert(
+            xllm_memory_search(
+                pPolicyWorkspaceMemory,
+                &tMemorySearchOptions,
+                &tMemorySearchResult,
+                &tMemoryError
+            ) == XRT_NET_OK
+        );
+        bFoundExcludedText = false;
+        for ( i = 0u; i < tMemorySearchResult.iHitCount; ++i ) {
+            if ( tMemorySearchResult.pHits[i].sText &&
+                 strstr(tMemorySearchResult.pHits[i].sText, "xwork-memory-policy-large") ) {
+                bFoundExcludedText = true;
+            }
+        }
+        assert(!bFoundExcludedText);
+        xllm_memory_search_result_reset(&tMemorySearchResult);
+        xllm_error_free(&tMemoryError);
+    }
+
     {
         FILE *pSyncFile = fopen(sMemorySyncWorkspaceFile, "wb");
 
@@ -2641,6 +3611,56 @@ int main(void)
     assert(pBuiltinToolDef->eHostService == XWORK_HOST_FILESYSTEM);
     assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_FILESYSTEM_WRITE_TEXT) == 0);
     assert(pBuiltinToolDef->eSideEffect == XWORK_SIDE_EFFECT_WORKSPACE_WRITE);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_FILESYSTEM_LIST);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_FILESYSTEM);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_FILESYSTEM_LIST) == 0);
+    assert(pBuiltinToolDef->eSideEffect == XWORK_SIDE_EFFECT_READ_ONLY);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_FILESYSTEM_STAT);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_FILESYSTEM);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_FILESYSTEM_STAT) == 0);
+    assert(pBuiltinToolDef->eSideEffect == XWORK_SIDE_EFFECT_READ_ONLY);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_FILESYSTEM_GLOB);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_FILESYSTEM);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_FILESYSTEM_GLOB) == 0);
+    assert(pBuiltinToolDef->eSideEffect == XWORK_SIDE_EFFECT_READ_ONLY);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_FILESYSTEM_MKDIR);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_FILESYSTEM);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_FILESYSTEM_MKDIR) == 0);
+    assert(pBuiltinToolDef->eSideEffect == XWORK_SIDE_EFFECT_WORKSPACE_WRITE);
+    assert(pBuiltinToolDef->eApprovalMode == XWORK_APPROVAL_ALWAYS);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_FILESYSTEM_MOVE);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_FILESYSTEM);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_FILESYSTEM_MOVE) == 0);
+    assert(pBuiltinToolDef->eSideEffect == XWORK_SIDE_EFFECT_WORKSPACE_WRITE);
+    assert(pBuiltinToolDef->eApprovalMode == XWORK_APPROVAL_ALWAYS);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_FILESYSTEM_DELETE);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_FILESYSTEM);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_FILESYSTEM_DELETE) == 0);
+    assert(pBuiltinToolDef->eSideEffect == XWORK_SIDE_EFFECT_WORKSPACE_WRITE);
+    assert(pBuiltinToolDef->eApprovalMode == XWORK_APPROVAL_ALWAYS);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_FILESYSTEM_APPLY_PATCH);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_FILESYSTEM);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_FILESYSTEM_APPLY_PATCH) == 0);
+    assert(pBuiltinToolDef->eSideEffect == XWORK_SIDE_EFFECT_WORKSPACE_WRITE);
+    assert(pBuiltinToolDef->eApprovalMode == XWORK_APPROVAL_ALWAYS);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_EDITOR_OPEN_BUFFER);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_EDITOR);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_EDITOR_OPEN_BUFFER) == 0);
+    assert(pBuiltinToolDef->eSideEffect == XWORK_SIDE_EFFECT_READ_ONLY);
+    pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_EDITOR_APPLY_EDIT);
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_EDITOR);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_EDITOR_APPLY_EDIT) == 0);
+    assert(pBuiltinToolDef->eSideEffect == XWORK_SIDE_EFFECT_WORKSPACE_WRITE);
+    assert(pBuiltinToolDef->eApprovalMode == XWORK_APPROVAL_ALWAYS);
     pBuiltinToolDef = xwork_get_builtin_tool_def(XWORK_TOOL_PROCESS_EXEC);
     assert(pBuiltinToolDef != NULL);
     assert(pBuiltinToolDef->eSideEffect == XWORK_SIDE_EFFECT_PROCESS_EXEC);
@@ -2712,6 +3732,43 @@ int main(void)
     assert(xwork_run_get_last_event(pRun, &tEvent) == XWORK_OK);
     assert(tEvent.eKind == XWORK_EVENT_RUN_COMPLETED);
     assert(xwork_run_get_event_count(pRun) >= 10u);
+    assert(xwork_run_get_step_count(pRun) == xwork_run_get_event_count(pRun));
+    xwork_run_step_list_reset(&tRunSteps);
+    assert(xwork_run_query_steps(pRun, NULL, &tRunSteps) == XWORK_OK);
+    assert(tRunSteps.iCount == xwork_run_get_event_count(pRun));
+    {
+        bool bFoundModelTurn = false;
+        bool bFoundToolCall = false;
+        bool bFoundApproval = false;
+        bool bFoundCheckpoint = false;
+        size_t iStep;
+
+        for ( iStep = 0u; iStep < tRunSteps.iCount; ++iStep ) {
+            if ( tRunSteps.pItems[iStep].eKind == XWORK_RUN_STEP_MODEL_TURN ) {
+                bFoundModelTurn = true;
+            }
+            if ( tRunSteps.pItems[iStep].eKind == XWORK_RUN_STEP_TOOL_CALL ) {
+                bFoundToolCall = true;
+            }
+            if ( tRunSteps.pItems[iStep].eKind == XWORK_RUN_STEP_APPROVAL ) {
+                bFoundApproval = true;
+            }
+            if ( tRunSteps.pItems[iStep].eKind == XWORK_RUN_STEP_CHECKPOINT ) {
+                bFoundCheckpoint = true;
+            }
+        }
+        assert(bFoundModelTurn);
+        assert(bFoundToolCall);
+        assert(bFoundApproval);
+        assert(bFoundCheckpoint);
+    }
+    xwork_run_step_query_init(&tRunStepQuery);
+    tRunStepQuery.bFilterKind = true;
+    tRunStepQuery.eKind = XWORK_RUN_STEP_CHECKPOINT;
+    xwork_run_step_list_reset(&tRunSteps);
+    assert(xwork_run_query_steps(pRun, &tRunStepQuery, &tRunSteps) == XWORK_OK);
+    assert(tRunSteps.iCount == xwork_run_get_checkpoint_count(pRun));
+    assert(tRunSteps.pItems[0].eCheckpointKind == XWORK_CHECKPOINT_AFTER_TOOL);
     assert(xwork_run_get_checkpoint_count(pRun) == 2u);
     assert(xwork_run_get_artifact_count(pRun) == 1u);
     xwork_artifact_reset(&tArtifact);
@@ -2737,6 +3794,151 @@ int main(void)
     xwork_checkpoint_init(&tCheckpoint);
     assert(xwork_run_get_checkpoint(pRun, 1u, &tCheckpoint) == XWORK_OK);
     assert(tCheckpoint.eKind == XWORK_CHECKPOINT_COMPLETION);
+
+    tAdapterCtx.iTurnCount = 0;
+    memset(&tStreamToolExecCtx, 0, sizeof(tStreamToolExecCtx));
+    tStreamToolExecCtx.iRetryableFailuresRemaining = 1;
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-tool-retry";
+    tRunOptions.sInstruction = "Append a line to the README if needed.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pInterruptedRun) == XWORK_OK);
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.pfnToolExec = xwork_mock_tool_exec;
+    tExecOptions.pUserData = &tStreamToolExecCtx;
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.iMaxRetries = 1u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pInterruptedRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pInterruptedRun) == XWORK_RUN_COMPLETED);
+    assert(tStreamToolExecCtx.iExecCount == 2);
+    assert(xwork_run_get_checkpoint_count(pInterruptedRun) >= 3u);
+    xwork_run_step_query_init(&tRunStepQuery);
+    tRunStepQuery.bFilterKind = true;
+    tRunStepQuery.eKind = XWORK_RUN_STEP_RETRY;
+    xwork_run_step_list_reset(&tRunSteps);
+    assert(xwork_run_query_steps(pInterruptedRun, &tRunStepQuery, &tRunSteps) == XWORK_OK);
+    assert(tRunSteps.iCount == 1u);
+    assert(tRunSteps.pItems[0].eEventKind == XWORK_EVENT_RETRY_SCHEDULED);
+    xwork_run_destroy(pInterruptedRun);
+    pInterruptedRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
+    memset(&tStreamToolExecCtx, 0, sizeof(tStreamToolExecCtx));
+    tStreamToolExecCtx.iNonRetryableFailuresRemaining = 1;
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-tool-non-retry";
+    tRunOptions.sInstruction = "Append a line to the README if needed.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pInterruptedRun) == XWORK_OK);
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.pfnToolExec = xwork_mock_tool_exec;
+    tExecOptions.pUserData = &tStreamToolExecCtx;
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.iMaxRetries = 1u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pInterruptedRun, &tExecOptions) == XWORK_ERROR_EXTERNAL_FAILURE);
+    assert(xwork_run_get_state(pInterruptedRun) == XWORK_RUN_FAILED);
+    assert(tStreamToolExecCtx.iExecCount == 1);
+    xwork_run_step_query_init(&tRunStepQuery);
+    tRunStepQuery.bFilterKind = true;
+    tRunStepQuery.eKind = XWORK_RUN_STEP_RETRY;
+    xwork_run_step_list_reset(&tRunSteps);
+    assert(xwork_run_query_steps(pInterruptedRun, &tRunStepQuery, &tRunSteps) == XWORK_OK);
+    assert(tRunSteps.iCount == 0u);
+    xwork_run_destroy(pInterruptedRun);
+    pInterruptedRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
+    tAdapterCtx.iTransientProviderFailuresRemaining = 1;
+    memset(&tStreamToolExecCtx, 0, sizeof(tStreamToolExecCtx));
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-provider-retry";
+    tRunOptions.sInstruction = "Append a line to the README if needed.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pInterruptedRun) == XWORK_OK);
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.pfnToolExec = xwork_mock_tool_exec;
+    tExecOptions.pUserData = &tStreamToolExecCtx;
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.iMaxRetries = 1u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pInterruptedRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pInterruptedRun) == XWORK_RUN_COMPLETED);
+    assert(tStreamToolExecCtx.iExecCount == 1);
+    xwork_run_step_query_init(&tRunStepQuery);
+    tRunStepQuery.bFilterKind = true;
+    tRunStepQuery.eKind = XWORK_RUN_STEP_RETRY;
+    xwork_run_step_list_reset(&tRunSteps);
+    assert(xwork_run_query_steps(pInterruptedRun, &tRunStepQuery, &tRunSteps) == XWORK_OK);
+    assert(tRunSteps.iCount == 1u);
+    assert(tRunSteps.pItems[0].eEventKind == XWORK_EVENT_RETRY_SCHEDULED);
+    xwork_run_destroy(pInterruptedRun);
+    pInterruptedRun = NULL;
+    tAdapterCtx.iTransientProviderFailuresRemaining = 0;
+
+    memset(&tAdapterCtx, 0, sizeof(tAdapterCtx));
+    tAdapterCtx.sExpectedPlannerText = "Planner next step";
+    tAdapterCtx.bExpectToolChoice = true;
+    tAdapterCtx.eExpectedToolChoiceMode = XLLM_TOOL_CHOICE_NAMED;
+    tAdapterCtx.sExpectedToolChoiceToolId = "mock.apply_patch";
+    memset(&tStreamToolExecCtx, 0, sizeof(tStreamToolExecCtx));
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-planner-boundary";
+    tRunOptions.sInstruction = "Append a line to the README if needed.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pInterruptedRun) == XWORK_OK);
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.pfnToolExec = xwork_mock_tool_exec;
+    tExecOptions.pUserData = &tStreamToolExecCtx;
+    tExecOptions.ePlannerMode = XWORK_PLANNER_BOUNDARY;
+    tExecOptions.sPlannerContextText = "Planner next step: use mock.apply_patch.";
+    tExecOptions.eToolChoiceMode = XWORK_TOOL_CHOICE_NAMED;
+    tExecOptions.sToolChoiceToolId = "mock.apply_patch";
+    tExecOptions.bAllowParallelToolCalls = false;
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pInterruptedRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pInterruptedRun) == XWORK_RUN_COMPLETED);
+    assert(tStreamToolExecCtx.iExecCount == 1);
+    assert(tAdapterCtx.iObservedPlannerTurns == 2);
+    xwork_run_destroy(pInterruptedRun);
+    pInterruptedRun = NULL;
+    memset(&tAdapterCtx, 0, sizeof(tAdapterCtx));
+
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-tool-choice-invalid";
+    tRunOptions.sInstruction = "Append a line to the README if needed.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pInterruptedRun) == XWORK_OK);
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.eToolChoiceMode = XWORK_TOOL_CHOICE_NAMED;
+    tExecOptions.iMaxTurns = 3u;
+    assert(xwork_run_execute(pInterruptedRun, &tExecOptions) == XWORK_ERROR_INVALID_ARGUMENT);
+    assert(xwork_run_execute_async(pInterruptedRun, &tExecOptions, &pAsync) == XWORK_ERROR_INVALID_ARGUMENT);
+    assert(pAsync == NULL);
+    xwork_run_destroy(pInterruptedRun);
+    pInterruptedRun = NULL;
 
     tAdapterCtx.iTurnCount = 0;
     memset(&tInterruptCtx, 0, sizeof(tInterruptCtx));
@@ -2831,9 +4033,191 @@ int main(void)
     assert(xwork_run_execute(pStreamRun, &tExecOptions) == XWORK_OK);
     assert(xwork_run_get_state(pStreamRun) == XWORK_RUN_COMPLETED);
     assert(tModelEventCtx.iEventCount > 0);
+    assert(tModelEventCtx.iStartCount == 2);
+    assert(tModelEventCtx.iOutputBeginCount == 2);
+    assert(tModelEventCtx.iOutputEndCount == 2);
+    assert(tModelEventCtx.iEndCount == 2);
     assert(tModelEventCtx.iTextDeltaCount > 0);
+    assert(tModelEventCtx.iToolCallDeltaCount == 1);
+    assert(tModelEventCtx.iToolCallReadyCount == 1);
+    assert(tModelEventCtx.iUsageCount == 2);
+    assert(tModelEventCtx.iErrorCount == 0);
+    assert(tModelEventCtx.iUnexpectedPayloadCount == 0);
     xwork_run_destroy(pStreamRun);
     pStreamRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
+    memset(&tModelEventCtx, 0, sizeof(tModelEventCtx));
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-stream-error";
+    tRunOptions.sInstruction = "Emit a streaming provider error.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pStreamErrorRun) == XWORK_OK);
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.pfnToolExec = xwork_mock_tool_exec;
+    tExecOptions.pUserData = &tStreamToolExecCtx;
+    tExecOptions.eModelStreamMode = XWORK_MODEL_STREAM_PREFER;
+    tExecOptions.pfnModelEvent = xwork_mock_model_event;
+    tExecOptions.pModelEventUserData = &tModelEventCtx;
+    tExecOptions.iMaxTurns = 1u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pStreamErrorRun, &tExecOptions) == XWORK_ERROR_EXTERNAL_FAILURE);
+    assert(xwork_run_get_state(pStreamErrorRun) == XWORK_RUN_FAILED);
+    assert(tModelEventCtx.iErrorCount == 1);
+    assert(tModelEventCtx.iUnexpectedPayloadCount == 0);
+    xwork_event_init(&tEvent);
+    assert(xwork_run_get_last_event(pStreamErrorRun, &tEvent) == XWORK_OK);
+    assert(tEvent.eKind == XWORK_EVENT_RUN_FAILED);
+    assert(tEvent.sSummary != NULL);
+    assert(strstr(tEvent.sSummary, "xllm_error=upstream_5xx") != NULL);
+    assert(strstr(tEvent.sSummary, "mock streaming provider error") != NULL);
+    xwork_run_destroy(pStreamErrorRun);
+    pStreamErrorRun = NULL;
+
+    {
+        const xllm_error_code aeProviderErrorCodes[] = {
+            XLLM_ERROR_AUTH,
+            XLLM_ERROR_RATE_LIMIT,
+            XLLM_ERROR_PARSE,
+            XLLM_ERROR_TIMEOUT
+        };
+        const char *asProviderErrorNames[] = {
+            "auth",
+            "rate_limit",
+            "parse",
+            "timeout"
+        };
+        const char *asProviderErrorMessages[] = {
+            "mock provider auth failure",
+            "mock provider rate limit",
+            "mock provider malformed response",
+            "mock provider timeout"
+        };
+        size_t iProviderErrorCase;
+
+        for ( iProviderErrorCase = 0u;
+              iProviderErrorCase < sizeof(aeProviderErrorCodes) / sizeof(aeProviderErrorCodes[0]);
+              ++iProviderErrorCase ) {
+            char sRunId[96];
+            char sExpectedCode[64];
+
+            memset(&tAdapterCtx, 0, sizeof(tAdapterCtx));
+            tAdapterCtx.iProviderErrorsRemaining = 1;
+            tAdapterCtx.eProviderErrorCode = aeProviderErrorCodes[iProviderErrorCase];
+            tAdapterCtx.sProviderErrorMessage = asProviderErrorMessages[iProviderErrorCase];
+            snprintf(
+                sRunId,
+                sizeof(sRunId),
+                "run-provider-error-%s",
+                asProviderErrorNames[iProviderErrorCase]
+            );
+            snprintf(
+                sExpectedCode,
+                sizeof(sExpectedCode),
+                "xllm_error=%s",
+                asProviderErrorNames[iProviderErrorCase]
+            );
+            xwork_run_options_init(&tRunOptions);
+            xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+            tRunOptions.sRunId = sRunId;
+            tRunOptions.sInstruction = "Trigger provider error matrix.";
+            tRunOptions.sLlmProfileId = "mock-profile";
+            tRunOptions.sSessionProfileId = "mock-session";
+            tRunOptions.psWorkspaceIds = asWorkspaceIds;
+            tRunOptions.iWorkspaceCount = 1u;
+            assert(xwork_run_create(pRuntime, &tRunOptions, &pStreamErrorRun) == XWORK_OK);
+            xwork_orchestrator_options_init(&tExecOptions);
+            tExecOptions.pfnToolExec = xwork_mock_tool_exec;
+            tExecOptions.pUserData = &tStreamToolExecCtx;
+            tExecOptions.iMaxTurns = 1u;
+            tExecOptions.bAutoApprove = true;
+            assert(
+                xwork_run_execute(pStreamErrorRun, &tExecOptions) ==
+                XWORK_ERROR_EXTERNAL_FAILURE
+            );
+            assert(xwork_run_get_state(pStreamErrorRun) == XWORK_RUN_FAILED);
+            xwork_run_snapshot_reset(&tRunSnapshot);
+            assert(xwork_run_get_snapshot(pStreamErrorRun, &tRunSnapshot) == XWORK_OK);
+            assert(tRunSnapshot.eState == XWORK_RUN_FAILED);
+            assert(tRunSnapshot.sLastOutputText != NULL);
+            assert(strstr(tRunSnapshot.sLastOutputText, sExpectedCode) != NULL);
+            assert(
+                strstr(
+                    tRunSnapshot.sLastOutputText,
+                    asProviderErrorMessages[iProviderErrorCase]
+                ) != NULL
+            );
+            xwork_event_init(&tEvent);
+            assert(xwork_run_get_last_event(pStreamErrorRun, &tEvent) == XWORK_OK);
+            assert(tEvent.eKind == XWORK_EVENT_RUN_FAILED);
+            assert(tEvent.sSummary != NULL);
+            assert(strstr(tEvent.sSummary, sExpectedCode) != NULL);
+            assert(
+                strstr(
+                    tEvent.sSummary,
+                    asProviderErrorMessages[iProviderErrorCase]
+                ) != NULL
+            );
+            xwork_run_destroy(pStreamErrorRun);
+            pStreamErrorRun = NULL;
+        }
+        memset(&tAdapterCtx, 0, sizeof(tAdapterCtx));
+    }
+
+    tAdapterCtx.iTurnCount = 0;
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.tSessionPolicy.bEnableAutoCompact = true;
+    tRunOptions.tSessionPolicy.iCompactTriggerTurns = 1u;
+    tRunOptions.tSessionPolicy.iKeepRecentTurns = 0u;
+    tRunOptions.tSessionPolicy.eCompactStrategy = XWORK_SESSION_COMPACT_TRUNCATE;
+    tRunOptions.sRunId = "run-session-compaction";
+    tRunOptions.sInstruction = "Return a compactable final answer.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pStreamErrorRun) == XWORK_OK);
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.pfnToolExec = xwork_mock_tool_exec;
+    tExecOptions.pUserData = &tStreamToolExecCtx;
+    tExecOptions.iMaxTurns = 1u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pStreamErrorRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pStreamErrorRun) == XWORK_RUN_COMPLETED);
+    {
+        size_t i;
+        bool bFoundCompactionEvent = false;
+        bool bFoundCompactionCheckpoint = false;
+
+        for ( i = 0u; i < xwork_run_get_event_count(pStreamErrorRun); ++i ) {
+            xwork_event_reset(&tEvent);
+            assert(xwork_run_get_event(pStreamErrorRun, i, &tEvent) == XWORK_OK);
+            if ( tEvent.eKind == XWORK_EVENT_SESSION_COMPACTED ) {
+                bFoundCompactionEvent = true;
+                assert(tEvent.sCheckpointId != NULL);
+                assert(tEvent.sSummary != NULL);
+                assert(strstr(tEvent.sSummary, "Session compacted") != NULL);
+            }
+        }
+        for ( i = 0u; i < xwork_run_get_checkpoint_count(pStreamErrorRun); ++i ) {
+            xwork_checkpoint_reset(&tCheckpoint);
+            assert(xwork_run_get_checkpoint(pStreamErrorRun, i, &tCheckpoint) == XWORK_OK);
+            if ( tCheckpoint.eKind == XWORK_CHECKPOINT_SESSION_COMPACTED ) {
+                bFoundCompactionCheckpoint = true;
+                assert(tCheckpoint.sPendingStep != NULL);
+                assert(strcmp(tCheckpoint.sPendingStep, "session_compacted") == 0);
+            }
+        }
+        assert(bFoundCompactionEvent);
+        assert(bFoundCompactionCheckpoint);
+    }
+    xwork_run_destroy(pStreamErrorRun);
+    pStreamErrorRun = NULL;
 
     tAdapterCtx.iTurnCount = 0;
     memset(&tModelEventCtx, 0, sizeof(tModelEventCtx));
@@ -2857,7 +4241,12 @@ int main(void)
     tExecOptions.bAutoApprove = true;
     assert(xwork_run_execute(pStreamCancelledRun, &tExecOptions) == XWORK_ERROR_CANCELLED);
     assert(xwork_run_get_state(pStreamCancelledRun) == XWORK_RUN_CANCELLED);
+    assert(tModelEventCtx.iToolCallDeltaCount == 1);
+    assert(tModelEventCtx.iToolCallReadyCount == 1);
     assert(tModelEventCtx.iTextDeltaCount == 1);
+    assert(tModelEventCtx.iUsageCount == 1);
+    assert(tModelEventCtx.iEndCount == 1);
+    assert(tModelEventCtx.iUnexpectedPayloadCount == 0);
     xwork_checkpoint_init(&tCheckpoint);
     assert(xwork_run_get_last_checkpoint(pStreamCancelledRun, &tCheckpoint) == XWORK_OK);
     assert(tCheckpoint.eRunState == XWORK_RUN_CANCELLED);
@@ -2899,6 +4288,82 @@ int main(void)
     pAsyncRun = NULL;
 
     tAdapterCtx.iTurnCount = 0;
+    tAdapterCtx.iTransientProviderFailuresRemaining = 1;
+    memset(&tStreamToolExecCtx, 0, sizeof(tStreamToolExecCtx));
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-async-provider-retry";
+    tRunOptions.sInstruction = "Append a line to the README if needed.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pAsyncRun) == XWORK_OK);
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.pfnToolExec = xwork_mock_tool_exec;
+    tExecOptions.pUserData = &tStreamToolExecCtx;
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.iMaxRetries = 1u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute_async(pAsyncRun, &tExecOptions, &pAsync) == XWORK_OK);
+    assert(xwork_run_async_wait(pAsync) == XWORK_OK);
+    assert(xwork_run_async_get_status(pAsync, &iAsyncStatus, &bAsyncCompleted) == XWORK_OK);
+    assert(bAsyncCompleted);
+    assert(iAsyncStatus == XWORK_OK);
+    assert(xwork_run_get_state(pAsyncRun) == XWORK_RUN_COMPLETED);
+    assert(tStreamToolExecCtx.iExecCount == 1);
+    xwork_run_step_query_init(&tRunStepQuery);
+    tRunStepQuery.bFilterKind = true;
+    tRunStepQuery.eKind = XWORK_RUN_STEP_RETRY;
+    xwork_run_step_list_reset(&tRunSteps);
+    assert(xwork_run_query_steps(pAsyncRun, &tRunStepQuery, &tRunSteps) == XWORK_OK);
+    assert(tRunSteps.iCount == 1u);
+    assert(tRunSteps.pItems[0].eEventKind == XWORK_EVENT_RETRY_SCHEDULED);
+    xwork_run_async_destroy(pAsync);
+    pAsync = NULL;
+    xwork_run_destroy(pAsyncRun);
+    pAsyncRun = NULL;
+    tAdapterCtx.iTransientProviderFailuresRemaining = 0;
+
+    tAdapterCtx.iTurnCount = 0;
+    tAdapterCtx.iTransientProviderFailuresRemaining = 2;
+    memset(&tStreamToolExecCtx, 0, sizeof(tStreamToolExecCtx));
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-async-provider-failed";
+    tRunOptions.sInstruction = "Append a line to the README if needed.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pAsyncRun) == XWORK_OK);
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.pfnToolExec = xwork_mock_tool_exec;
+    tExecOptions.pUserData = &tStreamToolExecCtx;
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.iMaxRetries = 1u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute_async(pAsyncRun, &tExecOptions, &pAsync) == XWORK_OK);
+    assert(xwork_run_async_wait(pAsync) == XWORK_ERROR_EXTERNAL_FAILURE);
+    assert(xwork_run_async_get_status(pAsync, &iAsyncStatus, &bAsyncCompleted) == XWORK_OK);
+    assert(bAsyncCompleted);
+    assert(iAsyncStatus == XWORK_ERROR_EXTERNAL_FAILURE);
+    assert(xwork_run_get_state(pAsyncRun) == XWORK_RUN_FAILED);
+    assert(tStreamToolExecCtx.iExecCount == 0);
+    xwork_run_step_query_init(&tRunStepQuery);
+    tRunStepQuery.bFilterKind = true;
+    tRunStepQuery.eKind = XWORK_RUN_STEP_RETRY;
+    xwork_run_step_list_reset(&tRunSteps);
+    assert(xwork_run_query_steps(pAsyncRun, &tRunStepQuery, &tRunSteps) == XWORK_OK);
+    assert(tRunSteps.iCount == 1u);
+    assert(tRunSteps.pItems[0].eEventKind == XWORK_EVENT_RETRY_SCHEDULED);
+    xwork_run_async_destroy(pAsync);
+    pAsync = NULL;
+    xwork_run_destroy(pAsyncRun);
+    pAsyncRun = NULL;
+    tAdapterCtx.iTransientProviderFailuresRemaining = 0;
+
+    tAdapterCtx.iTurnCount = 0;
     memset(&tStreamToolExecCtx, 0, sizeof(tStreamToolExecCtx));
     xwork_run_options_init(&tRunOptions);
     xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
@@ -2923,6 +4388,29 @@ int main(void)
     assert(!bAsyncCompleted);
     assert(xwork_run_async_get_status(pAsync, &iAsyncStatus, &bAsyncCompleted) == XWORK_OK);
     assert(!bAsyncCompleted);
+    memset(aAsyncObserverCtx, 0, sizeof(aAsyncObserverCtx));
+    for ( iAsyncObserverIndex = 0u;
+          iAsyncObserverIndex < 4u;
+          ++iAsyncObserverIndex ) {
+        aAsyncObserverCtx[iAsyncObserverIndex].pAsync = pAsync;
+        aAsyncObserverThreads[iAsyncObserverIndex] = xrtThreadCreate(
+            (ptr)xwork_async_observer_thread,
+            &aAsyncObserverCtx[iAsyncObserverIndex],
+            0u
+        );
+        assert(aAsyncObserverThreads[iAsyncObserverIndex] != NULL);
+    }
+    for ( iAsyncObserverIndex = 0u;
+          iAsyncObserverIndex < 4u;
+          ++iAsyncObserverIndex ) {
+        xrtThreadWait(aAsyncObserverThreads[iAsyncObserverIndex]);
+        assert(xrtThreadGetExitCode(aAsyncObserverThreads[iAsyncObserverIndex]) == 0u);
+        xrtThreadDestroy(aAsyncObserverThreads[iAsyncObserverIndex]);
+        aAsyncObserverThreads[iAsyncObserverIndex] = NULL;
+        assert(aAsyncObserverCtx[iAsyncObserverIndex].iPollCount > 0);
+        assert(aAsyncObserverCtx[iAsyncObserverIndex].iRunningCount > 0);
+        assert(aAsyncObserverCtx[iAsyncObserverIndex].eLastStatus == XWORK_OK);
+    }
     assert(xwork_run_execute(pAsyncRun, &tExecOptions) == XWORK_ERROR_INVALID_STATE);
     assert(xwork_run_async_cancel(pAsync, "async smoke cancel") == XWORK_OK);
     assert(xwork_run_async_wait(pAsync) == XWORK_ERROR_CANCELLED);
@@ -2965,6 +4453,9 @@ int main(void)
     tAdapterCtx.iTurnCount = 0;
     tAdapterCtx.sExpectedMemoryText = "workspace-memory:README.md";
     tAdapterCtx.iObservedMemoryTurns = 0;
+    tAdapterCtx.bExpectMemoryContextMetadata = true;
+    tAdapterCtx.iExpectedMemoryContextPriority = 7;
+    tAdapterCtx.bExpectedMemoryContextPinned = true;
     asWorkspaceIds[0] = "memory-main";
     xwork_run_options_init(&tRunOptions);
     xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
@@ -2981,6 +4472,12 @@ int main(void)
     tExecOptions.pUserData = &tDefaultMemoryToolExecCtx;
     tExecOptions.bIngestToolResultsToMemory = true;
     tExecOptions.bIngestArtifactsToMemory = true;
+    tExecOptions.iMemorySearchMaxHits = 1u;
+    tExecOptions.iMemoryContextMaxBlocks = 1u;
+    tExecOptions.iMemoryContextMaxCharsPerHit = 256u;
+    tExecOptions.iMemoryContextMaxTotalChars = 1024u;
+    tExecOptions.iMemoryContextPriority = 7;
+    tExecOptions.bMemoryContextPinned = true;
     tExecOptions.iMaxTurns = 3u;
     tExecOptions.bAutoApprove = true;
     assert(xwork_run_execute(pMemoryRun, &tExecOptions) == XWORK_OK);
@@ -3057,6 +4554,232 @@ int main(void)
             }
         }
         assert(bFoundArtifactRecord);
+        xllm_memory_search_result_reset(&tMemorySearchResult);
+        xllm_error_free(&tMemorySearchError);
+    }
+    xwork_run_destroy(pMemoryRun);
+    pMemoryRun = NULL;
+    tAdapterCtx.sExpectedMemoryText = NULL;
+    tAdapterCtx.iObservedMemoryTurns = 0;
+    tAdapterCtx.bExpectMemoryContextMetadata = false;
+    tAdapterCtx.iExpectedMemoryContextPriority = 0;
+    tAdapterCtx.bExpectedMemoryContextPinned = false;
+
+    {
+        xllm_memory_ingest_options tLongIngestOptions;
+        xllm_error tLongIngestError;
+
+        xllm_memory_ingest_options_init(&tLongIngestOptions);
+        xllm_error_init(&tLongIngestError);
+        tLongIngestOptions.sRecordId = "policy-truncation-record";
+        tLongIngestOptions.sTitle = "Policy Truncation";
+        tLongIngestOptions.sSourceUri = "workspace://policy-truncation.md";
+        tLongIngestOptions.sText =
+            "xwork-memory-truncation-head "
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc "
+            "xwork-memory-truncation-tail";
+        tLongIngestOptions.bReplaceExisting = true;
+        assert(
+            xllm_memory_ingest_text(
+                pPolicyWorkspaceMemory,
+                &tLongIngestOptions,
+                &tLongIngestError
+            ) == XRT_NET_OK
+        );
+        xllm_error_free(&tLongIngestError);
+    }
+    memset(&tDefaultMemoryToolExecCtx, 0, sizeof(tDefaultMemoryToolExecCtx));
+    tAdapterCtx.iTurnCount = 0;
+    tAdapterCtx.sExpectedMemoryText = "xwork-memory-truncation-head";
+    tAdapterCtx.iObservedMemoryTurns = 0;
+    asWorkspaceIds[0] = "memory-policy";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-memory-context-truncation";
+    tRunOptions.sInstruction = "xwork-memory-truncation-head";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pMemoryRun) == XWORK_OK);
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.pfnToolExec = xwork_mock_tool_exec;
+    tExecOptions.pUserData = &tDefaultMemoryToolExecCtx;
+    tExecOptions.iMemorySearchMaxHits = 1u;
+    tExecOptions.iMemoryContextMaxCharsPerHit = 64u;
+    tExecOptions.iMemoryContextMaxTotalChars = 96u;
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pMemoryRun, &tExecOptions) == XWORK_OK);
+    xwork_memory_context_reset(&tObservedMemoryContext);
+    assert(
+        xwork_run_get_last_memory_context(
+            pMemoryRun,
+            &tObservedMemoryContext
+        ) == XWORK_OK
+    );
+    assert(tObservedMemoryContext.sText != NULL);
+    assert(strstr(tObservedMemoryContext.sText, "xwork-memory-truncation-head") != NULL);
+    assert(strstr(tObservedMemoryContext.sText, "xwork-memory-truncation-tail") == NULL);
+    assert(strlen(tObservedMemoryContext.sText) < 512u);
+    xwork_run_destroy(pMemoryRun);
+    pMemoryRun = NULL;
+    tAdapterCtx.sExpectedMemoryText = NULL;
+    tAdapterCtx.iObservedMemoryTurns = 0;
+
+    memset(&tDefaultMemoryToolExecCtx, 0, sizeof(tDefaultMemoryToolExecCtx));
+    tDefaultMemoryToolExecCtx.bEmitOutputArtifact = true;
+    tDefaultMemoryToolExecCtx.eOutputArtifactClass = XWORK_ARTIFACT_OUTPUT_FILE_CONTENT;
+    tDefaultMemoryToolExecCtx.sOutputArtifactText =
+        "xwork-memory-ingest-policy-output-safe";
+    tMemoryCtx.iResolveCount = 0;
+    tMemoryCtx.sContextText = "workspace-memory:ingest-policy";
+    tAdapterCtx.iTurnCount = 0;
+    tAdapterCtx.sExpectedMemoryText = tMemoryCtx.sContextText;
+    tAdapterCtx.iObservedMemoryTurns = 0;
+    asWorkspaceIds[0] = "memory-policy";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-memory-ingest-policy-output";
+    tRunOptions.sInstruction = "Emit memory ingest policy artifacts.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pMemoryRun) == XWORK_OK);
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.pfnToolExec = xwork_mock_tool_exec;
+    tExecOptions.pUserData = &tDefaultMemoryToolExecCtx;
+    tExecOptions.pfnResolveMemoryContext = xwork_mock_memory_resolve;
+    tExecOptions.pMemoryUserData = &tMemoryCtx;
+    tExecOptions.bIngestArtifactsToMemory = true;
+    tExecOptions.uArtifactMemoryIngestKindMask =
+        XWORK_ARTIFACT_KIND_MASK(XWORK_ARTIFACT_OUTPUT);
+    tExecOptions.uArtifactMemoryIngestOutputClassMask =
+        XWORK_ARTIFACT_OUTPUT_CLASS_MASK(XWORK_ARTIFACT_OUTPUT_FILE_CONTENT);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pMemoryRun, &tExecOptions) == XWORK_OK);
+    assert(tDefaultMemoryToolExecCtx.iExecCount == 1);
+    assert(tAdapterCtx.iObservedMemoryTurns == 2);
+    {
+        xllm_memory_search_options tMemorySearchOptions;
+        xllm_memory_search_result tMemorySearchResult;
+        xllm_error tMemorySearchError;
+        size_t i;
+        bool bFoundOutput = false;
+        bool bFoundPatch = false;
+
+        xllm_memory_search_options_init(&tMemorySearchOptions);
+        memset(&tMemorySearchResult, 0, sizeof(tMemorySearchResult));
+        xllm_error_init(&tMemorySearchError);
+        tMemorySearchOptions.sQuery = "xwork-memory-ingest-policy-output-safe";
+        assert(
+            xllm_memory_search(
+                pPolicyWorkspaceMemory,
+                &tMemorySearchOptions,
+                &tMemorySearchResult,
+                &tMemorySearchError
+            ) == XRT_NET_OK
+        );
+        for ( i = 0u; i < tMemorySearchResult.iHitCount; ++i ) {
+            if ( tMemorySearchResult.pHits[i].sText &&
+                 strstr(
+                     tMemorySearchResult.pHits[i].sText,
+                     "xwork-memory-ingest-policy-output-safe"
+                 ) ) {
+                bFoundOutput = true;
+            }
+        }
+        assert(bFoundOutput);
+        xllm_memory_search_result_reset(&tMemorySearchResult);
+
+        tMemorySearchOptions.sQuery = "Patch artifact captured for README.md.";
+        assert(
+            xllm_memory_search(
+                pPolicyWorkspaceMemory,
+                &tMemorySearchOptions,
+                &tMemorySearchResult,
+                &tMemorySearchError
+            ) == XRT_NET_OK
+        );
+        for ( i = 0u; i < tMemorySearchResult.iHitCount; ++i ) {
+            if ( tMemorySearchResult.pHits[i].sText &&
+                 strstr(
+                     tMemorySearchResult.pHits[i].sText,
+                     "Patch artifact captured for README.md."
+                 ) ) {
+                bFoundPatch = true;
+            }
+        }
+        assert(!bFoundPatch);
+        xllm_memory_search_result_reset(&tMemorySearchResult);
+        xllm_error_free(&tMemorySearchError);
+    }
+    xwork_run_destroy(pMemoryRun);
+    pMemoryRun = NULL;
+
+    memset(&tDefaultMemoryToolExecCtx, 0, sizeof(tDefaultMemoryToolExecCtx));
+    tDefaultMemoryToolExecCtx.bEmitOutputArtifact = true;
+    tDefaultMemoryToolExecCtx.eOutputArtifactClass = XWORK_ARTIFACT_OUTPUT_FILE_CONTENT;
+    tDefaultMemoryToolExecCtx.sOutputArtifactText =
+        "xwork-secret-token-not-ingested";
+    tMemoryCtx.iResolveCount = 0;
+    tMemoryCtx.sContextText = "workspace-memory:ingest-sensitive-policy";
+    tAdapterCtx.iTurnCount = 0;
+    tAdapterCtx.sExpectedMemoryText = tMemoryCtx.sContextText;
+    tAdapterCtx.iObservedMemoryTurns = 0;
+    asWorkspaceIds[0] = "memory-policy";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-memory-ingest-sensitive-skip";
+    tRunOptions.sInstruction = "Emit sensitive memory ingest artifact.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pMemoryRun) == XWORK_OK);
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.pfnToolExec = xwork_mock_tool_exec;
+    tExecOptions.pUserData = &tDefaultMemoryToolExecCtx;
+    tExecOptions.pfnResolveMemoryContext = xwork_mock_memory_resolve;
+    tExecOptions.pMemoryUserData = &tMemoryCtx;
+    tExecOptions.bIngestArtifactsToMemory = true;
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pMemoryRun, &tExecOptions) == XWORK_OK);
+    assert(tDefaultMemoryToolExecCtx.iExecCount == 1);
+    {
+        xllm_memory_search_options tMemorySearchOptions;
+        xllm_memory_search_result tMemorySearchResult;
+        xllm_error tMemorySearchError;
+        size_t i;
+        bool bFoundSecret = false;
+
+        xllm_memory_search_options_init(&tMemorySearchOptions);
+        memset(&tMemorySearchResult, 0, sizeof(tMemorySearchResult));
+        xllm_error_init(&tMemorySearchError);
+        tMemorySearchOptions.sQuery = "xwork-secret-token-not-ingested";
+        assert(
+            xllm_memory_search(
+                pPolicyWorkspaceMemory,
+                &tMemorySearchOptions,
+                &tMemorySearchResult,
+                &tMemorySearchError
+            ) == XRT_NET_OK
+        );
+        for ( i = 0u; i < tMemorySearchResult.iHitCount; ++i ) {
+            if ( tMemorySearchResult.pHits[i].sText &&
+                 strstr(
+                     tMemorySearchResult.pHits[i].sText,
+                     "xwork-secret-token-not-ingested"
+                 ) ) {
+                bFoundSecret = true;
+            }
+        }
+        assert(!bFoundSecret);
         xllm_memory_search_result_reset(&tMemorySearchResult);
         xllm_error_free(&tMemorySearchError);
     }
@@ -3208,6 +4931,48 @@ int main(void)
     assert(
         xwork_runtime_register_builtin_tool(
             pLocalHostRuntime,
+            XWORK_TOOL_FILESYSTEM_LIST
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_FILESYSTEM_STAT
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_FILESYSTEM_GLOB
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_FILESYSTEM_MKDIR
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_FILESYSTEM_MOVE
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_FILESYSTEM_DELETE
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_FILESYSTEM_APPLY_PATCH
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
             XWORK_TOOL_PROCESS_EXEC
         ) == XWORK_OK
     );
@@ -3253,6 +5018,36 @@ int main(void)
             XWORK_TOOL_VCS_STATUS
         ) == XWORK_OK
     );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_VCS_DIFF
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_VCS_LOG
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_VCS_BRANCH
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_EDITOR_OPEN_BUFFER
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pLocalHostRuntime,
+            XWORK_TOOL_EDITOR_APPLY_EDIT
+        ) == XWORK_OK
+    );
     pBuiltinToolDef = xwork_runtime_find_tool(
         pLocalHostRuntime,
         XWORK_TOOL_PROCESS_EXEC
@@ -3274,6 +5069,14 @@ int main(void)
     assert(pBuiltinToolDef != NULL);
     assert(pBuiltinToolDef->eHostService == XWORK_HOST_PROCESS);
     assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_PROCESS_LIST_TERMINALS) == 0);
+    pBuiltinToolDef = xwork_runtime_find_tool(
+        pLocalHostRuntime,
+        XWORK_TOOL_EDITOR_APPLY_EDIT
+    );
+    assert(pBuiltinToolDef != NULL);
+    assert(pBuiltinToolDef->eHostService == XWORK_HOST_EDITOR);
+    assert(strcmp(pBuiltinToolDef->sOperationId, XWORK_HOST_EDITOR_APPLY_EDIT) == 0);
+    assert(pBuiltinToolDef->eApprovalMode == XWORK_APPROVAL_ALWAYS);
 
     memset(&tInterruptCtx, 0, sizeof(tInterruptCtx));
     memset(&tHostInvokeContext, 0, sizeof(tHostInvokeContext));
@@ -3383,6 +5186,43 @@ int main(void)
     assert(strstr(tLocalHostResult.sOutputText, "\"text\":\"host\"") != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "\"truncated\":true") != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "\"eof\":false") != NULL);
+
+    xwork_test_write_text_file(sLocalHostEditorBufferPath, "xwork-editor");
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_EDITOR,
+            XWORK_HOST_EDITOR_OPEN_BUFFER,
+            "{\"path\":\"tests/local_host_editor_buffer_smoke.txt\","
+            "\"selection_start\":1,\"selection_end\":5}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "editor.open_buffer ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"operation\":\"open_buffer\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"dirty\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"selection_start\":1") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"selection_end\":5") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"text\":\"xwork-editor\"") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_EDITOR,
+            XWORK_HOST_EDITOR_APPLY_EDIT,
+            "{\"path\":\"tests/local_host_editor_buffer_smoke.txt\","
+            "\"range_start\":1,\"range_end\":1,\"new_text\":\"-edit\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "editor.apply_edit ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"operation\":\"apply_edit\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"dirty\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"changed\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"selection_start\":1") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"selection_end\":6") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"text\":\"x-editwork-editor\"") != NULL);
 
     assert(
         xwork_runtime_invoke_host_service(
@@ -3529,6 +5369,536 @@ int main(void)
     assert(
         xwork_runtime_invoke_host_service(
             pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_STAT,
+            "{\"path\":\"tests/local_host_write_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.stat ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"ok\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"exists\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"type\":\"file\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"size_bytes\":22") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"mtime_unix\":") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_STAT,
+            "{\"path\":\"tests/local_host_missing_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_NOT_FOUND
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.stat not found") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"ok\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"not_found\"") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_LIST,
+            "{\"path\":\"tests\",\"limit\":2}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.list ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"ok\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"recursive\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"limit\":2") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"entry_count\":2") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"has_more\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"entries\":[") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"type\":\"file\"") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_GLOB,
+            "{\"path\":\"tests\",\"pattern\":\"*local_host_*_smoke.txt\","
+            "\"recursive\":true,\"limit\":8}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.glob ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"ok\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"pattern\":\"*local_host_*_smoke.txt\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"recursive\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "local_host_write_smoke.txt") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "local_host_create_smoke.txt") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_LIST,
+            "{\"path\":\"tests/local_host_missing_dir\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_NOT_FOUND
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem scan not found") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"ok\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"not_found\"") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_LIST,
+            "{\"path\":\"tests\",\"include_hidden\":\"no\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_INVALID_ARGUMENT
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem scan invalid request") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"invalid_request\"") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_GLOB,
+            "{\"path\":\"tests/local_host_missing_dir\",\"pattern\":\"*.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_NOT_FOUND
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem scan not found") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"not_found\"") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_GLOB,
+            "{\"path\":\"tests\",\"pattern\":\"*.txt\",\"recursive\":\"no\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_INVALID_ARGUMENT
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem scan invalid request") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"invalid_request\"") != NULL);
+
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_MKDIR,
+            "{\"path\":\"tests/local_host_mkdir_smoke\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.mkdir ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"operation\":\"mkdir\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"changed\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"existed\":false") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_MKDIR,
+            "{\"path\":\"tests/local_host_mkdir_nested/a/b\",\"recursive\":true}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.mkdir ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"recursive\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"create_dirs\":true") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_MKDIR,
+            "{\"path\":\"tests/local_host_mkdir_smoke\",\"exist_ok\":false}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_ALREADY_EXISTS
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.mkdir failed (target exists)") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"already_exists\"") != NULL);
+
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_WRITE_TEXT,
+            "{\"path\":\"tests/local_host_move_source_smoke.txt\","
+            "\"text\":\"local host move smoke\",\"mode\":\"create\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_MOVE,
+            "{\"path\":\"tests/local_host_move_source_smoke.txt\","
+            "\"target_path\":\"tests/local_host_move_target_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.move ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"operation\":\"move\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"changed\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"target_path\":\"tests/local_host_move_target_smoke.txt\"") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_READ_TEXT,
+            "{\"path\":\"tests/local_host_move_target_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strstr(tLocalHostResult.sOutputText, "local host move smoke") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_STAT,
+            "{\"path\":\"tests/local_host_move_source_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_NOT_FOUND
+    );
+
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_WRITE_TEXT,
+            "{\"path\":\"tests/local_host_move_source_smoke.txt\","
+            "\"text\":\"local host move second\",\"mode\":\"create\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_MOVE,
+            "{\"path\":\"tests/local_host_move_source_smoke.txt\","
+            "\"target_path\":\"tests/local_host_move_target_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_ALREADY_EXISTS
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.move failed (target exists)") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"already_exists\"") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_MOVE,
+            "{\"path\":\"tests/local_host_move_source_smoke.txt\","
+            "\"target_path\":\"tests/local_host_move_target_smoke.txt\","
+            "\"overwrite\":true}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.move ok") == 0);
+    assert(strstr(tLocalHostResult.sOutputText, "\"overwrite\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"existed\":true") != NULL);
+
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_WRITE_TEXT,
+            "{\"path\":\"tests/local_host_delete_file_smoke.txt\","
+            "\"text\":\"local host delete smoke\",\"mode\":\"create\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_DELETE,
+            "{\"path\":\"tests/local_host_delete_file_smoke.txt\",\"dry_run\":true}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.delete ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"dry_run\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"changed\":false") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_READ_TEXT,
+            "{\"path\":\"tests/local_host_delete_file_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_DELETE,
+            "{\"path\":\"tests/local_host_delete_file_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strstr(tLocalHostResult.sOutputText, "\"operation\":\"delete\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"changed\":true") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_STAT,
+            "{\"path\":\"tests/local_host_delete_file_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_NOT_FOUND
+    );
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_WRITE_TEXT,
+            "{\"path\":\"tests/local_host_delete_dir_smoke/local_host_delete_child.txt\","
+            "\"text\":\"local host delete dir smoke\",\"mode\":\"create\","
+            "\"create_dirs\":true}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_DELETE,
+            "{\"path\":\"tests/local_host_delete_dir_smoke\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_INVALID_STATE
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.delete failed") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"directory_not_empty\"") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_DELETE,
+            "{\"path\":\"tests/local_host_delete_dir_smoke\",\"recursive\":true}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strstr(tLocalHostResult.sOutputText, "\"recursive\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"changed\":true") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_DELETE,
+            "{\"path\":\"tests/local_host_delete_missing_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_NOT_FOUND
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.delete not found") == 0);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"not_found\"") != NULL);
+
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_WRITE_TEXT,
+            "{\"path\":\"tests/local_host_apply_patch_smoke.txt\","
+            "\"text\":\"alpha\\nbeta\\ngamma\\n\",\"mode\":\"create\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_APPLY_PATCH,
+            "{\"path\":\"tests/local_host_apply_patch_smoke.txt\","
+            "\"old_text\":\"beta\\n\",\"new_text\":\"BETA\\n\",\"dry_run\":true}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.apply_patch ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"operation\":\"apply_patch\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"dry_run\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"changed\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"patch_text\":\"--- a/tests/local_host_apply_patch_smoke.txt") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "-beta\\n+BETA\\n") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_READ_TEXT,
+            "{\"path\":\"tests/local_host_apply_patch_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strstr(tLocalHostResult.sOutputText, "alpha\\nbeta\\ngamma") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_APPLY_PATCH,
+            "{\"path\":\"tests/local_host_apply_patch_smoke.txt\","
+            "\"old_text\":\"beta\\n\",\"new_text\":\"BETA\\n\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strstr(tLocalHostResult.sOutputText, "\"dry_run\":false") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"changed\":true") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"bytes_before\":17") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"bytes_after\":17") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_READ_TEXT,
+            "{\"path\":\"tests/local_host_apply_patch_smoke.txt\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strstr(tLocalHostResult.sOutputText, "alpha\\nBETA\\ngamma") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_FILESYSTEM,
+            XWORK_HOST_FILESYSTEM_APPLY_PATCH,
+            "{\"path\":\"tests/local_host_apply_patch_smoke.txt\","
+            "\"old_text\":\"missing\\n\",\"new_text\":\"MISSING\\n\"}",
+            &tLocalHostResult
+        ) == XWORK_ERROR_INVALID_STATE
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "filesystem.apply_patch conflict") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"error_kind\":\"conflict\"") != NULL);
+
+    {
+        xwork_local_host tRestrictedHost;
+        xwork_local_host_options tRestrictedHostOptions;
+        xwork_host_services tRestrictedHostServices;
+        xwork_tool_result tRestrictedResult;
+
+        xwork_local_host_init(&tRestrictedHost);
+        xwork_local_host_options_init(&tRestrictedHostOptions);
+        xwork_host_services_init(&tRestrictedHostServices);
+        xwork_tool_result_init(&tRestrictedResult);
+        tRestrictedHostOptions.sDefaultWorkingDirectory = "tests";
+        tRestrictedHostOptions.bEnforceFilesystemRoot = true;
+        assert(
+            xwork_local_host_configure_services(
+                &tRestrictedHost,
+                &tRestrictedHostOptions,
+                &tRestrictedHostServices
+            ) == XWORK_OK
+        );
+        assert(tRestrictedHostServices.tFilesystem.pfnInvoke != NULL);
+        assert(
+            tRestrictedHostServices.tFilesystem.pfnInvoke(
+                XWORK_HOST_FILESYSTEM_READ_TEXT,
+                "{\"path\":\"local_host_apply_patch_smoke.txt\"}",
+                &tRestrictedResult,
+                tRestrictedHostServices.tFilesystem.pUserData
+            ) == XWORK_OK
+        );
+        assert(strcmp(tRestrictedResult.sVisibleSummary, "filesystem.read_text ok") == 0);
+        assert(
+            tRestrictedHostServices.tFilesystem.pfnInvoke(
+                XWORK_HOST_FILESYSTEM_READ_TEXT,
+                "{\"path\":\"../README.md\"}",
+                &tRestrictedResult,
+                tRestrictedHostServices.tFilesystem.pUserData
+            ) == XWORK_ERROR_INVALID_STATE
+        );
+        assert(
+            strcmp(
+                tRestrictedResult.sVisibleSummary,
+                "filesystem.read_text denied by path policy"
+            ) == 0
+        );
+        assert(strstr(tRestrictedResult.sOutputText, "\"error_kind\":\"path_denied\"") != NULL);
+        assert(
+            tRestrictedHostServices.tFilesystem.pfnInvoke(
+                XWORK_HOST_FILESYSTEM_STAT,
+                "{\"path\":\"../README.md\"}",
+                &tRestrictedResult,
+                tRestrictedHostServices.tFilesystem.pUserData
+            ) == XWORK_ERROR_INVALID_STATE
+        );
+        assert(
+            strcmp(
+                tRestrictedResult.sVisibleSummary,
+                "filesystem.stat denied by path policy"
+            ) == 0
+        );
+        assert(strstr(tRestrictedResult.sOutputText, "\"error_kind\":\"path_denied\"") != NULL);
+        assert(
+            tRestrictedHostServices.tFilesystem.pfnInvoke(
+                XWORK_HOST_FILESYSTEM_LIST,
+                "{\"path\":\"..\"}",
+                &tRestrictedResult,
+                tRestrictedHostServices.tFilesystem.pUserData
+            ) == XWORK_ERROR_INVALID_STATE
+        );
+        assert(
+            strcmp(
+                tRestrictedResult.sVisibleSummary,
+                "filesystem scan denied by path policy"
+            ) == 0
+        );
+        assert(strstr(tRestrictedResult.sOutputText, "\"error_kind\":\"path_denied\"") != NULL);
+        assert(
+            tRestrictedHostServices.tFilesystem.pfnInvoke(
+                XWORK_HOST_FILESYSTEM_GLOB,
+                "{\"path\":\"..\",\"pattern\":\"*.md\"}",
+                &tRestrictedResult,
+                tRestrictedHostServices.tFilesystem.pUserData
+            ) == XWORK_ERROR_INVALID_STATE
+        );
+        assert(
+            strcmp(
+                tRestrictedResult.sVisibleSummary,
+                "filesystem scan denied by path policy"
+            ) == 0
+        );
+        assert(strstr(tRestrictedResult.sOutputText, "\"error_kind\":\"path_denied\"") != NULL);
+        assert(
+            tRestrictedHostServices.tFilesystem.pfnInvoke(
+                XWORK_HOST_FILESYSTEM_WRITE_TEXT,
+                "{\"path\":\"../path_policy_escape.txt\",\"text\":\"escape\"}",
+                &tRestrictedResult,
+                tRestrictedHostServices.tFilesystem.pUserData
+            ) == XWORK_ERROR_INVALID_STATE
+        );
+        assert(
+            strcmp(
+                tRestrictedResult.sVisibleSummary,
+                "filesystem.write_text denied by path policy"
+            ) == 0
+        );
+        assert(
+            tRestrictedHostServices.tFilesystem.pfnInvoke(
+                XWORK_HOST_FILESYSTEM_APPLY_PATCH,
+                "{\"path\":\"../README.md\",\"old_text\":\"README\",\"new_text\":\"README\"}",
+                &tRestrictedResult,
+                tRestrictedHostServices.tFilesystem.pUserData
+            ) == XWORK_ERROR_INVALID_STATE
+        );
+        assert(
+            strcmp(
+                tRestrictedResult.sVisibleSummary,
+                "filesystem.apply_patch denied by path policy"
+            ) == 0
+        );
+        xwork_local_host_reset(&tRestrictedHost);
+    }
+
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
             XWORK_HOST_PROCESS,
             XWORK_HOST_PROCESS_EXEC,
             "{\"command\":\"echo xwork-local-process\"}",
@@ -3540,6 +5910,91 @@ int main(void)
     assert(strstr(tLocalHostResult.sOutputText, "\"stdout\":\"") != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "xwork-local-process") != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "\"cwd\":\".\"") != NULL);
+
+    {
+        const char *psCommandAllowPatterns[] = {"echo"};
+        const char *psCommandDenyPatterns[] = {"forbidden"};
+        xwork_local_host tRestrictedProcessHost;
+        xwork_local_host_options tRestrictedProcessOptions;
+        xwork_host_services tRestrictedProcessServices;
+        xwork_tool_result tRestrictedProcessResult;
+
+        xwork_local_host_init(&tRestrictedProcessHost);
+        xwork_local_host_options_init(&tRestrictedProcessOptions);
+        xwork_host_services_init(&tRestrictedProcessServices);
+        xwork_tool_result_init(&tRestrictedProcessResult);
+        tRestrictedProcessOptions.sDefaultWorkingDirectory = ".";
+        tRestrictedProcessOptions.psCommandAllowPatterns = psCommandAllowPatterns;
+        tRestrictedProcessOptions.iCommandAllowPatternCount =
+            sizeof(psCommandAllowPatterns) / sizeof(psCommandAllowPatterns[0]);
+        tRestrictedProcessOptions.psCommandDenyPatterns = psCommandDenyPatterns;
+        tRestrictedProcessOptions.iCommandDenyPatternCount =
+            sizeof(psCommandDenyPatterns) / sizeof(psCommandDenyPatterns[0]);
+        tRestrictedProcessOptions.bDenyDestructiveCommands = true;
+        assert(
+            xwork_local_host_configure_services(
+                &tRestrictedProcessHost,
+                &tRestrictedProcessOptions,
+                &tRestrictedProcessServices
+            ) == XWORK_OK
+        );
+        assert(tRestrictedProcessServices.tProcess.pfnInvoke != NULL);
+        assert(
+            tRestrictedProcessServices.tProcess.pfnInvoke(
+                XWORK_HOST_PROCESS_EXEC,
+                "{\"command\":\"echo allowed-command\"}",
+                &tRestrictedProcessResult,
+                tRestrictedProcessServices.tProcess.pUserData
+            ) == XWORK_OK
+        );
+        assert(strcmp(tRestrictedProcessResult.sVisibleSummary, "process.exec ok") == 0);
+        assert(
+            tRestrictedProcessServices.tProcess.pfnInvoke(
+                XWORK_HOST_PROCESS_EXEC,
+                "{\"command\":\"echo forbidden command\"}",
+                &tRestrictedProcessResult,
+                tRestrictedProcessServices.tProcess.pUserData
+            ) == XWORK_ERROR_INVALID_STATE
+        );
+        assert(
+            strcmp(
+                tRestrictedProcessResult.sVisibleSummary,
+                "process.exec denied by command policy"
+            ) == 0
+        );
+        assert(strstr(tRestrictedProcessResult.sOutputText, "\"error_kind\":\"command_denied\"") != NULL);
+        assert(
+            tRestrictedProcessServices.tProcess.pfnInvoke(
+                XWORK_HOST_PROCESS_EXEC,
+                "{\"command\":\"echo before && rm -rf build\"}",
+                &tRestrictedProcessResult,
+                tRestrictedProcessServices.tProcess.pUserData
+            ) == XWORK_ERROR_INVALID_STATE
+        );
+        assert(
+            strstr(
+                tRestrictedProcessResult.sOutputText,
+                "\"error_kind\":\"destructive_command\""
+            ) != NULL
+        );
+        if ( xrtProcessTerminalSupported() ) {
+            assert(
+                tRestrictedProcessServices.tProcess.pfnInvoke(
+                    XWORK_HOST_PROCESS_START_TERMINAL,
+                    "{\"command\":\"echo forbidden terminal\"}",
+                    &tRestrictedProcessResult,
+                    tRestrictedProcessServices.tProcess.pUserData
+                ) == XWORK_ERROR_INVALID_STATE
+            );
+            assert(
+                strcmp(
+                    tRestrictedProcessResult.sVisibleSummary,
+                    "process.start_terminal denied by command policy"
+                ) == 0
+            );
+        }
+        xwork_local_host_reset(&tRestrictedProcessHost);
+    }
 
     assert(
         xwork_runtime_invoke_host_service(
@@ -3789,6 +6244,12 @@ int main(void)
                 ) == XWORK_OK
             );
             assert(strcmp(tLocalHostResult.sVisibleSummary, "process.list_terminals ok") == 0);
+            assert(
+                strstr(
+                    tLocalHostResult.sOutputText,
+                    "\"schema\":\"" XWORK_TERMINAL_INVENTORY_SCHEMA_V1 "\""
+                ) != NULL
+            );
             assert(strstr(tLocalHostResult.sOutputText, "\"session_count\":1") != NULL);
             assert(strstr(tLocalHostResult.sOutputText, "\"total_session_count\":1") != NULL);
             assert(strstr(tLocalHostResult.sOutputText, "\"sort\":\"session_index_asc\"") != NULL);
@@ -4454,6 +6915,56 @@ int main(void)
     assert(tLocalHostResult.sOutputText != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "\"status\":\"") != NULL);
     assert(strstr(tLocalHostResult.sOutputText, "\"ok\":true") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_VCS,
+            XWORK_HOST_VCS_DIFF,
+            "{\"path\":\".\",\"max_output_bytes\":4096}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "vcs.diff ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"diff\":\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"operation\":\"diff\"") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_VCS,
+            XWORK_HOST_VCS_DIFF,
+            "{\"path\":\".\",\"staged\":true,\"max_output_bytes\":4096}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "vcs.diff ok") == 0);
+    assert(strstr(tLocalHostResult.sOutputText, "\"staged\":true") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_VCS,
+            XWORK_HOST_VCS_LOG,
+            "{\"path\":\".\",\"limit\":3,\"max_output_bytes\":4096}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "vcs.log ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"log\":\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"limit\":3") != NULL);
+    assert(
+        xwork_runtime_invoke_host_service(
+            pLocalHostRuntime,
+            XWORK_HOST_VCS,
+            XWORK_HOST_VCS_BRANCH,
+            "{\"path\":\".\"}",
+            &tLocalHostResult
+        ) == XWORK_OK
+    );
+    assert(strcmp(tLocalHostResult.sVisibleSummary, "vcs.branch ok") == 0);
+    assert(tLocalHostResult.sOutputText != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"branch\":\"") != NULL);
+    assert(strstr(tLocalHostResult.sOutputText, "\"dirty\":") != NULL);
 
     memset(&tInterruptCtx, 0, sizeof(tInterruptCtx));
     tInterruptCtx.sInterruptPhase = "before_process_spawn";
@@ -4488,6 +6999,59 @@ int main(void)
     assert(xwork_run_get_last_event(pLocalHostRun, &tEvent) == XWORK_OK);
     assert(tEvent.eKind == XWORK_EVENT_RUN_CANCELLED);
     xwork_event_reset(&tEvent);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+
+    tAdapterCtx.iTurnCount = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-process-test-tool";
+    tRunOptions.sInstruction = "Run the local test command through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 3u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pLocalHostRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "Host service process test completed."
+        ) == 0
+    );
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 2u);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+    assert(tArtifact.eKind == XWORK_ARTIFACT_COMMAND);
+    assert(strcmp(tArtifact.sName, "process.exec.txt") == 0);
+    assert(strcmp(tArtifact.sCommandText, XWORK_TEST_PROCESS_TEST_COMMAND) == 0);
+    assert(tArtifact.sContentText != NULL);
+    assert(strstr(tArtifact.sContentText, XWORK_TEST_PROCESS_TEST_EXPECTED) != NULL);
+    assert(tArtifact.bHasExitCode);
+    assert(tArtifact.iExitCode == 0);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 1u, &tArtifact) == XWORK_OK);
+    xwork_test_assert_process_diagnostics_artifact(
+        &tArtifact,
+        XWORK_TEST_PROCESS_TEST_COMMAND,
+        "passed",
+        NULL,
+        NULL,
+        0u
+    );
+    assert(strstr(tArtifact.sContentText, "\"diagnostics\":[]") != NULL);
+    xwork_artifact_reset(&tArtifact);
     xwork_run_destroy(pLocalHostRun);
     pLocalHostRun = NULL;
 
@@ -5250,6 +7814,12 @@ int main(void)
         assert(strcmp(tArtifact.sMimeType, "application/json") == 0);
         assert(strcmp(tArtifact.sStorageRef, "terminal-sessions://active") == 0);
         assert(tArtifact.sContentText != NULL);
+        assert(
+            strstr(
+                tArtifact.sContentText,
+                "\"schema\":\"" XWORK_TERMINAL_INVENTORY_SCHEMA_V1 "\""
+            ) != NULL
+        );
         assert(strstr(tArtifact.sContentText, "\"session_name\":\"build-shell\"") != NULL);
         assert(strstr(tArtifact.sContentText, "\"sort\":\"session_index_asc\"") != NULL);
         xwork_artifact_reset(&tArtifact);
@@ -5374,7 +7944,7 @@ int main(void)
     assert(strstr(tRunSnapshot.sLastToolResultText, XWORK_TEST_PROCESS_STDOUT_EXPECTED) != NULL);
     assert(strstr(tRunSnapshot.sLastToolResultText, XWORK_TEST_PROCESS_STDERR_EXPECTED) != NULL);
     xwork_run_snapshot_reset(&tRunSnapshot);
-    assert(xwork_run_get_artifact_count(pLocalHostRun) == 1u);
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 2u);
     xwork_artifact_reset(&tArtifact);
     assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
     assert(tArtifact.eKind == XWORK_ARTIFACT_COMMAND);
@@ -5390,6 +7960,16 @@ int main(void)
     assert(!tArtifact.bStderrTruncated);
     assert(tArtifact.bHasExitCode);
     assert(tArtifact.iExitCode == 0);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 1u, &tArtifact) == XWORK_OK);
+    xwork_test_assert_process_diagnostics_artifact(
+        &tArtifact,
+        XWORK_TEST_PROCESS_STDERR_COMMAND_RAW,
+        "passed",
+        "warning",
+        XWORK_TEST_PROCESS_STDERR_EXPECTED,
+        1u
+    );
     xwork_artifact_reset(&tArtifact);
     xwork_run_destroy(pLocalHostRun);
     pLocalHostRun = NULL;
@@ -5428,7 +8008,7 @@ int main(void)
     assert(strstr(tRunSnapshot.sLastToolResultText, XWORK_TEST_PROCESS_STDOUT_EXPECTED) != NULL);
     assert(strstr(tRunSnapshot.sLastToolResultText, XWORK_TEST_PROCESS_STDERR_EXPECTED) != NULL);
     xwork_run_snapshot_reset(&tRunSnapshot);
-    assert(xwork_run_get_artifact_count(pLocalHostRun) == 1u);
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 2u);
     xwork_artifact_reset(&tArtifact);
     assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
     assert(tArtifact.eKind == XWORK_ARTIFACT_COMMAND);
@@ -5444,6 +8024,16 @@ int main(void)
     assert(!tArtifact.bStderrTruncated);
     assert(tArtifact.bHasExitCode);
     assert(tArtifact.iExitCode == 0);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 1u, &tArtifact) == XWORK_OK);
+    xwork_test_assert_process_diagnostics_artifact(
+        &tArtifact,
+        XWORK_TEST_PROCESS_STDERR_COMMAND_RAW,
+        "passed",
+        "warning",
+        XWORK_TEST_PROCESS_STDERR_EXPECTED,
+        1u
+    );
     xwork_artifact_reset(&tArtifact);
     xwork_run_destroy(pLocalHostRun);
     pLocalHostRun = NULL;
@@ -5523,7 +8113,7 @@ int main(void)
             "Host service process non-zero completed."
         ) == 0
     );
-    assert(xwork_run_get_artifact_count(pLocalHostRun) == 1u);
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 2u);
     xwork_artifact_reset(&tArtifact);
     assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
     assert(tArtifact.eKind == XWORK_ARTIFACT_COMMAND);
@@ -5540,6 +8130,17 @@ int main(void)
     assert(!tArtifact.bStderrTruncated);
     assert(tArtifact.bHasExitCode);
     assert(tArtifact.iExitCode == XWORK_TEST_PROCESS_NONZERO_EXIT_CODE);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 1u, &tArtifact) == XWORK_OK);
+    xwork_test_assert_process_diagnostics_artifact(
+        &tArtifact,
+        XWORK_TEST_PROCESS_NONZERO_COMMAND_RAW,
+        "failed",
+        "error",
+        XWORK_TEST_PROCESS_NONZERO_EXPECTED,
+        1u
+    );
+    assert(strstr(tArtifact.sContentText, "\"exit_code\":3") != NULL);
     xwork_artifact_reset(&tArtifact);
     xwork_run_destroy(pLocalHostRun);
     pLocalHostRun = NULL;
@@ -5906,6 +8507,80 @@ int main(void)
     assert(tArtifact.sStorageRef != NULL);
     xwork_run_destroy(pLocalHostRun);
     pLocalHostRun = NULL;
+
+    xwork_test_write_text_file(sLocalHostEditorOrchestratorPath, "xwork-editor");
+    tAdapterCtx.iTurnCount = 0;
+    tAdapterCtx.sExpectedMemoryText = NULL;
+    tAdapterCtx.iObservedMemoryTurns = 0;
+    tAdapterCtx.sExpectedPlannerText = NULL;
+    tAdapterCtx.iObservedPlannerTurns = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-local-editor-buffer-tool";
+    tRunOptions.sInstruction = "Edit an open editor buffer through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pLocalHostRuntime,
+            &tRunOptions,
+            &pLocalHostRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tPendingExecOptions);
+    tPendingExecOptions.iMaxTurns = 4u;
+    tPendingExecOptions.bAutoApprove = false;
+    assert(xwork_run_execute(pLocalHostRun, &tPendingExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_WAITING_APPROVAL);
+    xwork_approval_request_init(&tPendingApproval);
+    assert(xwork_run_get_last_approval_request(pLocalHostRun, &tPendingApproval) == XWORK_OK);
+    assert(tPendingApproval.eState == XWORK_APPROVAL_PENDING);
+    assert(strcmp(tPendingApproval.sToolId, XWORK_TOOL_EDITOR_APPLY_EDIT) == 0);
+    assert(strcmp(tPendingApproval.sScope, "workspace_write") == 0);
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 1u);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 0u, &tArtifact) == XWORK_OK);
+    assert(tArtifact.eKind == XWORK_ARTIFACT_OUTPUT);
+    xwork_test_assert_output_class(
+        &tArtifact,
+        XWORK_ARTIFACT_OUTPUT_FILE_CONTENT,
+        XWORK_TOOL_EDITOR_OPEN_BUFFER
+    );
+    assert(strcmp(tArtifact.sName, "editor.open_buffer.json") == 0);
+    assert(tArtifact.sContentText != NULL);
+    assert(strstr(tArtifact.sContentText, "\"dirty\":false") != NULL);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_submit_approval(pLocalHostRun, XWORK_APPROVAL_APPROVED) == XWORK_OK);
+    assert(xwork_run_resume(pLocalHostRun) == XWORK_OK);
+    tAdapterCtx.iTurnCount = 2;
+    assert(xwork_run_execute(pLocalHostRun, &tPendingExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pLocalHostRun) == XWORK_RUN_COMPLETED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pLocalHostRun),
+            "Host service editor buffer completed."
+        ) == 0
+    );
+    assert(xwork_run_get_artifact_count(pLocalHostRun) == 2u);
+    xwork_artifact_reset(&tArtifact);
+    assert(xwork_run_get_artifact(pLocalHostRun, 1u, &tArtifact) == XWORK_OK);
+    assert(tArtifact.eKind == XWORK_ARTIFACT_OUTPUT);
+    xwork_test_assert_output_class(
+        &tArtifact,
+        XWORK_ARTIFACT_OUTPUT_FILE_CHANGE,
+        XWORK_TOOL_EDITOR_APPLY_EDIT
+    );
+    assert(strcmp(tArtifact.sName, "editor.apply_edit.json") == 0);
+    assert(tArtifact.sContentText != NULL);
+    assert(strstr(tArtifact.sContentText, "\"dirty\":true") != NULL);
+    assert(strstr(tArtifact.sContentText, "\"text\":\"x-editwork-editor\"") != NULL);
+    xwork_artifact_reset(&tArtifact);
+    xwork_run_destroy(pLocalHostRun);
+    pLocalHostRun = NULL;
+
     xwork_runtime_destroy(pLocalHostRuntime);
     pLocalHostRuntime = NULL;
     xwork_local_host_reset(&tLocalHost);
@@ -5959,7 +8634,7 @@ int main(void)
     xwork_approval_request_init(&tPendingApproval);
     assert(xwork_run_get_last_approval_request(pPendingRun, &tPendingApproval) == XWORK_OK);
     assert(tPendingApproval.eState == XWORK_APPROVAL_PENDING);
-    assert(strcmp(tPendingApproval.sToolId, "mock.apply_patch") == 0);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
 
     xwork_checkpoint_init(&tPendingCheckpoint);
     assert(xwork_run_get_last_checkpoint(pPendingRun, &tPendingCheckpoint) == XWORK_OK);
@@ -5981,6 +8656,7 @@ int main(void)
     xwork_approval_request_init(&tPendingApproval);
     assert(xwork_run_get_last_approval_request(pPendingRun, &tPendingApproval) == XWORK_OK);
     assert(tPendingApproval.eState == XWORK_APPROVAL_APPROVED);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
 
     xwork_event_init(&tPendingEvent);
     assert(xwork_run_get_last_event(pPendingRun, &tPendingEvent) == XWORK_OK);
@@ -6021,12 +8697,38 @@ int main(void)
     xwork_approval_request_init(&tPendingApproval);
     assert(xwork_run_get_last_approval_request(pPendingRun, &tPendingApproval) == XWORK_OK);
     assert(tPendingApproval.eState == XWORK_APPROVAL_PENDING);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
     xwork_checkpoint_init(&tPendingCheckpoint);
     assert(xwork_run_get_last_checkpoint(pPendingRun, &tPendingCheckpoint) == XWORK_OK);
     assert(tPendingCheckpoint.eKind == XWORK_CHECKPOINT_BEFORE_TOOL);
     xwork_event_init(&tPendingEvent);
     assert(xwork_run_get_last_event(pPendingRun, &tPendingEvent) == XWORK_OK);
     assert(tPendingEvent.eKind == XWORK_EVENT_CHECKPOINT_LOADED);
+    assert(xwork_run_resume(pPendingRun) == XWORK_ERROR_INVALID_STATE);
+
+    assert(xwork_run_submit_approval(pPendingRun, XWORK_APPROVAL_REJECTED) == XWORK_OK);
+    assert(xwork_run_get_state(pPendingRun) == XWORK_RUN_PAUSED);
+    xwork_approval_request_reset(&tPendingApproval);
+    assert(xwork_run_get_last_approval_request(pPendingRun, &tPendingApproval) == XWORK_OK);
+    assert(tPendingApproval.eState == XWORK_APPROVAL_REJECTED);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
+    xwork_event_reset(&tPendingEvent);
+    assert(xwork_run_get_last_event(pPendingRun, &tPendingEvent) == XWORK_OK);
+    assert(tPendingEvent.eKind == XWORK_EVENT_APPROVAL_RESOLVED);
+    assert(xwork_run_resume(pPendingRun) == XWORK_ERROR_INVALID_STATE);
+    assert(xwork_run_submit_approval(pPendingRun, XWORK_APPROVAL_APPROVED) == XWORK_ERROR_INVALID_STATE);
+
+    assert(xwork_run_load_checkpoint(pPendingRun, sPendingBeforeToolCheckpointId) == XWORK_OK);
+    assert(xwork_run_get_state(pPendingRun) == XWORK_RUN_WAITING_APPROVAL);
+    assert(xwork_run_submit_approval(pPendingRun, XWORK_APPROVAL_CANCELLED) == XWORK_OK);
+    assert(xwork_run_get_state(pPendingRun) == XWORK_RUN_PAUSED);
+    xwork_approval_request_reset(&tPendingApproval);
+    assert(xwork_run_get_last_approval_request(pPendingRun, &tPendingApproval) == XWORK_OK);
+    assert(tPendingApproval.eState == XWORK_APPROVAL_CANCELLED);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
+    xwork_event_reset(&tPendingEvent);
+    assert(xwork_run_get_last_event(pPendingRun, &tPendingEvent) == XWORK_OK);
+    assert(tPendingEvent.eKind == XWORK_EVENT_APPROVAL_RESOLVED);
     assert(xwork_run_resume(pPendingRun) == XWORK_ERROR_INVALID_STATE);
 
     tAdapterCtx.iTurnCount = 0;
@@ -6061,6 +8763,7 @@ int main(void)
     xwork_approval_request_init(&tPendingApproval);
     assert(xwork_run_get_last_approval_request(pRecoveredRun, &tPendingApproval) == XWORK_OK);
     assert(tPendingApproval.eState == XWORK_APPROVAL_PENDING);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
     xwork_checkpoint_init(&tPendingCheckpoint);
     assert(xwork_run_get_last_checkpoint(pRecoveredRun, &tPendingCheckpoint) == XWORK_OK);
     assert(tPendingCheckpoint.eKind == XWORK_CHECKPOINT_BEFORE_TOOL);
@@ -6085,6 +8788,7 @@ int main(void)
 
     tPersistenceCtx.iStoreEventCount = 0;
     tPersistenceCtx.iStoreCheckpointCount = 0;
+    tPersistenceCtx.iStoreRunSnapshotCount = 0;
     tPersistenceCtx.iStoreArtifactCount = 0;
     tPersistenceCtx.iLoadSnapshotCount = 0;
     tPersistenceCtx.bHasSnapshot = false;
@@ -6142,6 +8846,7 @@ int main(void)
     xwork_approval_request_init(&tPendingApproval);
     assert(xwork_run_get_last_approval_request(pPersistenceRecoveredRun, &tPendingApproval) == XWORK_OK);
     assert(tPendingApproval.eState == XWORK_APPROVAL_PENDING);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
     xwork_checkpoint_init(&tPendingCheckpoint);
     assert(xwork_run_get_last_checkpoint(pPersistenceRecoveredRun, &tPendingCheckpoint) == XWORK_OK);
     assert(tPendingCheckpoint.eKind == XWORK_CHECKPOINT_BEFORE_TOOL);
@@ -6342,6 +9047,7 @@ int main(void)
     xwork_approval_request_init(&tPendingApproval);
     assert(xwork_run_get_last_approval_request(pFileRecoveredRun, &tPendingApproval) == XWORK_OK);
     assert(tPendingApproval.eState == XWORK_APPROVAL_PENDING);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
     assert(xwork_run_load_checkpoint(pFileRecoveredRun, sFileBeforeToolCheckpointId) == XWORK_OK);
     assert(xwork_run_get_state(pFileRecoveredRun) == XWORK_RUN_WAITING_APPROVAL);
     xwork_memory_context_reset(&tObservedMemoryContext);
@@ -6358,10 +9064,30 @@ int main(void)
     xwork_approval_request_init(&tPendingApproval);
     assert(xwork_run_get_last_approval_request(pFileRecoveredRun, &tPendingApproval) == XWORK_OK);
     assert(tPendingApproval.eState == XWORK_APPROVAL_PENDING);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
     xwork_event_init(&tPendingEvent);
     assert(xwork_run_get_last_event(pFileRecoveredRun, &tPendingEvent) == XWORK_OK);
     assert(tPendingEvent.eKind == XWORK_EVENT_CHECKPOINT_LOADED);
     assert(xwork_run_submit_approval(pFileRecoveredRun, XWORK_APPROVAL_APPROVED) == XWORK_OK);
+    assert(xwork_run_get_state(pFileRecoveredRun) == XWORK_RUN_PAUSED);
+    xwork_approval_request_reset(&tPendingApproval);
+    assert(xwork_run_get_last_approval_request(pFileRecoveredRun, &tPendingApproval) == XWORK_OK);
+    assert(tPendingApproval.eState == XWORK_APPROVAL_APPROVED);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
+    xwork_run_destroy(pFileRecoveredRun);
+    pFileRecoveredRun = NULL;
+    assert(
+        xwork_runtime_recover_run_from_persistence(
+            pFileRecoverRuntime,
+            "run-file-persistence",
+            &pFileRecoveredRun
+        ) == XWORK_OK
+    );
+    assert(xwork_run_get_state(pFileRecoveredRun) == XWORK_RUN_PAUSED);
+    xwork_approval_request_reset(&tPendingApproval);
+    assert(xwork_run_get_last_approval_request(pFileRecoveredRun, &tPendingApproval) == XWORK_OK);
+    assert(tPendingApproval.eState == XWORK_APPROVAL_APPROVED);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
     assert(xwork_run_resume(pFileRecoveredRun) == XWORK_OK);
     tAdapterCtx.iTurnCount = 1;
     assert(xwork_run_execute(pFileRecoveredRun, &tPendingExecOptions) == XWORK_OK);
@@ -6400,6 +9126,31 @@ int main(void)
         ) == XWORK_OK
     );
     assert(tPersistedEventIds.iCount >= 3u);
+    xwork_run_step_list_reset(&tRunSteps);
+    assert(
+        xwork_file_persistence_query_run_steps(
+            &tFilePersistenceRecoverStore,
+            "run-file-persistence",
+            NULL,
+            &tRunSteps
+        ) == XWORK_OK
+    );
+    assert(tRunSteps.iCount == tPersistedEventIds.iCount);
+    xwork_run_step_query_init(&tRunStepQuery);
+    tRunStepQuery.bFilterKind = true;
+    tRunStepQuery.eKind = XWORK_RUN_STEP_CHECKPOINT;
+    tRunStepQuery.iLimit = 1u;
+    xwork_run_step_list_reset(&tRunSteps);
+    assert(
+        xwork_file_persistence_query_run_steps(
+            &tFilePersistenceRecoverStore,
+            "run-file-persistence",
+            &tRunStepQuery,
+            &tRunSteps
+        ) == XWORK_OK
+    );
+    assert(tRunSteps.iCount == 1u);
+    assert(tRunSteps.bHasMore);
     xwork_run_summary_reset(&tLoadedSummary);
     assert(
         xwork_file_persistence_load_run_summary(
@@ -6470,8 +9221,8 @@ int main(void)
         ) == XWORK_OK
     );
     assert(tPendingApproval.sRequestId != NULL);
-    assert(strcmp(tPendingApproval.sToolId, "mock.apply_patch") == 0);
     assert(tPendingApproval.eState == XWORK_APPROVAL_APPROVED);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
     xwork_event_reset(&tLoadedEvent);
     assert(
         xwork_file_persistence_load_last_event(
@@ -6509,6 +9260,7 @@ int main(void)
     assert(strcmp(tLoadedArtifact.sMimeType, "text/x-diff") == 0);
     assert(strcmp(tLoadedArtifact.sStorageRef, "workspace://README.md") == 0);
     xwork_test_assert_readme_patch_stats(&tLoadedArtifact);
+    xwork_test_assert_patch_apply_schema(&tLoadedArtifact);
     xwork_artifact_reset(&tLoadedArtifact);
     assert(
         xwork_file_persistence_load_last_artifact(
@@ -6588,8 +9340,10 @@ int main(void)
     assert(strcmp(tPersistedRunIndex.pItems[0].tSummary.sRunId, "run-file-persistence") == 0);
     assert(tPersistedRunIndex.pItems[0].bHasLastApprovalRequest);
     assert(tPersistedRunIndex.pItems[0].tLastApprovalRequest.sRequestId != NULL);
-    assert(strcmp(tPersistedRunIndex.pItems[0].tLastApprovalRequest.sToolId, "mock.apply_patch") == 0);
     assert(tPersistedRunIndex.pItems[0].tLastApprovalRequest.eState == XWORK_APPROVAL_APPROVED);
+    xwork_test_assert_mock_patch_approval_metadata(
+        &tPersistedRunIndex.pItems[0].tLastApprovalRequest
+    );
     assert(tPersistedRunIndex.pItems[0].bHasLastEvent);
     assert(tPersistedRunIndex.pItems[0].tLastEvent.eKind == XWORK_EVENT_RUN_COMPLETED);
     assert(tPersistedRunIndex.pItems[0].tLastEvent.eRunState == XWORK_RUN_COMPLETED);
@@ -6608,8 +9362,10 @@ int main(void)
     assert(strcmp(tPersistedRunIndex.pItems[1].tSummary.sRunId, "run-file-persistence-2") == 0);
     assert(tPersistedRunIndex.pItems[1].bHasLastApprovalRequest);
     assert(tPersistedRunIndex.pItems[1].tLastApprovalRequest.sRequestId != NULL);
-    assert(strcmp(tPersistedRunIndex.pItems[1].tLastApprovalRequest.sToolId, "mock.apply_patch") == 0);
     assert(tPersistedRunIndex.pItems[1].tLastApprovalRequest.eState == XWORK_APPROVAL_APPROVED);
+    xwork_test_assert_mock_patch_approval_metadata(
+        &tPersistedRunIndex.pItems[1].tLastApprovalRequest
+    );
     assert(tPersistedRunIndex.pItems[1].bHasLastEvent);
     assert(tPersistedRunIndex.pItems[1].tLastEvent.eKind == XWORK_EVENT_RUN_COMPLETED);
     assert(tPersistedRunIndex.pItems[1].iEventCount >= 3u);
@@ -6665,8 +9421,72 @@ int main(void)
         ) == XWORK_OK
     );
     assert(tPersistedRunIndex.iCount == 3u);
+    assert(!tPersistedRunIndex.bHasMore);
+    assert(tPersistedRunIndex.sNextAfterRunId == NULL);
     assert(strcmp(tPersistedRunIndex.pItems[0].tSummary.sRunId, "run-file-persistence-pending") == 0);
     assert(strcmp(tPersistedRunIndex.pItems[2].tSummary.sRunId, "run-file-persistence") == 0);
+
+    xwork_run_index_query_init(&tRunIndexQuery);
+    tRunIndexQuery.eSort = XWORK_RUN_INDEX_SORT_RUN_ID_ASC;
+    tRunIndexQuery.iLimit = 2u;
+    xwork_run_index_list_reset(&tPersistedRunIndex);
+    assert(
+        xwork_file_persistence_query_run_index(
+            &tFilePersistenceRecoverStore,
+            &tRunIndexQuery,
+            &tPersistedRunIndex
+        ) == XWORK_OK
+    );
+    assert(tPersistedRunIndex.iCount == 2u);
+    assert(tPersistedRunIndex.bHasMore);
+    assert(strcmp(tPersistedRunIndex.sNextAfterRunId, "run-file-persistence-2") == 0);
+    assert(strcmp(tPersistedRunIndex.pItems[0].tSummary.sRunId, "run-file-persistence") == 0);
+    assert(strcmp(tPersistedRunIndex.pItems[1].tSummary.sRunId, "run-file-persistence-2") == 0);
+    xwork_run_index_query_init(&tRunIndexQuery);
+    tRunIndexQuery.eSort = XWORK_RUN_INDEX_SORT_RUN_ID_ASC;
+    tRunIndexQuery.sAfterRunId = "run-file-persistence-2";
+    tRunIndexQuery.iLimit = 2u;
+    xwork_run_index_list_reset(&tPersistedRunIndex);
+    assert(
+        xwork_file_persistence_query_run_index(
+            &tFilePersistenceRecoverStore,
+            &tRunIndexQuery,
+            &tPersistedRunIndex
+        ) == XWORK_OK
+    );
+    assert(tPersistedRunIndex.iCount == 1u);
+    assert(!tPersistedRunIndex.bHasMore);
+    assert(strcmp(tPersistedRunIndex.pItems[0].tSummary.sRunId, "run-file-persistence-pending") == 0);
+
+    xwork_run_index_query_init(&tRunIndexQuery);
+    tRunIndexQuery.eSort = XWORK_RUN_INDEX_SORT_RUN_ID_DESC;
+    tRunIndexQuery.iLimit = 2u;
+    xwork_run_index_list_reset(&tPersistedRunIndex);
+    assert(
+        xwork_file_persistence_query_run_index(
+            &tFilePersistenceRecoverStore,
+            &tRunIndexQuery,
+            &tPersistedRunIndex
+        ) == XWORK_OK
+    );
+    assert(tPersistedRunIndex.iCount == 2u);
+    assert(tPersistedRunIndex.bHasMore);
+    assert(strcmp(tPersistedRunIndex.sNextAfterRunId, "run-file-persistence-2") == 0);
+    assert(strcmp(tPersistedRunIndex.pItems[0].tSummary.sRunId, "run-file-persistence-pending") == 0);
+    assert(strcmp(tPersistedRunIndex.pItems[1].tSummary.sRunId, "run-file-persistence-2") == 0);
+    xwork_run_index_query_init(&tRunIndexQuery);
+    tRunIndexQuery.eSort = XWORK_RUN_INDEX_SORT_RUN_ID_DESC;
+    tRunIndexQuery.sAfterRunId = "missing-run";
+    xwork_run_index_list_reset(&tPersistedRunIndex);
+    assert(
+        xwork_file_persistence_query_run_index(
+            &tFilePersistenceRecoverStore,
+            &tRunIndexQuery,
+            &tPersistedRunIndex
+        ) == XWORK_OK
+    );
+    assert(tPersistedRunIndex.iCount == 0u);
+    assert(!tPersistedRunIndex.bHasMore);
 
     xwork_run_index_query_init(&tRunIndexQuery);
     tRunIndexQuery.bFilterLastApprovalState = true;
@@ -6685,6 +9505,9 @@ int main(void)
     assert(tPersistedRunIndex.pItems[0].tSummary.eState == XWORK_RUN_WAITING_APPROVAL);
     assert(tPersistedRunIndex.pItems[0].bHasLastApprovalRequest);
     assert(tPersistedRunIndex.pItems[0].tLastApprovalRequest.eState == XWORK_APPROVAL_PENDING);
+    xwork_test_assert_mock_patch_approval_metadata(
+        &tPersistedRunIndex.pItems[0].tLastApprovalRequest
+    );
     assert(tPersistedRunIndex.pItems[0].bHasLastCheckpoint);
     assert(tPersistedRunIndex.pItems[0].tLastCheckpoint.eKind == XWORK_CHECKPOINT_BEFORE_TOOL);
     assert(tPersistedRunIndex.pItems[0].tLastCheckpoint.eRunState == XWORK_RUN_WAITING_APPROVAL);
@@ -6753,6 +9576,69 @@ int main(void)
     assert(strcmp(tPersistedRunIndex.pItems[2].tSummary.sRunId, "run-file-persistence-pending") == 0);
     assert(tPersistedRunIndex.pItems[2].iArtifactCount == 0u);
 
+    xwork_run_index_query_init(&tRunIndexQuery);
+    tRunIndexQuery.eSort = XWORK_RUN_INDEX_SORT_EVENT_COUNT_DESC;
+    xwork_run_index_list_reset(&tPersistedRunIndex);
+    assert(
+        xwork_runtime_query_persisted_run_index(
+            pFileRecoverRuntime,
+            &tRunIndexQuery,
+            &tPersistedRunIndex
+        ) == XWORK_OK
+    );
+    assert(tPersistedRunIndex.iCount == 3u);
+    assert(tPersistedRunIndex.pItems[0].iEventCount >= tPersistedRunIndex.pItems[1].iEventCount);
+    assert(tPersistedRunIndex.pItems[1].iEventCount >= tPersistedRunIndex.pItems[2].iEventCount);
+
+    xwork_run_index_query_init(&tRunIndexQuery);
+    tRunIndexQuery.eSort = XWORK_RUN_INDEX_SORT_CHECKPOINT_COUNT_DESC;
+    xwork_run_index_list_reset(&tPersistedRunIndex);
+    assert(
+        xwork_runtime_query_persisted_run_index(
+            pFileRecoverRuntime,
+            &tRunIndexQuery,
+            &tPersistedRunIndex
+        ) == XWORK_OK
+    );
+    assert(tPersistedRunIndex.iCount == 3u);
+    assert(tPersistedRunIndex.pItems[0].iCheckpointCount >= tPersistedRunIndex.pItems[1].iCheckpointCount);
+    assert(tPersistedRunIndex.pItems[1].iCheckpointCount >= tPersistedRunIndex.pItems[2].iCheckpointCount);
+
+    xwork_run_index_query_init(&tRunIndexQuery);
+    tRunIndexQuery.eSort = XWORK_RUN_INDEX_SORT_LAST_EVENT_SEQUENCE_DESC;
+    tRunIndexQuery.iLimit = 2u;
+    xwork_run_index_list_reset(&tPersistedRunIndex);
+    assert(
+        xwork_runtime_query_persisted_run_index(
+            pFileRecoverRuntime,
+            &tRunIndexQuery,
+            &tPersistedRunIndex
+        ) == XWORK_OK
+    );
+    assert(tPersistedRunIndex.iCount == 2u);
+    assert(tPersistedRunIndex.bHasMore);
+    assert(tPersistedRunIndex.pItems[0].bHasLastEvent);
+    assert(tPersistedRunIndex.pItems[1].bHasLastEvent);
+    assert(tPersistedRunIndex.pItems[0].tLastEvent.iSequence >= tPersistedRunIndex.pItems[1].tLastEvent.iSequence);
+    assert(tPersistedRunIndex.sNextAfterRunId != NULL);
+
+    xwork_run_index_query_init(&tRunIndexQuery);
+    tRunIndexQuery.eSort = XWORK_RUN_INDEX_SORT_LAST_CHECKPOINT_SEQUENCE_DESC;
+    xwork_run_index_list_reset(&tPersistedRunIndex);
+    assert(
+        xwork_runtime_query_persisted_run_index(
+            pFileRecoverRuntime,
+            &tRunIndexQuery,
+            &tPersistedRunIndex
+        ) == XWORK_OK
+    );
+    assert(tPersistedRunIndex.iCount == 3u);
+    assert(tPersistedRunIndex.pItems[0].bHasLastCheckpoint);
+    assert(tPersistedRunIndex.pItems[1].bHasLastCheckpoint);
+    assert(tPersistedRunIndex.pItems[2].bHasLastCheckpoint);
+    assert(tPersistedRunIndex.pItems[0].tLastCheckpoint.iSequence >= tPersistedRunIndex.pItems[1].tLastCheckpoint.iSequence);
+    assert(tPersistedRunIndex.pItems[1].tLastCheckpoint.iSequence >= tPersistedRunIndex.pItems[2].tLastCheckpoint.iSequence);
+
     xwork_run_index_list_reset(&tPersistedRunIndex);
     assert(
         xwork_runtime_list_persisted_run_index(
@@ -6765,6 +9651,9 @@ int main(void)
     assert(tPersistedRunIndex.pItems[2].bHasLastEvent);
     assert(tPersistedRunIndex.pItems[2].bHasLastApprovalRequest);
     assert(tPersistedRunIndex.pItems[2].tLastApprovalRequest.eState == XWORK_APPROVAL_PENDING);
+    xwork_test_assert_mock_patch_approval_metadata(
+        &tPersistedRunIndex.pItems[2].tLastApprovalRequest
+    );
     assert(tPersistedRunIndex.pItems[2].bHasLastCheckpoint);
     assert(tPersistedRunIndex.pItems[2].iCheckpointCount == 1u);
     assert(tPersistedRunIndex.pItems[2].iArtifactCount == 0u);
@@ -6831,8 +9720,8 @@ int main(void)
             &tPendingApproval
         ) == XWORK_OK
     );
-    assert(strcmp(tPendingApproval.sToolId, "mock.apply_patch") == 0);
     assert(tPendingApproval.eState == XWORK_APPROVAL_APPROVED);
+    xwork_test_assert_mock_patch_approval_metadata(&tPendingApproval);
 
     xwork_event_reset(&tLoadedEvent);
     assert(
@@ -6927,6 +9816,32 @@ int main(void)
         ) == XWORK_OK
     );
     assert(tPersistedEventIds.iCount >= 3u);
+    xwork_run_step_list_reset(&tRunSteps);
+    assert(
+        xwork_runtime_query_persisted_run_steps(
+            pFileRecoverRuntime,
+            "run-file-persistence",
+            NULL,
+            &tRunSteps
+        ) == XWORK_OK
+    );
+    assert(tRunSteps.iCount == tPersistedEventIds.iCount);
+    xwork_run_step_query_init(&tRunStepQuery);
+    tRunStepQuery.bFilterKind = true;
+    tRunStepQuery.eKind = XWORK_RUN_STEP_CHECKPOINT;
+    tRunStepQuery.bFilterCheckpointKind = true;
+    tRunStepQuery.eCheckpointKind = XWORK_CHECKPOINT_BEFORE_TOOL;
+    xwork_run_step_list_reset(&tRunSteps);
+    assert(
+        xwork_runtime_query_persisted_run_steps(
+            pFileRecoverRuntime,
+            "run-file-persistence",
+            &tRunStepQuery,
+            &tRunSteps
+        ) == XWORK_OK
+    );
+    assert(tRunSteps.iCount >= 1u);
+    assert(strcmp(tRunSteps.pItems[0].sCheckpointId, sFileBeforeToolCheckpointId) == 0);
     xwork_event_reset(&tLoadedEvent);
     assert(
         xwork_runtime_load_persisted_event(
@@ -6974,6 +9889,7 @@ int main(void)
     );
     assert(tPersistedArtifactSummaries.iCount == 1u);
     xwork_test_assert_readme_patch_summary_stats(&tPersistedArtifactSummaries.pItems[0]);
+    xwork_test_assert_patch_apply_summary_schema(&tPersistedArtifactSummaries.pItems[0]);
 
     xwork_run_options_init(&tRunOptions);
     xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
@@ -7086,14 +10002,21 @@ int main(void)
     assert(tPersistedArtifactSummaries.iCount == 0u);
 
     xwork_report_artifact_options_init(&tReportArtifactOptions);
-    tReportArtifactOptions.sName = "query-plan.md";
+    tReportArtifactOptions.sName = "query-plan.json";
+    tReportArtifactOptions.sMimeType = "application/json";
     tReportArtifactOptions.sStorageRef = "workspace://PLAN.md";
     tReportArtifactOptions.sSummary = "Plan report artifact query coverage.";
-    tReportArtifactOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_TEXT;
+    tReportArtifactOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_JSON;
     tReportArtifactOptions.sOutputRole = "report.plan";
     tReportArtifactOptions.eReportClass = XWORK_ARTIFACT_REPORT_PLAN;
     tReportArtifactOptions.sReportSubjectRef = "workspace://README.md";
-    tReportArtifactOptions.sReportText = "# Plan\n\n- inspect\n";
+    tReportArtifactOptions.sReportText =
+        "{\"schema\":\"" XWORK_REPORT_SCHEMA_V1 "\","
+        "\"report_kind\":\"plan\",\"status\":\"in_progress\","
+        "\"subject_ref\":\"workspace://README.md\","
+        "\"title\":\"Query plan\",\"summary\":\"Inspect workspace context.\","
+        "\"body_markdown\":\"# Plan\\n\\n- inspect\\n\","
+        "\"items\":[{\"title\":\"inspect\",\"status\":\"pending\"}]}";
     xwork_artifact_reset(&tArtifact);
     assert(
         xwork_run_emit_report_artifact(
@@ -7103,14 +10026,24 @@ int main(void)
         ) == XWORK_OK
     );
     assert(tArtifact.eKind == XWORK_ARTIFACT_REPORT);
-    assert(tArtifact.eOutputClass == XWORK_ARTIFACT_OUTPUT_TEXT);
+    assert(tArtifact.eOutputClass == XWORK_ARTIFACT_OUTPUT_JSON);
     assert(tArtifact.iSequence == 2u);
     xwork_test_assert_report_class(
         &tArtifact,
         XWORK_ARTIFACT_REPORT_PLAN,
         "workspace://README.md"
     );
-    xwork_test_assert_content_stats(&tArtifact, 18u, 3u);
+    xwork_test_assert_report_schema(
+        &tArtifact,
+        "plan",
+        "in_progress",
+        "workspace://README.md"
+    );
+    xwork_test_assert_content_stats(
+        &tArtifact,
+        strlen(tReportArtifactOptions.sReportText),
+        1u
+    );
 
     xwork_artifact_summary_query_init(&tArtifactSummaryQuery);
     tArtifactSummaryQuery.bHasKind = true;
@@ -7129,7 +10062,7 @@ int main(void)
         ) == XWORK_OK
     );
     assert(tPersistedArtifactSummaries.iCount == 1u);
-    assert(strcmp(tPersistedArtifactSummaries.pItems[0].sName, "query-plan.md") == 0);
+    assert(strcmp(tPersistedArtifactSummaries.pItems[0].sName, "query-plan.json") == 0);
     xwork_test_assert_summary_report_class(
         &tPersistedArtifactSummaries.pItems[0],
         XWORK_ARTIFACT_REPORT_PLAN,
@@ -7137,8 +10070,8 @@ int main(void)
     );
     xwork_test_assert_summary_content_stats(
         &tPersistedArtifactSummaries.pItems[0],
-        18u,
-        3u
+        strlen(tReportArtifactOptions.sReportText),
+        1u
     );
 
     tArtifactSummaryQuery.eReportClass = XWORK_ARTIFACT_REPORT_REVIEW;
@@ -7152,9 +10085,360 @@ int main(void)
         ) == XWORK_OK
     );
     assert(tPersistedArtifactSummaries.iCount == 0u);
+
+    xwork_report_artifact_options_init(&tReportArtifactOptions);
+    tReportArtifactOptions.sName = "process.diagnostics.json";
+    tReportArtifactOptions.sMimeType = "application/json";
+    tReportArtifactOptions.sStorageRef = "host://process/query-command";
+    tReportArtifactOptions.sSummary = "Diagnostics report artifact query coverage.";
+    tReportArtifactOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_TEXT;
+    tReportArtifactOptions.sOutputRole = "report.diagnostics";
+    tReportArtifactOptions.eReportClass = XWORK_ARTIFACT_REPORT_DIAGNOSTICS;
+    tReportArtifactOptions.sReportSubjectRef = "query-command";
+    tReportArtifactOptions.sReportText =
+        "{\"schema\":\"" XWORK_DIAGNOSTICS_SCHEMA_V1 "\","
+        "\"source\":\"process.exec\",\"command\":\"query-command\","
+        "\"status\":\"failed\",\"diagnostic_count\":1,"
+        "\"diagnostics\":[{\"severity\":\"error\","
+        "\"source\":\"process.exec\",\"location\":\"\","
+        "\"message\":\"query command failed\"}]}";
+    xwork_artifact_reset(&tArtifact);
+    assert(
+        xwork_run_emit_report_artifact(
+            pFileArtifactQueryRun,
+            &tReportArtifactOptions,
+            &tArtifact
+        ) == XWORK_OK
+    );
+    assert(tArtifact.eKind == XWORK_ARTIFACT_REPORT);
+    assert(tArtifact.eOutputClass == XWORK_ARTIFACT_OUTPUT_TEXT);
+    assert(tArtifact.iSequence == 3u);
+    xwork_test_assert_report_class(
+        &tArtifact,
+        XWORK_ARTIFACT_REPORT_DIAGNOSTICS,
+        "query-command"
+    );
+    assert(strstr(tArtifact.sContentText, "\"severity\":\"error\"") != NULL);
+
+    xwork_artifact_summary_query_init(&tArtifactSummaryQuery);
+    tArtifactSummaryQuery.bHasKind = true;
+    tArtifactSummaryQuery.eKind = XWORK_ARTIFACT_REPORT;
+    tArtifactSummaryQuery.bHasReportClass = true;
+    tArtifactSummaryQuery.eReportClass = XWORK_ARTIFACT_REPORT_DIAGNOSTICS;
+    tArtifactSummaryQuery.sReportSubjectRef = "query-command";
+    tArtifactSummaryQuery.sArtifactName = "process.diagnostics.json";
+    tArtifactSummaryQuery.sMimeType = "application/json";
+    xwork_artifact_summary_list_reset(&tPersistedArtifactSummaries);
+    assert(
+        xwork_runtime_query_persisted_artifact_summaries(
+            pFileRecoverRuntime,
+            "run-file-artifact-query",
+            &tArtifactSummaryQuery,
+            &tPersistedArtifactSummaries
+        ) == XWORK_OK
+    );
+    assert(tPersistedArtifactSummaries.iCount == 1u);
+    assert(strcmp(tPersistedArtifactSummaries.pItems[0].sName, "process.diagnostics.json") == 0);
+    assert(tPersistedArtifactSummaries.pItems[0].iSequence == 3u);
+    xwork_test_assert_summary_report_class(
+        &tPersistedArtifactSummaries.pItems[0],
+        XWORK_ARTIFACT_REPORT_DIAGNOSTICS,
+        "query-command"
+    );
+
+    tArtifactSummaryQuery.sReportSubjectRef = "other-command";
+    xwork_artifact_summary_list_reset(&tPersistedArtifactSummaries);
+    assert(
+        xwork_file_persistence_query_artifact_summaries(
+            &tFilePersistenceRecoverStore,
+            "run-file-artifact-query",
+            &tArtifactSummaryQuery,
+            &tPersistedArtifactSummaries
+        ) == XWORK_OK
+    );
+    assert(tPersistedArtifactSummaries.iCount == 0u);
+
+    for ( iStressIndex = 0u; iStressIndex < 32u; ++iStressIndex ) {
+        snprintf(
+            sStressArtifactName,
+            sizeof(sStressArtifactName),
+            "stress-report-%02u.json",
+            (unsigned)iStressIndex
+        );
+        snprintf(
+            sStressArtifactStorageRef,
+            sizeof(sStressArtifactStorageRef),
+            "workspace://stress/report-%02u.md",
+            (unsigned)iStressIndex
+        );
+        snprintf(
+            sStressArtifactSummary,
+            sizeof(sStressArtifactSummary),
+            "Stress report artifact %02u.",
+            (unsigned)iStressIndex
+        );
+        snprintf(
+            sStressArtifactText,
+            sizeof(sStressArtifactText),
+            "{\"schema\":\"" XWORK_REPORT_SCHEMA_V1 "\","
+            "\"report_kind\":\"progress\",\"status\":\"in_progress\","
+            "\"subject_ref\":\"workspace://stress\","
+            "\"title\":\"Stress %02u\",\"summary\":\"stable query\","
+            "\"body_markdown\":\"# Stress %02u\\n\\n- stable query\\n\"}",
+            (unsigned)iStressIndex,
+            (unsigned)iStressIndex
+        );
+
+        xwork_report_artifact_options_init(&tReportArtifactOptions);
+        tReportArtifactOptions.sName = sStressArtifactName;
+        tReportArtifactOptions.sMimeType = "application/json";
+        tReportArtifactOptions.sStorageRef = sStressArtifactStorageRef;
+        tReportArtifactOptions.sSummary = sStressArtifactSummary;
+        tReportArtifactOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_JSON;
+        tReportArtifactOptions.sOutputRole = "report.stress";
+        tReportArtifactOptions.eReportClass = XWORK_ARTIFACT_REPORT_PROGRESS;
+        tReportArtifactOptions.sReportSubjectRef = "workspace://stress";
+        tReportArtifactOptions.sReportText = sStressArtifactText;
+        xwork_artifact_reset(&tArtifact);
+        assert(
+            xwork_run_emit_report_artifact(
+                pFileArtifactQueryRun,
+                &tReportArtifactOptions,
+                &tArtifact
+            ) == XWORK_OK
+        );
+        assert(tArtifact.iSequence == 4u + iStressIndex);
+        if ( iStressIndex == 0u ) {
+            xwork_test_assert_report_schema(
+                &tArtifact,
+                "progress",
+                "in_progress",
+                "workspace://stress"
+            );
+        }
+    }
+
+    xwork_string_list_reset(&tPersistedArtifactIds);
+    assert(
+        xwork_file_persistence_list_artifacts(
+            &tFilePersistenceRecoverStore,
+            "run-file-artifact-query",
+            &tPersistedArtifactIds
+        ) == XWORK_OK
+    );
+    assert(tPersistedArtifactIds.iCount == 35u);
+    xwork_string_list_reset(&tPersistedEventIds);
+    assert(
+        xwork_file_persistence_list_events(
+            &tFilePersistenceRecoverStore,
+            "run-file-artifact-query",
+            &tPersistedEventIds
+        ) == XWORK_OK
+    );
+    assert(tPersistedEventIds.iCount >= 33u);
+
+    xwork_artifact_summary_query_init(&tArtifactSummaryQuery);
+    tArtifactSummaryQuery.bHasKind = true;
+    tArtifactSummaryQuery.eKind = XWORK_ARTIFACT_REPORT;
+    tArtifactSummaryQuery.bHasReportClass = true;
+    tArtifactSummaryQuery.eReportClass = XWORK_ARTIFACT_REPORT_PROGRESS;
+    tArtifactSummaryQuery.sOutputRole = "report.stress";
+    tArtifactSummaryQuery.iLimit = 7u;
+    xwork_artifact_summary_list_reset(&tPersistedArtifactSummaries);
+    assert(
+        xwork_file_persistence_query_artifact_summaries(
+            &tFilePersistenceRecoverStore,
+            "run-file-artifact-query",
+            &tArtifactSummaryQuery,
+            &tPersistedArtifactSummaries
+        ) == XWORK_OK
+    );
+    assert(tPersistedArtifactSummaries.iCount == 7u);
+    assert(tPersistedArtifactSummaries.bHasMore);
+    assert(tPersistedArtifactSummaries.iNextAfterSequence == 10u);
+    assert(strcmp(tPersistedArtifactSummaries.pItems[0].sName, "stress-report-00.json") == 0);
+    assert(strcmp(tPersistedArtifactSummaries.pItems[6].sName, "stress-report-06.json") == 0);
+
+    xwork_artifact_summary_query_init(&tArtifactSummaryQuery);
+    tArtifactSummaryQuery.bHasKind = true;
+    tArtifactSummaryQuery.eKind = XWORK_ARTIFACT_REPORT;
+    tArtifactSummaryQuery.bHasReportClass = true;
+    tArtifactSummaryQuery.eReportClass = XWORK_ARTIFACT_REPORT_PROGRESS;
+    tArtifactSummaryQuery.sOutputRole = "report.stress";
+    tArtifactSummaryQuery.bHasAfterSequence = true;
+    tArtifactSummaryQuery.iAfterSequence = 10u;
+    tArtifactSummaryQuery.iLimit = 40u;
+    xwork_artifact_summary_list_reset(&tPersistedArtifactSummaries);
+    assert(
+        xwork_runtime_query_persisted_artifact_summaries(
+            pFileRecoverRuntime,
+            "run-file-artifact-query",
+            &tArtifactSummaryQuery,
+            &tPersistedArtifactSummaries
+        ) == XWORK_OK
+    );
+    assert(tPersistedArtifactSummaries.iCount == 25u);
+    assert(!tPersistedArtifactSummaries.bHasMore);
+    assert(strcmp(tPersistedArtifactSummaries.pItems[0].sName, "stress-report-07.json") == 0);
+    assert(strcmp(tPersistedArtifactSummaries.pItems[24].sName, "stress-report-31.json") == 0);
+
+    xwork_report_artifact_options_init(&tReportArtifactOptions);
+    tReportArtifactOptions.sName = "query-final.json";
+    tReportArtifactOptions.sMimeType = "application/json";
+    tReportArtifactOptions.sStorageRef = "workspace://FINAL.md";
+    tReportArtifactOptions.sSummary = "Final report artifact schema coverage.";
+    tReportArtifactOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_JSON;
+    tReportArtifactOptions.sOutputRole = "report.final";
+    tReportArtifactOptions.eReportClass = XWORK_ARTIFACT_REPORT_FINAL;
+    tReportArtifactOptions.sReportSubjectRef = "workspace://README.md";
+    tReportArtifactOptions.sReportText =
+        "{\"schema\":\"" XWORK_REPORT_SCHEMA_V1 "\","
+        "\"report_kind\":\"final\",\"status\":\"completed\","
+        "\"subject_ref\":\"workspace://README.md\","
+        "\"title\":\"Query final\",\"summary\":\"Artifact query schema completed.\","
+        "\"body_markdown\":\"# Final\\n\\n- completed\\n\","
+        "\"items\":[{\"title\":\"artifact query\",\"status\":\"completed\"}]}";
+    xwork_artifact_reset(&tArtifact);
+    assert(
+        xwork_run_emit_report_artifact(
+            pFileArtifactQueryRun,
+            &tReportArtifactOptions,
+            &tArtifact
+        ) == XWORK_OK
+    );
+    assert(tArtifact.iSequence == 36u);
+    xwork_test_assert_report_class(
+        &tArtifact,
+        XWORK_ARTIFACT_REPORT_FINAL,
+        "workspace://README.md"
+    );
+    xwork_test_assert_report_schema(
+        &tArtifact,
+        "final",
+        "completed",
+        "workspace://README.md"
+    );
+
     xwork_artifact_reset(&tArtifact);
     xwork_run_destroy(pFileArtifactQueryRun);
     pFileArtifactQueryRun = NULL;
+
+    xwork_runtime_destroy(pFileRecoverRuntime);
+    pFileRecoverRuntime = NULL;
+    xwork_test_write_text_file(sLocalHostEditorOrchestratorPath, "xwork-editor");
+    tLocalHostOptions.sDefaultWorkingDirectory = ".";
+    xwork_host_services_init(&tLocalHostServices);
+    assert(
+        xwork_local_host_configure_services(
+            &tLocalHost,
+            &tLocalHostOptions,
+            &tLocalHostServices
+        ) == XWORK_OK
+    );
+    xwork_runtime_options_init(&tFileRuntimeOptions);
+    tFileRuntimeOptions.pLlmRuntime = pLlmRuntime;
+    tFileRuntimeOptions.pHostServices = &tLocalHostServices;
+    tFileRuntimeOptions.pPersistenceBackend = &tFilePersistenceBackend;
+    tFileRuntimeOptions.tPolicy = tPolicyOptions;
+    assert(xwork_runtime_create(&tFileRuntimeOptions, &pFileRecoverRuntime) == XWORK_OK);
+    xwork_workspace_options_init(&tWorkspaceOptions);
+    tWorkspaceOptions.sWorkspaceId = "local-host-main";
+    tWorkspaceOptions.sRootPath = ".";
+    assert(
+        xwork_runtime_add_workspace(
+            pFileRecoverRuntime,
+            &tWorkspaceOptions,
+            &pFileRecoverWorkspace
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pFileRecoverRuntime,
+            XWORK_TOOL_EDITOR_OPEN_BUFFER
+        ) == XWORK_OK
+    );
+    assert(
+        xwork_runtime_register_builtin_tool(
+            pFileRecoverRuntime,
+            XWORK_TOOL_EDITOR_APPLY_EDIT
+        ) == XWORK_OK
+    );
+
+    tAdapterCtx.iTurnCount = 0;
+    tAdapterCtx.sExpectedMemoryText = NULL;
+    tAdapterCtx.iObservedMemoryTurns = 0;
+    tAdapterCtx.sExpectedPlannerText = NULL;
+    tAdapterCtx.iObservedPlannerTurns = 0;
+    asWorkspaceIds[0] = "local-host-main";
+    xwork_run_options_init(&tRunOptions);
+    xwork_test_init_custom_session_policy(&tRunOptions.tSessionPolicy);
+    tRunOptions.sRunId = "run-file-editor-buffer-persistence";
+    tRunOptions.sInstruction = "Edit an open editor buffer through host service.";
+    tRunOptions.sLlmProfileId = "mock-profile";
+    tRunOptions.sSessionProfileId = "mock-session";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(
+        xwork_run_create(
+            pFileRecoverRuntime,
+            &tRunOptions,
+            &pFileRecoveredRun
+        ) == XWORK_OK
+    );
+    xwork_orchestrator_options_init(&tExecOptions);
+    tExecOptions.iMaxTurns = 4u;
+    tExecOptions.bAutoApprove = true;
+    assert(xwork_run_execute(pFileRecoveredRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_get_state(pFileRecoveredRun) == XWORK_RUN_COMPLETED);
+    assert(
+        strcmp(
+            xwork_run_get_last_output_text(pFileRecoveredRun),
+            "Host service editor buffer completed."
+        ) == 0
+    );
+    assert(xwork_run_get_artifact_count(pFileRecoveredRun) == 2u);
+    xwork_artifact_summary_query_init(&tArtifactSummaryQuery);
+    tArtifactSummaryQuery.bHasKind = true;
+    tArtifactSummaryQuery.eKind = XWORK_ARTIFACT_OUTPUT;
+    tArtifactSummaryQuery.sNamePrefix = "editor.";
+    xwork_artifact_summary_list_reset(&tPersistedArtifactSummaries);
+    assert(
+        xwork_runtime_query_persisted_artifact_summaries(
+            pFileRecoverRuntime,
+            "run-file-editor-buffer-persistence",
+            &tArtifactSummaryQuery,
+            &tPersistedArtifactSummaries
+        ) == XWORK_OK
+    );
+    assert(tPersistedArtifactSummaries.iCount == 2u);
+    assert(strcmp(tPersistedArtifactSummaries.pItems[0].sName, "editor.open_buffer.json") == 0);
+    xwork_test_assert_summary_output_class(
+        &tPersistedArtifactSummaries.pItems[0],
+        XWORK_ARTIFACT_OUTPUT_FILE_CONTENT,
+        XWORK_TOOL_EDITOR_OPEN_BUFFER
+    );
+    assert(strcmp(tPersistedArtifactSummaries.pItems[1].sName, "editor.apply_edit.json") == 0);
+    xwork_test_assert_summary_output_class(
+        &tPersistedArtifactSummaries.pItems[1],
+        XWORK_ARTIFACT_OUTPUT_FILE_CHANGE,
+        XWORK_TOOL_EDITOR_APPLY_EDIT
+    );
+    xwork_artifact_reset(&tLoadedArtifact);
+    assert(
+        xwork_runtime_find_persisted_artifact_by_name(
+            pFileRecoverRuntime,
+            "run-file-editor-buffer-persistence",
+            "editor.apply_edit.json",
+            &tLoadedArtifact
+        ) == XWORK_OK
+    );
+    assert(tLoadedArtifact.eKind == XWORK_ARTIFACT_OUTPUT);
+    assert(tLoadedArtifact.sContentText != NULL);
+    assert(strstr(tLoadedArtifact.sContentText, "\"dirty\":true") != NULL);
+    assert(strstr(tLoadedArtifact.sContentText, "\"text\":\"x-editwork-editor\"") != NULL);
+    xwork_artifact_reset(&tLoadedArtifact);
+    xwork_run_destroy(pFileRecoveredRun);
+    pFileRecoveredRun = NULL;
 
     if ( xrtProcessTerminalSupported() ) {
         xwork_runtime_destroy(pFileRecoverRuntime);
@@ -7486,6 +10770,12 @@ int main(void)
         );
         assert(strcmp(tLoadedArtifact.sName, "process.terminal_resize.json") == 0);
         assert(tLoadedArtifact.sContentText != NULL);
+        assert(
+            strstr(
+                tLoadedArtifact.sContentText,
+                "\"schema\":\"" XWORK_TERMINAL_STATE_SCHEMA_V1 "\""
+            ) != NULL
+        );
         assert(strstr(tLoadedArtifact.sContentText, "\"resize_applied\":") != NULL);
 
         xwork_artifact_reset(&tLoadedArtifact);
@@ -7500,6 +10790,12 @@ int main(void)
         assert(tLoadedArtifact.eKind == XWORK_ARTIFACT_OUTPUT);
         assert(strcmp(tLoadedArtifact.sName, "process.terminal_write.json") == 0);
         assert(tLoadedArtifact.sContentText != NULL);
+        assert(
+            strstr(
+                tLoadedArtifact.sContentText,
+                "\"schema\":\"" XWORK_TERMINAL_STATE_SCHEMA_V1 "\""
+            ) != NULL
+        );
         assert(strstr(tLoadedArtifact.sContentText, "\"next_after_seq\":") != NULL);
 
         xwork_artifact_reset(&tLoadedArtifact);
@@ -7519,6 +10815,12 @@ int main(void)
         );
         assert(strcmp(tLoadedArtifact.sName, "process.terminal_read.json") == 0);
         assert(tLoadedArtifact.sContentText != NULL);
+        assert(
+            strstr(
+                tLoadedArtifact.sContentText,
+                "\"schema\":\"" XWORK_TERMINAL_STATE_SCHEMA_V1 "\""
+            ) != NULL
+        );
         assert(strstr(tLoadedArtifact.sContentText, "\"event_end_seq\":") != NULL);
 
         xwork_artifact_reset(&tLoadedArtifact);
@@ -7533,7 +10835,200 @@ int main(void)
         assert(tLoadedArtifact.eKind == XWORK_ARTIFACT_OUTPUT);
         assert(strcmp(tLoadedArtifact.sName, "process.terminal_stop.json") == 0);
         assert(tLoadedArtifact.sContentText != NULL);
+        assert(
+            strstr(
+                tLoadedArtifact.sContentText,
+                "\"schema\":\"" XWORK_TERMINAL_STATE_SCHEMA_V1 "\""
+            ) != NULL
+        );
         assert(strstr(tLoadedArtifact.sContentText, "\"removed\":true") != NULL);
+
+        {
+            char *sPersistedRunDir = xwork__build_run_dir_path(
+                &tFilePersistenceRecoverStore,
+                "run-file-persistence"
+            );
+            char *sPersistedCheckpointsDir = NULL;
+            char *sPersistedArtifactsDir = NULL;
+            char *sCorruptRunDir = NULL;
+            char *sNewerRunDir = NULL;
+            char *sOldEventsRunDir = NULL;
+            char *sFutureEventsRunDir = NULL;
+
+            assert(sPersistedRunDir != NULL);
+            xwork_test_assert_event_log_header(sPersistedRunDir);
+            sPersistedCheckpointsDir = xwork__dup_printf(
+                "%s/checkpoints",
+                sPersistedRunDir
+            );
+            sPersistedArtifactsDir = xwork__dup_printf(
+                "%s/artifacts",
+                sPersistedRunDir
+            );
+            assert(sPersistedCheckpointsDir != NULL);
+            assert(sPersistedArtifactsDir != NULL);
+
+            snprintf(
+                sPersistencePath,
+                sizeof(sPersistencePath),
+                "%s/xwork-half-write.snapshot.tmp",
+                sPersistedCheckpointsDir
+            );
+            xwork_test_write_text_file(sPersistencePath, "partial snapshot");
+            xwork_string_list_reset(&tPersistedCheckpointIds);
+            assert(
+                xwork_file_persistence_list_checkpoints(
+                    &tFilePersistenceRecoverStore,
+                    "run-file-persistence",
+                    &tPersistedCheckpointIds
+                ) == XWORK_OK
+            );
+            assert(tPersistedCheckpointIds.iCount == 3u);
+
+            snprintf(
+                sPersistencePath,
+                sizeof(sPersistencePath),
+                "%s/xwork-half-write.meta.tmp",
+                sPersistedArtifactsDir
+            );
+            xwork_test_write_text_file(sPersistencePath, "partial artifact");
+            xwork_string_list_reset(&tPersistedArtifactIds);
+            assert(
+                xwork_file_persistence_list_artifacts(
+                    &tFilePersistenceRecoverStore,
+                    "run-file-persistence",
+                    &tPersistedArtifactIds
+                ) == XWORK_OK
+            );
+            assert(tPersistedArtifactIds.iCount == 1u);
+
+            sCorruptRunDir = xwork__build_run_dir_path(
+                &tFilePersistenceRecoverStore,
+                "run-file-persistence-corrupt"
+            );
+            assert(sCorruptRunDir != NULL);
+            assert(XWORK_TEST_MKDIR(sCorruptRunDir) == 0);
+            snprintf(
+                sPersistencePath,
+                sizeof(sPersistencePath),
+                "%s/latest.snapshot",
+                sCorruptRunDir
+            );
+            xwork_test_write_text_file(sPersistencePath, "not a valid snapshot");
+            xwork_run_snapshot_reset(&tRunSnapshot);
+            assert(
+                xwork_file_persistence_load_run_snapshot(
+                    &tFilePersistenceRecoverStore,
+                    "run-file-persistence-corrupt",
+                    &tRunSnapshot
+                ) == XWORK_ERROR_EXTERNAL_FAILURE
+            );
+
+            sNewerRunDir = xwork__build_run_dir_path(
+                &tFilePersistenceRecoverStore,
+                "run-file-persistence-newer"
+            );
+            assert(sNewerRunDir != NULL);
+            assert(XWORK_TEST_MKDIR(sNewerRunDir) == 0);
+            snprintf(
+                sPersistencePath,
+                sizeof(sPersistencePath),
+                "%s/latest.snapshot",
+                sNewerRunDir
+            );
+            xwork_test_write_future_snapshot_header(sPersistencePath);
+            xwork_run_snapshot_reset(&tRunSnapshot);
+            assert(
+                xwork_file_persistence_load_run_snapshot(
+                    &tFilePersistenceRecoverStore,
+                    "run-file-persistence-newer",
+                    &tRunSnapshot
+                ) == XWORK_ERROR_UNSUPPORTED
+            );
+
+            sOldEventsRunDir = xwork__build_run_dir_path(
+                &tFilePersistenceRecoverStore,
+                "run-file-persistence-old-events"
+            );
+            assert(sOldEventsRunDir != NULL);
+            assert(XWORK_TEST_MKDIR(sOldEventsRunDir) == 0);
+            snprintf(
+                sPersistencePath,
+                sizeof(sPersistencePath),
+                "%s/events.log",
+                sOldEventsRunDir
+            );
+            snprintf(
+                sTerminalStorageRefPrefix,
+                sizeof(sTerminalStorageRefPrefix),
+                "%u\t%u\t%u\told-event\t-\t-\t-\tlegacy event\n",
+                1u,
+                (unsigned int)XWORK_EVENT_RUN_CREATED,
+                (unsigned int)XWORK_RUN_CREATED
+            );
+            xwork_test_write_text_file(
+                sPersistencePath,
+                sTerminalStorageRefPrefix
+            );
+            xwork_string_list_reset(&tPersistedEventIds);
+            assert(
+                xwork_file_persistence_list_events(
+                    &tFilePersistenceRecoverStore,
+                    "run-file-persistence-old-events",
+                    &tPersistedEventIds
+                ) == XWORK_OK
+            );
+            assert(tPersistedEventIds.iCount == 1u);
+            assert(strcmp(tPersistedEventIds.psItems[0], "old-event") == 0);
+            xwork_event_reset(&tLoadedEvent);
+            assert(
+                xwork_file_persistence_load_last_event(
+                    &tFilePersistenceRecoverStore,
+                    "run-file-persistence-old-events",
+                    &tLoadedEvent
+                ) == XWORK_OK
+            );
+            assert(strcmp(tLoadedEvent.sEventId, "old-event") == 0);
+            assert(strcmp(tLoadedEvent.sSummary, "legacy event") == 0);
+
+            sFutureEventsRunDir = xwork__build_run_dir_path(
+                &tFilePersistenceRecoverStore,
+                "run-file-persistence-future-events"
+            );
+            assert(sFutureEventsRunDir != NULL);
+            assert(XWORK_TEST_MKDIR(sFutureEventsRunDir) == 0);
+            snprintf(
+                sPersistencePath,
+                sizeof(sPersistencePath),
+                "%s/events.log",
+                sFutureEventsRunDir
+            );
+            xwork_test_write_text_file(sPersistencePath, "#xwork-events\t2\n");
+            xwork_string_list_reset(&tPersistedEventIds);
+            assert(
+                xwork_file_persistence_list_events(
+                    &tFilePersistenceRecoverStore,
+                    "run-file-persistence-future-events",
+                    &tPersistedEventIds
+                ) == XWORK_ERROR_UNSUPPORTED
+            );
+            xwork_event_reset(&tLoadedEvent);
+            assert(
+                xwork_file_persistence_load_last_event(
+                    &tFilePersistenceRecoverStore,
+                    "run-file-persistence-future-events",
+                    &tLoadedEvent
+                ) == XWORK_ERROR_UNSUPPORTED
+            );
+
+            free(sFutureEventsRunDir);
+            free(sOldEventsRunDir);
+            free(sNewerRunDir);
+            free(sCorruptRunDir);
+            free(sPersistedArtifactsDir);
+            free(sPersistedCheckpointsDir);
+            free(sPersistedRunDir);
+        }
 
         xwork_run_destroy(pFileRecoveredRun);
         pFileRecoveredRun = NULL;
@@ -7542,6 +11037,7 @@ int main(void)
     xwork_run_snapshot_reset(&tRunSnapshot);
     xwork_run_snapshot_reset(&tPersistenceCtx.tSnapshot);
     xwork_run_destroy(pStreamCancelledRun);
+    xwork_run_destroy(pStreamErrorRun);
     xwork_run_destroy(pStreamRun);
     xwork_run_destroy(pInterruptedRun);
     xwork_run_destroy(pFileArtifactQueryRun);
@@ -7556,6 +11052,7 @@ int main(void)
     xwork_artifact_reset(&tArtifact);
     xwork_run_index_list_reset(&tPersistedRunIndex);
     xwork_run_summary_list_reset(&tPersistedRunSummaries);
+    xwork_run_step_list_reset(&tRunSteps);
     xwork_artifact_summary_list_reset(&tPersistedArtifactSummaries);
     xwork_string_list_reset(&tPersistedArtifactIds);
     xwork_string_list_reset(&tPersistedCheckpointIds);
@@ -7568,19 +11065,31 @@ int main(void)
     (void)remove(sLocalHostAppendPath);
     (void)remove(sLocalHostCreatePath);
     (void)remove(sLocalHostCreateDirsPath);
+    (void)remove(sLocalHostMoveSourcePath);
+    (void)remove(sLocalHostMoveTargetPath);
+    (void)remove(sLocalHostDeleteFilePath);
+    (void)remove(sLocalHostDeleteDirFilePath);
+    (void)remove(sLocalHostPatchPath);
     (void)remove(sLocalHostOrchestratorWritePath);
     (void)remove(sLocalHostOrchestratorAppendPath);
     (void)remove(sLocalHostOrchestratorCreatePath);
     (void)remove(sLocalHostOrchestratorCreateDirsPath);
     (void)remove(sMemorySyncWorkspaceFile);
     xwork_test_remove_empty_directory(sLocalHostCreateDirsDir);
+    xwork_test_remove_empty_directory(sLocalHostMkdirDir);
+    xwork_test_remove_empty_directory(sLocalHostMkdirNestedDir);
+    xwork_test_remove_empty_directory(sLocalHostMkdirNestedParentDir);
+    xwork_test_remove_empty_directory(sLocalHostMkdirNestedRootDir);
+    xwork_test_remove_empty_directory(sLocalHostDeleteDir);
     xwork_test_remove_empty_directory(sLocalHostOrchestratorCreateDirsDir);
     xwork_test_remove_empty_directory(sLocalHostCreateDirsParentDir);
+    xwork_test_remove_empty_directory(sMemoryPolicyWorkspaceDir);
     xwork_test_remove_empty_directory(sMemorySyncWorkspaceDir);
     free(sPendingBeforeToolCheckpointId);
     free(sAfterToolCheckpointId);
     free(sFileBeforeToolCheckpointId);
     free(sFirstArtifactId);
+    xllm_memory_destroy(pPolicyWorkspaceMemory);
     xllm_memory_destroy(pFileWorkspaceMemory);
     xllm_memory_destroy(pWorkspaceMemory);
     xllm_runtime_destroy(pLlmRuntime);

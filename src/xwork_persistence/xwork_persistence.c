@@ -14,13 +14,25 @@
 #include <sys/types.h>
 #endif
 
-static const unsigned char xwork__snapshot_magic[] = {
+static const unsigned char xwork__snapshot_magic_v0[] = {
     'X', 'W', 'O', 'R', 'K', 'S', 'N', 'A'
 };
 
-static const unsigned char xwork__artifact_magic[] = {
+static const unsigned char xwork__artifact_magic_v0[] = {
     'X', 'W', 'O', 'R', 'K', 'A', 'R', '7'
 };
+
+static const unsigned char xwork__snapshot_magic[] = {
+    'X', 'W', 'O', 'R', 'K', 'S', 'N', '1'
+};
+
+static const unsigned char xwork__artifact_magic[] = {
+    'X', 'W', 'O', 'R', 'K', 'A', 'R', '8'
+};
+
+#define XWORK_EVENT_LOG_FORMAT_VERSION 1u
+
+static const char xwork__event_log_header_prefix[] = "#xwork-events\t";
 
 static xwork_status xwork__file_persistence_list_runs_cb(
     xwork_string_list *pList,
@@ -926,6 +938,75 @@ static xwork_status xwork__file_read_u64(FILE *pFile, uint64_t *piValue)
     return xwork__file_read_bytes(pFile, piValue, sizeof(*piValue));
 }
 
+static xwork_status xwork__write_persistence_header(
+    FILE *pFile,
+    const unsigned char *pMagic,
+    size_t iMagicSize
+)
+{
+    xwork_status iStatus;
+
+    if ( !pFile || !pMagic || iMagicSize == 0u ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    iStatus = xwork__file_write_bytes(pFile, pMagic, iMagicSize);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+    return xwork__file_write_u64(
+        pFile,
+        (uint64_t)XWORK_PERSISTENCE_FORMAT_VERSION
+    );
+}
+
+static xwork_status xwork__read_persistence_header(
+    FILE *pFile,
+    const unsigned char *pMagic,
+    const unsigned char *pLegacyMagic,
+    size_t iMagicSize,
+    uint64_t *piFormatVersion
+)
+{
+    unsigned char aMagic[8];
+    uint64_t iFormatVersion;
+    xwork_status iStatus;
+
+    if ( !pFile || !pMagic || !pLegacyMagic || iMagicSize == 0u ||
+         iMagicSize > sizeof(aMagic) ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( piFormatVersion ) {
+        *piFormatVersion = 0u;
+    }
+
+    iStatus = xwork__file_read_bytes(pFile, aMagic, iMagicSize);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+    if ( memcmp(aMagic, pLegacyMagic, iMagicSize) == 0 ) {
+        return XWORK_OK;
+    }
+    if ( memcmp(aMagic, pMagic, iMagicSize) != 0 ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+    iStatus = xwork__file_read_u64(pFile, &iFormatVersion);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+    if ( iFormatVersion > (uint64_t)XWORK_PERSISTENCE_FORMAT_VERSION ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    if ( iFormatVersion == 0u ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+    if ( piFormatVersion ) {
+        *piFormatVersion = iFormatVersion;
+    }
+    return XWORK_OK;
+}
+
 static xwork_status xwork__file_write_bool(FILE *pFile, bool bValue)
 {
     unsigned char iValue = bValue ? 1u : 0u;
@@ -1172,6 +1253,10 @@ static xwork_status xwork__file_write_artifact_fields(
     if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__file_write_string(pFile, pArtifact->sContentText);
     if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_write_string(pFile, pArtifact->sPatchApplyResultJson);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_write_string(pFile, pArtifact->sPatchFileSummaryJson);
+    if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__file_write_string(pFile, pArtifact->sCommandText);
     if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__file_write_size(pFile, pArtifact->bHasContentStats ? 1u : 0u);
@@ -1212,6 +1297,7 @@ static xwork_status xwork__file_write_artifact_fields(
 
 static xwork_status xwork__file_read_artifact_fields(
     FILE *pFile,
+    uint64_t iFormatVersion,
     xwork_artifact *pArtifact
 )
 {
@@ -1251,6 +1337,12 @@ static xwork_status xwork__file_read_artifact_fields(
     if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__file_read_string(pFile, &pArtifact->sContentText);
     if ( iStatus != XWORK_OK ) return iStatus;
+    if ( iFormatVersion >= 2u ) {
+        iStatus = xwork__file_read_string(pFile, &pArtifact->sPatchApplyResultJson);
+        if ( iStatus != XWORK_OK ) return iStatus;
+        iStatus = xwork__file_read_string(pFile, &pArtifact->sPatchFileSummaryJson);
+        if ( iStatus != XWORK_OK ) return iStatus;
+    }
     iStatus = xwork__file_read_string(pFile, &pArtifact->sCommandText);
     if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__file_read_size(pFile, &iValue);
@@ -1339,6 +1431,7 @@ static xwork_status xwork__file_write_artifact_array(
 
 static xwork_status xwork__file_read_artifact_array(
     FILE *pFile,
+    uint64_t iFormatVersion,
     xwork_run_snapshot *pSnapshot
 )
 {
@@ -1370,7 +1463,11 @@ static xwork_status xwork__file_read_artifact_array(
     pSnapshot->iArtifactCount = iArtifactCount;
 
     for ( i = 0u; i < iArtifactCount; ++i ) {
-        iStatus = xwork__file_read_artifact_fields(pFile, &pArtifacts[i]);
+        iStatus = xwork__file_read_artifact_fields(
+            pFile,
+            iFormatVersion,
+            &pArtifacts[i]
+        );
         if ( iStatus != XWORK_OK ) {
             pSnapshot->iArtifactCount = i + 1u;
             xwork__run_snapshot_reset_artifacts(pSnapshot);
@@ -1425,6 +1522,26 @@ static xwork_status xwork__file_write_snapshot_fields(
     iStatus = xwork__file_write_size(
         pFile,
         pSnapshot->tSessionPolicy.iCompactTriggerTurns
+    );
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_write_size(
+        pFile,
+        pSnapshot->tSessionPolicy.iReserveOutputTokens
+    );
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_write_size(
+        pFile,
+        pSnapshot->tSessionPolicy.iKeepRecentTurns
+    );
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_write_bool(
+        pFile,
+        pSnapshot->tSessionPolicy.bKeepActiveToolChain
+    );
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__file_write_size(
+        pFile,
+        (size_t)pSnapshot->tSessionPolicy.eCompactStrategy
     );
     if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__file_write_string(pFile, pSnapshot->sSessionStateData);
@@ -1519,6 +1636,7 @@ static xwork_status xwork__file_write_snapshot_fields(
 
 static xwork_status xwork__file_read_snapshot_fields(
     FILE *pFile,
+    uint64_t iFormatVersion,
     xwork_run_snapshot *pSnapshot
 )
 {
@@ -1554,6 +1672,27 @@ static xwork_status xwork__file_read_snapshot_fields(
         &pSnapshot->tSessionPolicy.iCompactTriggerTurns
     );
     if ( iStatus != XWORK_OK ) return iStatus;
+    if ( iFormatVersion >= 3u ) {
+        iStatus = xwork__file_read_size(
+            pFile,
+            &pSnapshot->tSessionPolicy.iReserveOutputTokens
+        );
+        if ( iStatus != XWORK_OK ) return iStatus;
+        iStatus = xwork__file_read_size(
+            pFile,
+            &pSnapshot->tSessionPolicy.iKeepRecentTurns
+        );
+        if ( iStatus != XWORK_OK ) return iStatus;
+        iStatus = xwork__file_read_bool(
+            pFile,
+            &pSnapshot->tSessionPolicy.bKeepActiveToolChain
+        );
+        if ( iStatus != XWORK_OK ) return iStatus;
+        iStatus = xwork__file_read_size(pFile, &iValue);
+        if ( iStatus != XWORK_OK ) return iStatus;
+        pSnapshot->tSessionPolicy.eCompactStrategy =
+            (xwork_session_compact_strategy)iValue;
+    }
     iStatus = xwork__file_read_string(pFile, &pSnapshot->sSessionStateData);
     if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__file_read_string_array(
@@ -1635,7 +1774,7 @@ static xwork_status xwork__file_read_snapshot_fields(
     pSnapshot->eLastCheckpointRunState = (xwork_run_state)iValue;
     iStatus = xwork__file_read_size(pFile, &pSnapshot->iLastCheckpointSequence);
     if ( iStatus != XWORK_OK ) return iStatus;
-    iStatus = xwork__file_read_artifact_array(pFile, pSnapshot);
+    iStatus = xwork__file_read_artifact_array(pFile, iFormatVersion, pSnapshot);
     if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__file_read_size(pFile, &pSnapshot->iNextEventSequence);
     if ( iStatus != XWORK_OK ) return iStatus;
@@ -1646,24 +1785,65 @@ static xwork_status xwork__file_read_snapshot_fields(
     return xwork__file_read_size(pFile, &pSnapshot->iNextCheckpointSequence);
 }
 
+static char *xwork__build_atomic_temp_path(const char *sPath)
+{
+    if ( !sPath || !sPath[0] ) {
+        return NULL;
+    }
+    return xwork__dup_printf("%s.tmp", sPath);
+}
+
+static xwork_status xwork__replace_file_atomic(
+    const char *sTempPath,
+    const char *sFinalPath
+)
+{
+    if ( !sTempPath || !sFinalPath ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+#ifdef _WIN32
+    if ( !MoveFileExA(
+            sTempPath,
+            sFinalPath,
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+         ) ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+#else
+    if ( rename(sTempPath, sFinalPath) != 0 ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+#endif
+
+    return XWORK_OK;
+}
+
 static xwork_status xwork__write_snapshot_file(
     const char *sPath,
     const xwork_run_snapshot *pSnapshot
 )
 {
     FILE *pFile;
+    char *sTempPath;
     xwork_status iStatus;
 
     if ( !sPath || !pSnapshot ) {
         return XWORK_ERROR_INVALID_ARGUMENT;
     }
 
-    pFile = fopen(sPath, "wb");
+    sTempPath = xwork__build_atomic_temp_path(sPath);
+    if ( !sTempPath ) {
+        return XWORK_ERROR_NO_MEMORY;
+    }
+
+    pFile = fopen(sTempPath, "wb");
     if ( !pFile ) {
+        free(sTempPath);
         return XWORK_ERROR_EXTERNAL_FAILURE;
     }
 
-    iStatus = xwork__file_write_bytes(
+    iStatus = xwork__write_persistence_header(
         pFile,
         xwork__snapshot_magic,
         sizeof(xwork__snapshot_magic)
@@ -1675,9 +1855,13 @@ static xwork_status xwork__write_snapshot_file(
     if ( fclose(pFile) != 0 && iStatus == XWORK_OK ) {
         iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
     }
-    if ( iStatus != XWORK_OK ) {
-        (void)remove(sPath);
+    if ( iStatus == XWORK_OK ) {
+        iStatus = xwork__replace_file_atomic(sTempPath, sPath);
     }
+    if ( iStatus != XWORK_OK ) {
+        (void)remove(sTempPath);
+    }
+    free(sTempPath);
     return iStatus;
 }
 
@@ -1687,7 +1871,7 @@ static xwork_status xwork__read_snapshot_file(
 )
 {
     FILE *pFile;
-    unsigned char aMagic[sizeof(xwork__snapshot_magic)];
+    uint64_t iFormatVersion = 0u;
     xwork_status iStatus;
 
     if ( !sPath || !pSnapshot ) {
@@ -1700,13 +1884,19 @@ static xwork_status xwork__read_snapshot_file(
     }
 
     xwork_run_snapshot_reset(pSnapshot);
-    iStatus = xwork__file_read_bytes(pFile, aMagic, sizeof(aMagic));
-    if ( iStatus == XWORK_OK &&
-         memcmp(aMagic, xwork__snapshot_magic, sizeof(aMagic)) != 0 ) {
-        iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
-    }
+    iStatus = xwork__read_persistence_header(
+        pFile,
+        xwork__snapshot_magic,
+        xwork__snapshot_magic_v0,
+        sizeof(xwork__snapshot_magic),
+        &iFormatVersion
+    );
     if ( iStatus == XWORK_OK ) {
-        iStatus = xwork__file_read_snapshot_fields(pFile, pSnapshot);
+        iStatus = xwork__file_read_snapshot_fields(
+            pFile,
+            iFormatVersion,
+            pSnapshot
+        );
     }
 
     if ( fclose(pFile) != 0 && iStatus == XWORK_OK ) {
@@ -1724,18 +1914,25 @@ static xwork_status xwork__write_artifact_file(
 )
 {
     FILE *pFile;
+    char *sTempPath;
     xwork_status iStatus;
 
     if ( !sPath || !pArtifact ) {
         return XWORK_ERROR_INVALID_ARGUMENT;
     }
 
-    pFile = fopen(sPath, "wb");
+    sTempPath = xwork__build_atomic_temp_path(sPath);
+    if ( !sTempPath ) {
+        return XWORK_ERROR_NO_MEMORY;
+    }
+
+    pFile = fopen(sTempPath, "wb");
     if ( !pFile ) {
+        free(sTempPath);
         return XWORK_ERROR_EXTERNAL_FAILURE;
     }
 
-    iStatus = xwork__file_write_bytes(
+    iStatus = xwork__write_persistence_header(
         pFile,
         xwork__artifact_magic,
         sizeof(xwork__artifact_magic)
@@ -1747,9 +1944,13 @@ static xwork_status xwork__write_artifact_file(
     if ( fclose(pFile) != 0 && iStatus == XWORK_OK ) {
         iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
     }
-    if ( iStatus != XWORK_OK ) {
-        (void)remove(sPath);
+    if ( iStatus == XWORK_OK ) {
+        iStatus = xwork__replace_file_atomic(sTempPath, sPath);
     }
+    if ( iStatus != XWORK_OK ) {
+        (void)remove(sTempPath);
+    }
+    free(sTempPath);
     return iStatus;
 }
 
@@ -1759,7 +1960,7 @@ static xwork_status xwork__read_artifact_file(
 )
 {
     FILE *pFile;
-    unsigned char aMagic[sizeof(xwork__artifact_magic)];
+    uint64_t iFormatVersion = 0u;
     xwork_status iStatus;
 
     if ( !sPath || !pArtifact ) {
@@ -1772,13 +1973,19 @@ static xwork_status xwork__read_artifact_file(
     }
 
     xwork_artifact_init(pArtifact);
-    iStatus = xwork__file_read_bytes(pFile, aMagic, sizeof(aMagic));
-    if ( iStatus == XWORK_OK &&
-         memcmp(aMagic, xwork__artifact_magic, sizeof(aMagic)) != 0 ) {
-        iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
-    }
+    iStatus = xwork__read_persistence_header(
+        pFile,
+        xwork__artifact_magic,
+        xwork__artifact_magic_v0,
+        sizeof(xwork__artifact_magic),
+        &iFormatVersion
+    );
     if ( iStatus == XWORK_OK ) {
-        iStatus = xwork__file_read_artifact_fields(pFile, pArtifact);
+        iStatus = xwork__file_read_artifact_fields(
+            pFile,
+            iFormatVersion,
+            pArtifact
+        );
     }
 
     if ( fclose(pFile) != 0 && iStatus == XWORK_OK ) {
@@ -1880,6 +2087,83 @@ static xwork_status xwork__read_line_owned(FILE *pFile, char **psLine)
     }
 
     *psLine = sBuffer;
+    return XWORK_OK;
+}
+
+static xwork_status xwork__event_log_has_content(
+    const char *sPath,
+    bool *pbHasContent
+)
+{
+    FILE *pFile;
+    int iCh;
+
+    if ( !sPath || !pbHasContent ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    *pbHasContent = false;
+    pFile = fopen(sPath, "rb");
+    if ( !pFile ) {
+        return errno == ENOENT ? XWORK_OK : XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+    iCh = fgetc(pFile);
+    if ( fclose(pFile) != 0 ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+    *pbHasContent = iCh != EOF;
+    return XWORK_OK;
+}
+
+static xwork_status xwork__write_event_log_header(FILE *pFile)
+{
+    if ( !pFile ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    if ( fprintf(
+            pFile,
+            "%s%u\n",
+            xwork__event_log_header_prefix,
+            (unsigned int)XWORK_EVENT_LOG_FORMAT_VERSION
+        ) < 0 ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+    return XWORK_OK;
+}
+
+static xwork_status xwork__check_event_log_line_header(
+    const char *sLine,
+    bool *pbIsHeader
+)
+{
+    size_t iPrefixLen = sizeof(xwork__event_log_header_prefix) - 1u;
+    char *sEnd;
+    unsigned long iVersion;
+
+    if ( !sLine || !pbIsHeader ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    *pbIsHeader = false;
+    if ( strncmp(sLine, xwork__event_log_header_prefix, iPrefixLen) != 0 ) {
+        return XWORK_OK;
+    }
+
+    *pbIsHeader = true;
+    errno = 0;
+    iVersion = strtoul(sLine + iPrefixLen, &sEnd, 10);
+    if ( errno != 0 || sEnd == (sLine + iPrefixLen) || *sEnd != '\0' ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+    if ( iVersion > (unsigned long)XWORK_EVENT_LOG_FORMAT_VERSION ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    if ( iVersion == 0ul ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
     return XWORK_OK;
 }
 
@@ -2075,6 +2359,7 @@ static xwork_status xwork__file_persistence_store_event_cb(
     char *sRunDir = NULL;
     char *sEventsPath = NULL;
     FILE *pFile = NULL;
+    bool bHasEventLogContent = false;
     xwork_status iStatus;
 
     if ( !pStore || !pStore->sRootPath || !pEvent || !pEvent->sRunId ) {
@@ -2092,11 +2377,26 @@ static xwork_status xwork__file_persistence_store_event_cb(
         return XWORK_ERROR_NO_MEMORY;
     }
 
+    iStatus = xwork__event_log_has_content(sEventsPath, &bHasEventLogContent);
+    if ( iStatus != XWORK_OK ) {
+        free(sEventsPath);
+        free(sRunDir);
+        return iStatus;
+    }
+
     pFile = fopen(sEventsPath, "ab");
     if ( !pFile ) {
         free(sEventsPath);
         free(sRunDir);
         return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+    if ( !bHasEventLogContent ) {
+        iStatus = xwork__write_event_log_header(pFile);
+    }
+
+    if ( iStatus != XWORK_OK ) {
+        goto done;
     }
 
     if ( fprintf(
@@ -2124,6 +2424,7 @@ static xwork_status xwork__file_persistence_store_event_cb(
         iStatus = fputc('\n', pFile) == EOF ? XWORK_ERROR_EXTERNAL_FAILURE : XWORK_OK;
     }
 
+done:
     if ( fclose(pFile) != 0 && iStatus == XWORK_OK ) {
         iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
     }
@@ -2233,6 +2534,46 @@ static xwork_status xwork__file_persistence_store_artifact_cb(
     iStatus = xwork__write_artifact_file(sArtifactPath, pArtifact);
     free(sArtifactPath);
     free(sArtifactsDir);
+    free(sRunDir);
+    return iStatus;
+}
+
+static xwork_status xwork__file_persistence_store_run_snapshot_cb(
+    const xwork_run_snapshot *pSnapshot,
+    void *pUserData
+)
+{
+    xwork_file_persistence *pStore = (xwork_file_persistence *)pUserData;
+    char *sRunDir = NULL;
+    char *sCheckpointsDir = NULL;
+    char *sLatestPath = NULL;
+    xwork_status iStatus;
+
+    if ( !pStore || !pStore->sRootPath || !pSnapshot || !pSnapshot->sRunId ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    iStatus = xwork__ensure_run_storage(
+        pStore,
+        pSnapshot->sRunId,
+        &sRunDir,
+        &sCheckpointsDir
+    );
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    sLatestPath = xwork__dup_printf("%s/latest.snapshot", sRunDir);
+    if ( !sLatestPath ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__write_snapshot_file(sLatestPath, pSnapshot);
+
+cleanup:
+    free(sLatestPath);
+    free(sCheckpointsDir);
     free(sRunDir);
     return iStatus;
 }
@@ -2777,6 +3118,7 @@ xwork_status xwork_file_persistence_configure_backend(
 
     pBackend->pfnStoreEvent = xwork__file_persistence_store_event_cb;
     pBackend->pfnStoreCheckpoint = xwork__file_persistence_store_checkpoint_cb;
+    pBackend->pfnStoreRunSnapshot = xwork__file_persistence_store_run_snapshot_cb;
     pBackend->pfnStoreArtifact = xwork__file_persistence_store_artifact_cb;
     pBackend->pfnLoadRunSnapshot = xwork__file_persistence_load_run_snapshot_cb;
     pBackend->pfnLoadCheckpointSnapshot = xwork__file_persistence_load_checkpoint_snapshot_cb;
@@ -3052,6 +3394,8 @@ xwork_status xwork_file_persistence_query_run_index(
     size_t i;
     size_t iWriteIndex = 0u;
     size_t iOriginalCount;
+    size_t iStartIndex = 0u;
+    size_t iReturnedCount;
     xwork_status iStatus;
 
     if ( !pStore || !pStore->sRootPath || !pList ) {
@@ -3102,6 +3446,73 @@ xwork_status xwork_file_persistence_query_run_index(
         pList->iCount,
         pQuery->eSort
     );
+
+    pItems = (xwork_run_index_entry *)pList->pItems;
+    if ( pQuery->sAfterRunId && pQuery->sAfterRunId[0] ) {
+        bool bFoundAfter = false;
+
+        for ( i = 0u; i < pList->iCount; ++i ) {
+            if ( pItems[i].tSummary.sRunId &&
+                 strcmp(pItems[i].tSummary.sRunId, pQuery->sAfterRunId) == 0 ) {
+                iStartIndex = i + 1u;
+                bFoundAfter = true;
+                break;
+            }
+        }
+        if ( !bFoundAfter ) {
+            iStartIndex = pList->iCount;
+        }
+    }
+
+    if ( iStartIndex >= pList->iCount ) {
+        for ( i = 0u; i < pList->iCount; ++i ) {
+            xwork_run_index_entry_reset(&pItems[i]);
+        }
+        free(pItems);
+        pList->pItems = NULL;
+        pList->iCount = 0u;
+        pList->bHasMore = false;
+        return XWORK_OK;
+    }
+
+    iReturnedCount = pList->iCount - iStartIndex;
+    if ( pQuery->iLimit > 0u && iReturnedCount > pQuery->iLimit ) {
+        iReturnedCount = pQuery->iLimit;
+        pList->bHasMore = true;
+    }
+    if ( pList->bHasMore ) {
+        const char *sNextAfterRunId =
+            pItems[iStartIndex + iReturnedCount - 1u].tSummary.sRunId;
+
+        pList->sNextAfterRunId = xwork__dup_cstr(sNextAfterRunId);
+        if ( !pList->sNextAfterRunId ) {
+            xwork_run_index_list_reset(pList);
+            return XWORK_ERROR_NO_MEMORY;
+        }
+    }
+
+    if ( iStartIndex > 0u || iReturnedCount < pList->iCount ) {
+        for ( i = 0u; i < iReturnedCount; ++i ) {
+            size_t iSourceIndex = iStartIndex + i;
+
+            if ( i != iSourceIndex ) {
+                xwork_run_index_entry_reset(&pItems[i]);
+                pItems[i] = pItems[iSourceIndex];
+                xwork_run_index_entry_init(&pItems[iSourceIndex]);
+            }
+        }
+        for ( i = iReturnedCount; i < pList->iCount; ++i ) {
+            xwork_run_index_entry_reset(&pItems[i]);
+        }
+        pList->iCount = iReturnedCount;
+        pItems = (xwork_run_index_entry *)realloc(
+            pItems,
+            iReturnedCount * sizeof(*pItems)
+        );
+        if ( pItems ) {
+            pList->pItems = pItems;
+        }
+    }
     return XWORK_OK;
 }
 
@@ -3178,6 +3589,8 @@ xwork_status xwork_file_persistence_list_events(
     }
 
     for ( ;; ) {
+        bool bIsHeader = false;
+
         iStatus = xwork__read_line_owned(pFile, &sLine);
         if ( iStatus == XWORK_ERROR_NOT_FOUND ) {
             iStatus = XWORK_OK;
@@ -3187,6 +3600,18 @@ xwork_status xwork_file_persistence_list_events(
             break;
         }
         if ( sLine[0] == '\0' ) {
+            free(sLine);
+            sLine = NULL;
+            continue;
+        }
+
+        iStatus = xwork__check_event_log_line_header(sLine, &bIsHeader);
+        if ( iStatus != XWORK_OK ) {
+            free(sLine);
+            sLine = NULL;
+            break;
+        }
+        if ( bIsHeader ) {
             free(sLine);
             sLine = NULL;
             continue;
@@ -3383,6 +3808,10 @@ static xwork_status xwork__persistence_artifact_summary_copy(
     if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__replace_cstr((char **)&pDst->sReportSubjectRef, pSrc->sReportSubjectRef);
     if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__replace_cstr((char **)&pDst->sPatchApplyResultJson, pSrc->sPatchApplyResultJson);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__replace_cstr((char **)&pDst->sPatchFileSummaryJson, pSrc->sPatchFileSummaryJson);
+    if ( iStatus != XWORK_OK ) return iStatus;
     pDst->eKind = pSrc->eKind;
     pDst->eOutputClass = pSrc->eOutputClass;
     pDst->eReportClass = pSrc->eReportClass;
@@ -3403,6 +3832,29 @@ static xwork_status xwork__persistence_artifact_summary_copy(
     pDst->iExitCode = pSrc->iExitCode;
     pDst->iSequence = pSrc->iSequence;
     return XWORK_OK;
+}
+
+static void xwork__persistence_artifact_summary_sort_by_sequence(
+    xwork_artifact_summary *pItems,
+    size_t iCount
+)
+{
+    size_t i;
+
+    if ( !pItems || iCount < 2u ) {
+        return;
+    }
+
+    for ( i = 1u; i < iCount; ++i ) {
+        size_t j = i;
+        xwork_artifact_summary tValue = pItems[i];
+
+        while ( j > 0u && tValue.iSequence < pItems[j - 1u].iSequence ) {
+            pItems[j] = pItems[j - 1u];
+            --j;
+        }
+        pItems[j] = tValue;
+    }
 }
 
 xwork_status xwork_file_persistence_list_artifact_summaries(
@@ -3466,6 +3918,16 @@ xwork_status xwork_file_persistence_list_artifact_summaries(
         iStatus = xwork__replace_cstr((char **)&pItems[i].sOutputRole, tArtifact.sOutputRole);
         if ( iStatus != XWORK_OK ) goto done;
         iStatus = xwork__replace_cstr((char **)&pItems[i].sReportSubjectRef, tArtifact.sReportSubjectRef);
+        if ( iStatus != XWORK_OK ) goto done;
+        iStatus = xwork__replace_cstr(
+            (char **)&pItems[i].sPatchApplyResultJson,
+            tArtifact.sPatchApplyResultJson
+        );
+        if ( iStatus != XWORK_OK ) goto done;
+        iStatus = xwork__replace_cstr(
+            (char **)&pItems[i].sPatchFileSummaryJson,
+            tArtifact.sPatchFileSummaryJson
+        );
         if ( iStatus != XWORK_OK ) goto done;
         pItems[i].eKind = tArtifact.eKind;
         pItems[i].eOutputClass = tArtifact.eOutputClass;
@@ -3531,6 +3993,10 @@ xwork_status xwork_file_persistence_query_artifact_summaries(
     if ( iStatus != XWORK_OK ) {
         goto done;
     }
+    xwork__persistence_artifact_summary_sort_by_sequence(
+        (xwork_artifact_summary *)tAllSummaries.pItems,
+        tAllSummaries.iCount
+    );
 
     for ( i = 0u; i < tAllSummaries.iCount; ++i ) {
         if ( xwork__persistence_artifact_summary_matches_query(&tAllSummaries.pItems[i], pQuery) ) {
@@ -3583,6 +4049,89 @@ done:
     xwork_artifact_summary_list_reset(&tAllSummaries);
     if ( iStatus != XWORK_OK ) {
         xwork_artifact_summary_list_reset(pList);
+    }
+    return iStatus;
+}
+
+xwork_status xwork_file_persistence_query_run_steps(
+    const xwork_file_persistence *pStore,
+    const char *sRunId,
+    const xwork_run_step_query *pQuery,
+    xwork_run_step_list *pList
+)
+{
+    xwork_string_list tEventIds;
+    xwork_event tEvent;
+    xwork_checkpoint tCheckpoint;
+    xwork_run_step tStep;
+    xwork_status iStatus = XWORK_OK;
+    size_t i;
+
+    if ( !pStore || !pStore->sRootPath || !sRunId || !sRunId[0] || !pList ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    xwork_string_list_init(&tEventIds);
+    xwork_event_init(&tEvent);
+    xwork_checkpoint_init(&tCheckpoint);
+    xwork_run_step_init(&tStep);
+    xwork_run_step_list_reset(pList);
+
+    iStatus = xwork_file_persistence_list_events(pStore, sRunId, &tEventIds);
+    if ( iStatus != XWORK_OK ) {
+        goto done;
+    }
+
+    for ( i = 0u; i < tEventIds.iCount; ++i ) {
+        const xwork_checkpoint *pCheckpoint = NULL;
+
+        xwork_event_reset(&tEvent);
+        iStatus = xwork_file_persistence_load_event(
+            pStore,
+            sRunId,
+            tEventIds.psItems[i],
+            &tEvent
+        );
+        if ( iStatus != XWORK_OK ) {
+            goto done;
+        }
+        if ( tEvent.sCheckpointId && tEvent.sCheckpointId[0] ) {
+            xwork_checkpoint_reset(&tCheckpoint);
+            if ( xwork_file_persistence_load_checkpoint(
+                     pStore,
+                     sRunId,
+                     tEvent.sCheckpointId,
+                     &tCheckpoint
+                 ) == XWORK_OK ) {
+                pCheckpoint = &tCheckpoint;
+            }
+        }
+
+        xwork_run_step_reset(&tStep);
+        iStatus = xwork__run_step_from_event(&tStep, &tEvent, pCheckpoint);
+        if ( iStatus != XWORK_OK ) {
+            goto done;
+        }
+        if ( !xwork__run_step_matches_query(&tStep, pQuery) ) {
+            continue;
+        }
+        if ( pQuery && pQuery->iLimit > 0u && pList->iCount >= pQuery->iLimit ) {
+            pList->bHasMore = true;
+            break;
+        }
+        iStatus = xwork__run_step_list_append(pList, &tStep);
+        if ( iStatus != XWORK_OK ) {
+            goto done;
+        }
+    }
+
+done:
+    xwork_run_step_reset(&tStep);
+    xwork_checkpoint_reset(&tCheckpoint);
+    xwork_event_reset(&tEvent);
+    xwork_string_list_reset(&tEventIds);
+    if ( iStatus != XWORK_OK ) {
+        xwork_run_step_list_reset(pList);
     }
     return iStatus;
 }
@@ -3792,6 +4341,8 @@ xwork_status xwork_file_persistence_load_event(
     }
 
     for ( ;; ) {
+        bool bIsHeader = false;
+
         iStatus = xwork__read_line_owned(pFile, &sLine);
         if ( iStatus == XWORK_ERROR_NOT_FOUND ) {
             iStatus = XWORK_ERROR_NOT_FOUND;
@@ -3801,6 +4352,18 @@ xwork_status xwork_file_persistence_load_event(
             break;
         }
         if ( sLine[0] == '\0' ) {
+            free(sLine);
+            sLine = NULL;
+            continue;
+        }
+
+        iStatus = xwork__check_event_log_line_header(sLine, &bIsHeader);
+        if ( iStatus != XWORK_OK ) {
+            free(sLine);
+            sLine = NULL;
+            break;
+        }
+        if ( bIsHeader ) {
             free(sLine);
             sLine = NULL;
             continue;
@@ -3867,6 +4430,8 @@ xwork_status xwork_file_persistence_load_last_event(
     }
 
     for ( ;; ) {
+        bool bIsHeader = false;
+
         iStatus = xwork__read_line_owned(pFile, &sLine);
         if ( iStatus == XWORK_ERROR_NOT_FOUND ) {
             iStatus = bHasEvent ? XWORK_OK : XWORK_ERROR_NOT_FOUND;
@@ -3876,6 +4441,18 @@ xwork_status xwork_file_persistence_load_last_event(
             break;
         }
         if ( sLine[0] == '\0' ) {
+            free(sLine);
+            sLine = NULL;
+            continue;
+        }
+
+        iStatus = xwork__check_event_log_line_header(sLine, &bIsHeader);
+        if ( iStatus != XWORK_OK ) {
+            free(sLine);
+            sLine = NULL;
+            break;
+        }
+        if ( bIsHeader ) {
             free(sLine);
             sLine = NULL;
             continue;
@@ -4215,6 +4792,48 @@ xwork_status xwork__runtime_store_checkpoint(
         pSnapshot,
         pRuntime->tPersistenceBackend.pUserData
     );
+}
+
+xwork_status xwork__runtime_store_run_snapshot(
+    const xwork_runtime *pRuntime,
+    const xwork_run_snapshot *pSnapshot
+)
+{
+    if ( !pRuntime || !pSnapshot ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( pRuntime->tPersistenceBackend.pfnStoreRunSnapshot ) {
+        return pRuntime->tPersistenceBackend.pfnStoreRunSnapshot(
+            pSnapshot,
+            pRuntime->tPersistenceBackend.pUserData
+        );
+    }
+    if ( !pRuntime->tPersistenceBackend.pfnStoreCheckpoint ) {
+        return XWORK_OK;
+    }
+    if ( !pSnapshot->bHasCheckpoint ) {
+        return XWORK_OK;
+    }
+    {
+        xwork_checkpoint tCheckpoint;
+
+        xwork_checkpoint_init(&tCheckpoint);
+        tCheckpoint.sCheckpointId = pSnapshot->sLastCheckpointId;
+        tCheckpoint.sRunId = pSnapshot->sRunId;
+        tCheckpoint.sPendingStep = pSnapshot->sLastCheckpointPendingStep;
+        tCheckpoint.sSessionStateRef = pSnapshot->sLastCheckpointSessionStateRef;
+        tCheckpoint.sToolOutputsRef = pSnapshot->sLastCheckpointToolOutputsRef;
+        tCheckpoint.sWorkspaceSnapshotRef = pSnapshot->sLastCheckpointWorkspaceSnapshotRef;
+        tCheckpoint.sArtifactRefs = pSnapshot->sLastCheckpointArtifactRefs;
+        tCheckpoint.eKind = pSnapshot->eLastCheckpointKind;
+        tCheckpoint.eRunState = pSnapshot->eLastCheckpointRunState;
+        tCheckpoint.iSequence = pSnapshot->iLastCheckpointSequence;
+        return pRuntime->tPersistenceBackend.pfnStoreCheckpoint(
+            &tCheckpoint,
+            pSnapshot,
+            pRuntime->tPersistenceBackend.pUserData
+        );
+    }
 }
 
 xwork_status xwork__runtime_store_artifact(

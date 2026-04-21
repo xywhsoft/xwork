@@ -214,6 +214,20 @@ static xwork_status xwork__artifact_copy(
     if ( iStatus != XWORK_OK ) {
         return iStatus;
     }
+    iStatus = xwork__artifact_snapshot_replace_cstr(
+        &pTarget->sPatchApplyResultJson,
+        pSource->sPatchApplyResultJson
+    );
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+    iStatus = xwork__artifact_snapshot_replace_cstr(
+        &pTarget->sPatchFileSummaryJson,
+        pSource->sPatchFileSummaryJson
+    );
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
     iStatus = xwork__artifact_snapshot_replace_cstr(&pTarget->sCommandText, pSource->sCommandText);
     if ( iStatus != XWORK_OK ) {
         return iStatus;
@@ -255,6 +269,8 @@ static void xwork__artifact_record_reset(xwork_artifact_record *pRecord)
     xwork__free_cstr(&pRecord->sOutputRole);
     xwork__free_cstr(&pRecord->sReportSubjectRef);
     xwork__free_cstr(&pRecord->sContentText);
+    xwork__free_cstr(&pRecord->sPatchApplyResultJson);
+    xwork__free_cstr(&pRecord->sPatchFileSummaryJson);
     xwork__free_cstr(&pRecord->sCommandText);
     memset(&pRecord->tArtifact, 0, sizeof(pRecord->tArtifact));
 }
@@ -303,6 +319,8 @@ static xwork_status xwork__append_artifact_record_owned(
     char *sStorageRef,
     char *sSummary,
     char *sContentText,
+    char *sPatchApplyResultJson,
+    char *sPatchFileSummaryJson,
     char *sCommandText,
     bool bHasContentStats,
     size_t iContentByteCount,
@@ -335,6 +353,8 @@ static xwork_status xwork__append_artifact_record_owned(
         free(sStorageRef);
         free(sSummary);
         free(sContentText);
+        free(sPatchApplyResultJson);
+        free(sPatchFileSummaryJson);
         free(sCommandText);
         return XWORK_ERROR_INVALID_ARGUMENT;
     }
@@ -349,6 +369,8 @@ static xwork_status xwork__append_artifact_record_owned(
         free(sStorageRef);
         free(sSummary);
         free(sContentText);
+        free(sPatchApplyResultJson);
+        free(sPatchFileSummaryJson);
         free(sCommandText);
         return iStatus;
     }
@@ -364,6 +386,8 @@ static xwork_status xwork__append_artifact_record_owned(
     pRecord->sStorageRef = sStorageRef;
     pRecord->sSummary = sSummary;
     pRecord->sContentText = sContentText;
+    pRecord->sPatchApplyResultJson = sPatchApplyResultJson;
+    pRecord->sPatchFileSummaryJson = sPatchFileSummaryJson;
     pRecord->sCommandText = sCommandText;
     pRecord->bHasContentStats = bHasContentStats;
     pRecord->iContentByteCount = iContentByteCount;
@@ -394,6 +418,8 @@ static xwork_status xwork__append_artifact_record_owned(
     pRecord->tArtifact.sStorageRef = pRecord->sStorageRef;
     pRecord->tArtifact.sSummary = pRecord->sSummary;
     pRecord->tArtifact.sContentText = pRecord->sContentText;
+    pRecord->tArtifact.sPatchApplyResultJson = pRecord->sPatchApplyResultJson;
+    pRecord->tArtifact.sPatchFileSummaryJson = pRecord->sPatchFileSummaryJson;
     pRecord->tArtifact.sCommandText = pRecord->sCommandText;
     pRecord->tArtifact.bHasContentStats = pRecord->bHasContentStats;
     pRecord->tArtifact.iContentByteCount = pRecord->iContentByteCount;
@@ -486,6 +512,8 @@ void xwork_artifact_reset(xwork_artifact *pArtifact)
     xwork__free_cstr((char **)&pArtifact->sOutputRole);
     xwork__free_cstr((char **)&pArtifact->sReportSubjectRef);
     xwork__free_cstr((char **)&pArtifact->sContentText);
+    xwork__free_cstr((char **)&pArtifact->sPatchApplyResultJson);
+    xwork__free_cstr((char **)&pArtifact->sPatchFileSummaryJson);
     xwork__free_cstr((char **)&pArtifact->sCommandText);
     xwork_artifact_init(pArtifact);
 }
@@ -522,6 +550,8 @@ xwork_status xwork__run_append_artifact_record(
     char *sStorageRef = NULL;
     char *sSummary = NULL;
     char *sContentText = NULL;
+    char *sPatchApplyResultJson = NULL;
+    char *sPatchFileSummaryJson = NULL;
     char *sCommandText = NULL;
     bool bHasContentStats;
     size_t iContentByteCount;
@@ -625,6 +655,39 @@ xwork_status xwork__run_append_artifact_record(
     if ( pOptions->sCommandText ) {
         sCommandText = xwork__dup_cstr(pOptions->sCommandText);
         if ( !sCommandText ) {
+            free(sPatchFileSummaryJson);
+            free(sPatchApplyResultJson);
+            free(sContentText);
+            free(sSummary);
+            free(sStorageRef);
+            free(sMimeType);
+            free(sName);
+            free(sReportSubjectRef);
+            free(sOutputRole);
+            free(sArtifactId);
+            return XWORK_ERROR_NO_MEMORY;
+        }
+    }
+    if ( pOptions->sPatchApplyResultJson ) {
+        sPatchApplyResultJson = xwork__dup_cstr(pOptions->sPatchApplyResultJson);
+        if ( !sPatchApplyResultJson ) {
+            free(sCommandText);
+            free(sContentText);
+            free(sSummary);
+            free(sStorageRef);
+            free(sMimeType);
+            free(sName);
+            free(sReportSubjectRef);
+            free(sOutputRole);
+            free(sArtifactId);
+            return XWORK_ERROR_NO_MEMORY;
+        }
+    }
+    if ( pOptions->sPatchFileSummaryJson ) {
+        sPatchFileSummaryJson = xwork__dup_cstr(pOptions->sPatchFileSummaryJson);
+        if ( !sPatchFileSummaryJson ) {
+            free(sPatchApplyResultJson);
+            free(sCommandText);
             free(sContentText);
             free(sSummary);
             free(sStorageRef);
@@ -666,6 +729,8 @@ xwork_status xwork__run_append_artifact_record(
         sStorageRef,
         sSummary,
         sContentText,
+        sPatchApplyResultJson,
+        sPatchFileSummaryJson,
         sCommandText,
         bHasContentStats,
         iContentByteCount,
@@ -709,6 +774,8 @@ void xwork__run_snapshot_reset_artifacts(xwork_run_snapshot *pSnapshot)
         xwork__artifact_snapshot_free_cstr(&pArtifacts[i].sOutputRole);
         xwork__artifact_snapshot_free_cstr(&pArtifacts[i].sReportSubjectRef);
         xwork__artifact_snapshot_free_cstr(&pArtifacts[i].sContentText);
+        xwork__artifact_snapshot_free_cstr(&pArtifacts[i].sPatchApplyResultJson);
+        xwork__artifact_snapshot_free_cstr(&pArtifacts[i].sPatchFileSummaryJson);
         xwork__artifact_snapshot_free_cstr(&pArtifacts[i].sCommandText);
     }
     free(pArtifacts);
@@ -803,6 +870,26 @@ xwork_status xwork__run_snapshot_copy_artifacts(
             xwork__run_snapshot_reset_artifacts(pSnapshot);
             return iStatus;
         }
+        iStatus = xwork__artifact_snapshot_replace_cstr(
+            &pArtifacts[i].sPatchApplyResultJson,
+            pSource->sPatchApplyResultJson
+        );
+        if ( iStatus != XWORK_OK ) {
+            pSnapshot->pArtifacts = pArtifacts;
+            pSnapshot->iArtifactCount = i + 1u;
+            xwork__run_snapshot_reset_artifacts(pSnapshot);
+            return iStatus;
+        }
+        iStatus = xwork__artifact_snapshot_replace_cstr(
+            &pArtifacts[i].sPatchFileSummaryJson,
+            pSource->sPatchFileSummaryJson
+        );
+        if ( iStatus != XWORK_OK ) {
+            pSnapshot->pArtifacts = pArtifacts;
+            pSnapshot->iArtifactCount = i + 1u;
+            xwork__run_snapshot_reset_artifacts(pSnapshot);
+            return iStatus;
+        }
         iStatus = xwork__artifact_snapshot_replace_cstr(&pArtifacts[i].sCommandText, pSource->sCommandText);
         if ( iStatus != XWORK_OK ) {
             pSnapshot->pArtifacts = pArtifacts;
@@ -862,6 +949,8 @@ xwork_status xwork__run_apply_snapshot_artifacts(
         char *sOutputRole = xwork__dup_cstr(pSource->sOutputRole);
         char *sReportSubjectRef = xwork__dup_cstr(pSource->sReportSubjectRef);
         char *sContentText = xwork__dup_cstr(pSource->sContentText);
+        char *sPatchApplyResultJson = xwork__dup_cstr(pSource->sPatchApplyResultJson);
+        char *sPatchFileSummaryJson = xwork__dup_cstr(pSource->sPatchFileSummaryJson);
         char *sCommandText = xwork__dup_cstr(pSource->sCommandText);
 
         if ( (pSource->sArtifactId && !sArtifactId) ||
@@ -872,8 +961,12 @@ xwork_status xwork__run_apply_snapshot_artifacts(
              (pSource->sOutputRole && !sOutputRole) ||
              (pSource->sReportSubjectRef && !sReportSubjectRef) ||
              (pSource->sContentText && !sContentText) ||
+             (pSource->sPatchApplyResultJson && !sPatchApplyResultJson) ||
+             (pSource->sPatchFileSummaryJson && !sPatchFileSummaryJson) ||
              (pSource->sCommandText && !sCommandText) ) {
             free(sCommandText);
+            free(sPatchFileSummaryJson);
+            free(sPatchApplyResultJson);
             free(sContentText);
             free(sReportSubjectRef);
             free(sOutputRole);
@@ -899,6 +992,8 @@ xwork_status xwork__run_apply_snapshot_artifacts(
             sStorageRef,
             sSummary,
             sContentText,
+            sPatchApplyResultJson,
+            sPatchFileSummaryJson,
             sCommandText,
             pSource->bHasContentStats,
             pSource->iContentByteCount,
@@ -1042,6 +1137,8 @@ xwork_status xwork_run_emit_patch_artifact(
     tOptions.sStorageRef = pOptions->sTargetRef;
     tOptions.sSummary = pOptions->sSummary;
     tOptions.sContentText = pOptions->sPatchText;
+    tOptions.sPatchApplyResultJson = pOptions->sApplyResultJson;
+    tOptions.sPatchFileSummaryJson = pOptions->sFileSummaryJson;
     xwork__artifact_analyze_patch_text(
         pOptions->sPatchText,
         &tOptions.bHasPatchStats,

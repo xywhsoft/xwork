@@ -50,6 +50,7 @@ What exists now:
 - event / approval request / checkpoint / artifact object model
 - `xllm`-backed orchestrator loop with tool execution and approval pause/resume
 - model turn execution can now pass stream preference, forward normalized model events, honor xllm cancel tokens, and cooperatively interrupt before/after major run phases
+- model event cancellation priority is documented: interrupt/cancel token checks run before the user event callback, and a callback returning `false` cancels the model turn and propagates through `XWORK_ERROR_CANCELLED`
 - host service invocation now has a per-call context for run/cancel/interrupt metadata, and local `process.exec` can cooperatively cancel before spawn or while polling a running subprocess
 - custom tool executors can now opt into `pfnToolExecEx` with a cancellation context and `xwork_tool_exec_context_should_cancel()` helper
 - runs can now execute through a minimal async handle (`xwork_run_execute_async` / `xwork_run_async_*`) with wait, timed wait, status, cancel, and destroy APIs; async cancel feeds the same cooperative cancel token path and is covered against mock tools, unfinished-handle destroy, and local `process.exec`
@@ -57,9 +58,23 @@ What exists now:
 - run execution now has a per-run execution guard, so concurrent `xwork_run_execute` entries on the same run fail with `XWORK_ERROR_INVALID_STATE`
 - provider smoke now exercises the async run handle on its main provider execution path while keeping local stub coverage for request/response normalization and an offline model-call failure path
 - minimal local host helper for filesystem/process/vcs host services
-- built-in host tool defs for `filesystem.read_text` / `filesystem.write_text` / `process.exec` / `process.start_terminal` / `process.terminal_read` / `process.terminal_write` / `process.terminal_resize` / `process.terminal_stop` / `vcs.status`
-- builtin host tool execution now auto-synthesizes output/command artifacts for read/write/process/vcs flows
+- built-in host tool defs for `filesystem.read_text` / `filesystem.write_text` / `filesystem.list` / `filesystem.stat` / `filesystem.glob` / `filesystem.mkdir` / `filesystem.move` / `filesystem.delete` / `filesystem.apply_patch` / `process.exec` / `process.start_terminal` / `process.terminal_read` / `process.terminal_write` / `process.terminal_resize` / `process.terminal_stop` / `vcs.status` / `vcs.diff` / `vcs.log` / `vcs.branch`
+- builtin host tool execution now auto-synthesizes output/command artifacts for read/write/process/vcs flows, including git status/diff/log/branch command artifacts
+- builtin `process.exec` artifact synthesis now also emits a `process.diagnostics.json` report artifact for stderr, non-zero exit, and build/test-like commands using schema `xwork.diagnostics.v1`
 - builtin terminal host tool execution now auto-synthesizes session command/output artifacts for start/write/stop flows
+- local host now supports `filesystem.list` with request-level `path` / `recursive` / `include_hidden` / `limit`, and returns structured JSON entries plus pagination metadata
+- local host now supports `filesystem.stat`, returning `exists`, path, file type, size, and mtime metadata as structured JSON
+- local host now supports `filesystem.glob` with request-level `path` / `pattern` / `recursive` / `include_hidden` / `limit`, and returns bounded structured JSON matches
+- local host now supports `filesystem.mkdir` with `recursive`, `exist_ok`, and `dry_run`
+- local host now supports `filesystem.move` with `target_path`, `overwrite`, `recursive`, `create_dirs`, and `dry_run`
+- local host now supports `filesystem.delete` with file/directory deletion, recursive directory deletion, and `dry_run`
+- local host now supports `filesystem.apply_patch` as a single-file exact text replacement patch with `old_text`, `new_text`, `dry_run`, and structured conflict errors
+- local host filesystem tools can now enforce a filesystem root plus allow/deny path prefixes, and denied paths return structured `path_denied` results with audit-friendly reasons
+- local host process tools can now enforce command allow/deny patterns and optionally reject commands classified as destructive before spawning a subprocess
+- public host services now include an explicit `XWORK_HOST_NETWORK` slot, and policy evaluation supports network host allow/deny patterns plus deny-by-default behavior for network side effects
+- local host now supports read-only VCS tools: `vcs.status`, `vcs.diff` with working-tree/staged modes, `vcs.log` with bounded `limit`, and `vcs.branch` with current branch plus dirty state
+- builtin `filesystem.list` / `filesystem.stat` / `filesystem.glob` / `filesystem.mkdir` / `filesystem.move` / `filesystem.delete` now also emit JSON output artifacts from orchestrator runs
+- builtin `filesystem.apply_patch` now emits a patch artifact from orchestrator runs, including structured `xwork.patch_apply_result.v1` and `xwork.patch_file_summary.v1` JSON metadata
 - local `filesystem.write_text` host contract now supports `mode=append`
 - local `filesystem.write_text` host contract now supports `mode=create`
 - local `filesystem.write_text` host contract now supports request-level `create_dirs:true`
@@ -99,6 +114,10 @@ What exists now:
 - artifact summary query also supports `mime_prefix` / `storage_ref_prefix`, so callers can slice a shared terminal session artifact chain by transport metadata without full artifact loads
 - output/report artifacts now carry typed output metadata (`output_class` plus `output_role`) through runtime objects, summaries, snapshots, persistence, and workspace memory ingest; builtin filesystem and terminal artifact synthesis fills file-content/file-change/terminal-state/terminal-inventory classes
 - report artifacts now also carry report-specific typed metadata (`report_class` plus `report_subject_ref`) through runtime objects, summaries, snapshots, persistence, query filters, and workspace memory ingest
+- JSON report artifacts can use schema `xwork.report.v1` with stable `report_kind`, `status`, `subject_ref`, `title`, `summary`, `body_markdown`, and `items` fields for plan/progress/final report flows shared by AI IDE and claw integrations
+- planner support is intentionally a boundary in v1: callers can persist plan reports, pass planner context or plan JSON into orchestrator turns, and force `auto/none/required/named` tool choice, while the autonomous planner itself remains outside xwork
+- diagnostics report artifacts use `XWORK_ARTIFACT_REPORT_DIAGNOSTICS` and carry minimal severity/source/location/message records derived from process output
+- terminal session output artifacts now identify their JSON contracts with `xwork.terminal_state.v1` for session state windows and `xwork.terminal_inventory.v1` for terminal inventory results
 - artifact summary query smoke now also covers `exit_code` and min/max `sequence` filters against a persisted command artifact
 - builtin `process.exec` artifact synthesis now preserves stderr instead of dropping it from command artifacts
 - command artifacts can now carry structured command I/O stats (`stdout_byte_count` / `stderr_byte_count` / stdout/stderr truncation flags) through runtime objects, summaries, snapshots, persistence, and workspace memory ingest
@@ -107,13 +126,13 @@ What exists now:
 - local `process.exec` env list is bounded by configured `iMaxProcessEnvEntries`
 - typed artifact emit helpers for patch / report / command / output
 - artifacts with `content_text` now carry computed content stats (`content_byte_count` / `content_line_count`) through runtime objects, summaries, snapshots, persistence, and workspace memory ingest
-- patch artifacts now carry computed patch stats (`file_count` / `hunk_count` / `added_line_count` / `deleted_line_count`) through runtime objects, summaries, snapshots, persistence, and workspace memory ingest
+- patch artifacts now carry computed patch stats (`file_count` / `hunk_count` / `added_line_count` / `deleted_line_count`) plus apply-result and per-file summary JSON through runtime objects, summaries, snapshots, persistence, and workspace memory ingest
 - workspace memory attach and tool/artifact memory ingest hooks
 - workspace memory can now be synced directly from a workspace root through `xllm_memory_sync_workspace`, with a small `xwork_workspace_memory_sync_summary` result surface
 - workspace memory can also sync one changed file through `xllm_memory_sync_file`, with a compact change-kind summary for incremental update paths
 - in-memory and file-backed checkpoint / snapshot persistence
 - persisted run / event / checkpoint / artifact query surface
-- built-in `xcode` / `xclaw` profiles
+- built-in `xcode` / `xclaw` profiles with distinct defaults: `xcode` is semi-auto, low-risk auto-approval only, no default workspace memory, planner boundary off, and network-deny-by-default; `xclaw` is autonomous, high-risk auto-approval capable, workspace-memory enabled, planner boundary enabled, and also network-deny-by-default unless callers configure an allowlist
 - smoke tests under [tests](/D:/git/xwork/tests)
 
 The implementation is still intentionally minimal. It is a reusable baseline,
@@ -172,6 +191,23 @@ The draft currently exposes:
 - built-in host tool lookup/registration helpers
 - local host service bootstrap helpers
 
+Recovery is snapshot-based. `xwork_runtime_recover_run_from_persistence()`
+loads the latest persisted run snapshot, so a pending tool with an approved
+approval decision can be resumed and re-executed from stored arguments. Live OS
+process handles and interactive terminal sessions are not rehydrated after a
+process restart; their persisted artifacts are durable audit/output records, and
+host integrations must rediscover or restart live sessions explicitly.
+
+Error mapping is intentionally narrow: invalid caller input returns
+`XWORK_ERROR_INVALID_ARGUMENT`, invalid lifecycle usage returns
+`XWORK_ERROR_INVALID_STATE`, unsupported capabilities or newer persistence
+formats return `XWORK_ERROR_UNSUPPORTED`, missing durable objects return
+`XWORK_ERROR_NOT_FOUND`, duplicate ids return `XWORK_ERROR_ALREADY_EXISTS`,
+cooperative cancellation returns `XWORK_ERROR_CANCELLED`, and provider, host, or
+persistence I/O failures that are outside caller control return
+`XWORK_ERROR_EXTERNAL_FAILURE`. `xwork_version()` and `xwork_status_cstr()`
+expose stable strings for logging and diagnostics.
+
 This is enough to anchor a minimum end-to-end runtime loop before more
 production-grade host integration is added.
 
@@ -220,6 +256,22 @@ int main(void)
 }
 ```
 
+## Runnable Examples
+
+Two product-oriented examples are available under [examples](/D:/git/xwork/examples):
+
+- [examples/ai_ide_agent.c](/D:/git/xwork/examples/ai_ide_agent.c) uses the `xcode` profile, local filesystem host service, a mock `xllm` model turn, dry-run patch/report artifacts, and approval pause/resume.
+- [examples/claw_autonomous_agent.c](/D:/git/xwork/examples/claw_autonomous_agent.c) uses the `xclaw` profile, `process.exec`, command/report artifacts, file persistence, and run recovery.
+
+Typical build/run commands:
+
+```powershell
+gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib\sqlite examples\ai_ide_agent.c examples\xwork_example_runtime.c lib\sqlite\sqlite3.c -o examples\ai_ide_agent.exe -lws2_32 -liphlpapi
+gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib\sqlite examples\claw_autonomous_agent.c examples\xwork_example_runtime.c lib\sqlite\sqlite3.c -o examples\claw_autonomous_agent.exe -lws2_32 -liphlpapi
+examples\ai_ide_agent.exe
+examples\claw_autonomous_agent.exe
+```
+
 ## Near-Term Milestones
 
 1. Expand the built-in host tool surface and harden request/response contracts.
@@ -233,21 +285,51 @@ int main(void)
 Primary smoke coverage currently lives in:
 
 - [tests/xwork_orchestrator_smoke.c](/D:/git/xwork/tests/xwork_orchestrator_smoke.c)
+- [tests/xwork_core_smoke.c](/D:/git/xwork/tests/xwork_core_smoke.c)
+- [tests/xwork_host_smoke.c](/D:/git/xwork/tests/xwork_host_smoke.c)
+- [tests/xwork_persistence_smoke.c](/D:/git/xwork/tests/xwork_persistence_smoke.c)
+- [tests/xwork_profile_smoke.c](/D:/git/xwork/tests/xwork_profile_smoke.c)
 - [tests/xwork_orchestrator_provider_smoke.c](/D:/git/xwork/tests/xwork_orchestrator_provider_smoke.c)
+- [tests/xwork_stress_smoke.c](/D:/git/xwork/tests/xwork_stress_smoke.c)
+
+See [tests/README.md](/D:/git/xwork/tests/README.md) for the test groups,
+optional real-provider environment variables, and the CI target mapping.
+
+Packaging and compatibility notes are tracked in
+[docs/PACKAGING.md](/D:/git/xwork/docs/PACKAGING.md),
+[docs/COMPATIBILITY.md](/D:/git/xwork/docs/COMPATIBILITY.md), and
+[CHANGELOG.md](/D:/git/xwork/CHANGELOG.md).
+Builtin host tool contracts and examples are tracked in
+[docs/HOST_TOOL_CONTRACTS.md](/D:/git/xwork/docs/HOST_TOOL_CONTRACTS.md) and
+[docs/HOST_TOOL_EXAMPLES.md](/D:/git/xwork/docs/HOST_TOOL_EXAMPLES.md).
 
 Typical compile/run commands:
 
 ```powershell
 gcc -std=c11 -Wall -Wextra -pedantic -c xwork.c
+gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_core_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_core_smoke.exe -lws2_32 -liphlpapi
+gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_host_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_host_smoke.exe -lws2_32 -liphlpapi
 gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_orchestrator_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_orchestrator_smoke.exe -lws2_32 -liphlpapi
+gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_persistence_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_persistence_smoke.exe -lws2_32 -liphlpapi
+gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_profile_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_profile_smoke.exe -lws2_32 -liphlpapi
 gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_orchestrator_provider_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_orchestrator_provider_smoke.exe -lws2_32 -liphlpapi
+gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_stress_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_stress_smoke.exe -lws2_32 -liphlpapi
+tests\xwork_core_smoke.exe
+tests\xwork_host_smoke.exe
 tests\xwork_orchestrator_smoke.exe
+tests\xwork_persistence_smoke.exe
+tests\xwork_profile_smoke.exe
 tests\xwork_orchestrator_provider_smoke.exe
+tests\xwork_stress_smoke.exe
 ```
 
-The provider smoke now runs offline by default with a local OpenAI-compatible
-HTTP stub, and can optionally hit a real provider when the relevant
-environment variables are set.
+The provider smoke now runs offline by default with local OpenAI-compatible,
+Anthropic, and Ollama stubs. It can optionally hit a real provider when the
+relevant environment variables are set, and `XWORK_PROVIDER_SMOKE_EXPECT_ERROR=1`
+turns that real-provider run into an expected error-path smoke for bad
+credentials, bad model ids, or a controlled error endpoint.
+The real-provider runbook and drift log template are tracked in
+[docs/PROVIDER_SMOKE.md](/D:/git/xwork/docs/PROVIDER_SMOKE.md).
 
 ## Non-Goals For This Stage
 

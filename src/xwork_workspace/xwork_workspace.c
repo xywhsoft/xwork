@@ -47,8 +47,29 @@ xwork_status xwork_runtime_add_workspace(
     pWorkspace->sRootPath = xwork__dup_cstr(pOptions->sRootPath);
     pWorkspace->bEnableMemory = pOptions->bEnableMemory;
     pWorkspace->pMemory = pOptions->pMemory;
+    pWorkspace->sMemorySyncAllowedExtensions =
+        xwork__dup_cstr(pOptions->sMemorySyncAllowedExtensions);
+    pWorkspace->sMemorySyncIgnoredDirectories =
+        xwork__dup_cstr(pOptions->sMemorySyncIgnoredDirectories);
+    pWorkspace->sMemorySyncIgnoredExtensions =
+        xwork__dup_cstr(pOptions->sMemorySyncIgnoredExtensions);
+    pWorkspace->sMemorySyncIgnoredPathPatterns =
+        xwork__dup_cstr(pOptions->sMemorySyncIgnoredPathPatterns);
+    pWorkspace->sMemorySyncIgnoredFiles =
+        xwork__dup_cstr(pOptions->sMemorySyncIgnoredFiles);
+    pWorkspace->iMemorySyncMaxFileBytes = pOptions->iMemorySyncMaxFileBytes;
 
-    if ( !pWorkspace->sWorkspaceId || !pWorkspace->sRootPath ) {
+    if ( !pWorkspace->sWorkspaceId || !pWorkspace->sRootPath ||
+         (pOptions->sMemorySyncAllowedExtensions &&
+          !pWorkspace->sMemorySyncAllowedExtensions) ||
+         (pOptions->sMemorySyncIgnoredDirectories &&
+          !pWorkspace->sMemorySyncIgnoredDirectories) ||
+         (pOptions->sMemorySyncIgnoredExtensions &&
+          !pWorkspace->sMemorySyncIgnoredExtensions) ||
+         (pOptions->sMemorySyncIgnoredPathPatterns &&
+          !pWorkspace->sMemorySyncIgnoredPathPatterns) ||
+         (pOptions->sMemorySyncIgnoredFiles &&
+          !pWorkspace->sMemorySyncIgnoredFiles) ) {
         xwork_workspace_destroy(pWorkspace);
         return XWORK_ERROR_NO_MEMORY;
     }
@@ -99,6 +120,11 @@ void xwork_workspace_destroy(xwork_workspace *pWorkspace)
 
     xwork__free_cstr(&pWorkspace->sWorkspaceId);
     xwork__free_cstr(&pWorkspace->sRootPath);
+    xwork__free_cstr(&pWorkspace->sMemorySyncAllowedExtensions);
+    xwork__free_cstr(&pWorkspace->sMemorySyncIgnoredDirectories);
+    xwork__free_cstr(&pWorkspace->sMemorySyncIgnoredExtensions);
+    xwork__free_cstr(&pWorkspace->sMemorySyncIgnoredPathPatterns);
+    xwork__free_cstr(&pWorkspace->sMemorySyncIgnoredFiles);
     free(pWorkspace);
 }
 
@@ -152,6 +178,12 @@ xwork_status xwork_workspace_sync_memory(
     tOptions.bSkipHidden = true;
     tOptions.bSkipUnchanged = true;
     tOptions.bLoadGitIgnore = true;
+    tOptions.sAllowedExtensions = pWorkspace->sMemorySyncAllowedExtensions;
+    tOptions.sIgnoredDirectories = pWorkspace->sMemorySyncIgnoredDirectories;
+    tOptions.sIgnoredExtensions = pWorkspace->sMemorySyncIgnoredExtensions;
+    tOptions.sIgnoredPathPatterns = pWorkspace->sMemorySyncIgnoredPathPatterns;
+    tOptions.sIgnoreFiles = pWorkspace->sMemorySyncIgnoredFiles;
+    tOptions.uMaxFileBytes = (uint64)pWorkspace->iMemorySyncMaxFileBytes;
     tOptions.sSourceUriPrefix = "workspace://";
 
     iStatus = xllm_memory_sync_workspace(pWorkspace->pMemory, &tOptions, &tResult, &tError);
@@ -210,6 +242,11 @@ xwork_status xwork_workspace_sync_memory_file(
     tOptions.bUseWorkspaceDefaults = true;
     tOptions.bSkipHidden = true;
     tOptions.bSkipUnchanged = true;
+    tOptions.sAllowedExtensions = pWorkspace->sMemorySyncAllowedExtensions;
+    tOptions.sIgnoredDirectories = pWorkspace->sMemorySyncIgnoredDirectories;
+    tOptions.sIgnoredExtensions = pWorkspace->sMemorySyncIgnoredExtensions;
+    tOptions.sIgnoredPathPatterns = pWorkspace->sMemorySyncIgnoredPathPatterns;
+    tOptions.uMaxFileBytes = (uint64)pWorkspace->iMemorySyncMaxFileBytes;
     tOptions.sSourceUriPrefix = "workspace://";
 
     iStatus = xllm_memory_sync_file(pWorkspace->pMemory, &tOptions, &tChanges, &tError);

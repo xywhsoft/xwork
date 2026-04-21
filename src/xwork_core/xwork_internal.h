@@ -62,6 +62,8 @@ struct xwork_artifact_record {
     char *sStorageRef;
     char *sSummary;
     char *sContentText;
+    char *sPatchApplyResultJson;
+    char *sPatchFileSummaryJson;
     char *sCommandText;
     xwork_artifact_output_class eOutputClass;
     xwork_artifact_report_class eReportClass;
@@ -100,6 +102,12 @@ struct xwork_workspace {
     char *sRootPath;
     bool bEnableMemory;
     xllm_memory *pMemory;
+    char *sMemorySyncAllowedExtensions;
+    char *sMemorySyncIgnoredDirectories;
+    char *sMemorySyncIgnoredExtensions;
+    char *sMemorySyncIgnoredPathPatterns;
+    char *sMemorySyncIgnoredFiles;
+    size_t iMemorySyncMaxFileBytes;
     xwork_workspace *pNext;
 };
 
@@ -193,6 +201,19 @@ bool xwork__run_state_is_terminal(xwork_run_state eState);
 xwork_status xwork__run_begin_execution(xwork_run *pRun);
 void xwork__run_end_execution(xwork_run *pRun);
 xwork_status xwork__replace_cstr(char **psTarget, const char *sText);
+xwork_status xwork__run_step_from_event(
+    xwork_run_step *pStep,
+    const xwork_event *pEvent,
+    const xwork_checkpoint *pCheckpoint
+);
+bool xwork__run_step_matches_query(
+    const xwork_run_step *pStep,
+    const xwork_run_step_query *pQuery
+);
+xwork_status xwork__run_step_list_append(
+    xwork_run_step_list *pList,
+    const xwork_run_step *pStep
+);
 xwork_status xwork__run_set_last_memory_context(
     xwork_run *pRun,
     const xwork_memory_context *pContext
@@ -250,6 +271,10 @@ xwork_status xwork__runtime_store_event(
 xwork_status xwork__runtime_store_checkpoint(
     const xwork_runtime *pRuntime,
     const xwork_checkpoint *pCheckpoint,
+    const xwork_run_snapshot *pSnapshot
+);
+xwork_status xwork__runtime_store_run_snapshot(
+    const xwork_runtime *pRuntime,
     const xwork_run_snapshot *pSnapshot
 );
 xwork_status xwork__runtime_store_artifact(
