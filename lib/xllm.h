@@ -1775,7 +1775,6 @@ static void xllm__turn_release(xllm_turn *pTurn)
     memset(pTurn, 0, sizeof(*pTurn));
 }
 
-#if defined(XLLM__WITH_SESSION)
 static int xllm__turn_clone(xllm_turn *pOut, const xllm_turn *pIn)
 {
     if ( !pOut || !pIn ) {
@@ -1816,6 +1815,12 @@ static int xllm__turn_clone(xllm_turn *pOut, const xllm_turn *pIn)
     }
 
     return XRT_NET_OK;
+}
+
+#if defined(XLLM__WITH_SESSION)
+XLLM_API int xllm_turn_clone(xllm_turn *pOut, const xllm_turn *pIn)
+{
+    return xllm__turn_clone(pOut, pIn);
 }
 #endif
 

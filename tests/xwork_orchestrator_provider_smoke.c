@@ -38,6 +38,9 @@ typedef struct {
     volatile LONG iRequestCount;
     xwork_provider_stub_kind eKind;
     const char *sModelId;
+    int iForceHttpStatusCode;
+    const char *sForceHttpStatusText;
+    const char *sForceResponseBody;
     char *asRequestTargets[2];
     char *asRequestHeaders[2];
     char *asRequestBodies[2];
@@ -470,6 +473,9 @@ static DWORD WINAPI xwork_test_provider_stub_thread(LPVOID pParam)
         char sResponseBody[2048];
         char sHeaders[256];
         size_t iRequestIndex;
+        int iHttpStatusCode = 200;
+        const char *sHttpStatusText = "OK";
+        bool bStopAfterResponse = false;
         bool bStoredTarget = false;
         bool bStoredHeaders = false;
         bool bStoredBody = false;
@@ -500,30 +506,102 @@ static DWORD WINAPI xwork_test_provider_stub_thread(LPVOID pParam)
             bStoredBody = true;
         }
 
-        switch ( pStub->eKind ) {
-            case XWORK_PROVIDER_STUB_OPENAI:
-                if ( !sTarget || strstr(sTarget, "/chat/completions") == NULL ) {
-                    xwork_test_stub_set_error(pStub, "unexpected openai-compatible request target");
-                    if ( !bStoredTarget ) {
-                        free(sTarget);
+        if ( pStub->iForceHttpStatusCode > 0 ) {
+            iHttpStatusCode = pStub->iForceHttpStatusCode;
+            sHttpStatusText = pStub->sForceHttpStatusText ?
+                pStub->sForceHttpStatusText :
+                "Internal Server Error";
+            iBodyLen = snprintf(
+                sResponseBody,
+                sizeof(sResponseBody),
+                "%s",
+                pStub->sForceResponseBody ?
+                    pStub->sForceResponseBody :
+                    "{\"error\":{\"message\":\"forced provider failure\"}}"
+            );
+            bStopAfterResponse = true;
+        } else {
+            switch ( pStub->eKind ) {
+                case XWORK_PROVIDER_STUB_OPENAI:
+                    if ( !sTarget || strstr(sTarget, "/chat/completions") == NULL ) {
+                        xwork_test_stub_set_error(pStub, "unexpected openai-compatible request target");
+                        if ( !bStoredTarget ) {
+                            free(sTarget);
+                        }
+                        if ( !bStoredHeaders ) {
+                            free(sRequestHeaders);
+                        }
+                        if ( !bStoredBody ) {
+                            free(sBody);
+                        }
+                        closesocket(hClient);
+                        return 1u;
                     }
-                    if ( !bStoredHeaders ) {
-                        free(sRequestHeaders);
-                    }
-                    if ( !bStoredBody ) {
-                        free(sBody);
-                    }
-                    closesocket(hClient);
-                    return 1u;
-                }
-                if ( iRequestIndex == 0u ) {
-                    if ( !sBody ||
-                         strstr(sBody, "\"mock.echo\"") == NULL ||
-                         strstr(sBody, "provider smoke") == NULL ||
-                         strstr(sBody, "\"tools\"") == NULL ) {
+                    if ( iRequestIndex == 0u ) {
+                        if ( !sBody ||
+                             strstr(sBody, "\"mock.echo\"") == NULL ||
+                             strstr(sBody, "provider smoke") == NULL ||
+                             strstr(sBody, "\"tools\"") == NULL ) {
+                            xwork_test_stub_set_error(
+                                pStub,
+                                "openai-compatible first request missing tool call setup"
+                            );
+                            if ( !bStoredTarget ) {
+                                free(sTarget);
+                            }
+                            if ( !bStoredHeaders ) {
+                                free(sRequestHeaders);
+                            }
+                            if ( !bStoredBody ) {
+                                free(sBody);
+                            }
+                            closesocket(hClient);
+                            return 1u;
+                        }
+                        iBodyLen = snprintf(
+                            sResponseBody,
+                            sizeof(sResponseBody),
+                            "{\"id\":\"stub-tool-1\",\"object\":\"chat.completion\",\"created\":1,"
+                            "\"model\":\"%s\",\"choices\":[{\"index\":0,\"message\":{"
+                            "\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_mock_echo_1\","
+                            "\"type\":\"function\",\"function\":{\"name\":\"mock.echo\",\"arguments\":"
+                            "\"{\\\"payload\\\":\\\"provider smoke\\\"}\"}}]},"
+                            "\"finish_reason\":\"tool_calls\"}]}",
+                            pStub->sModelId ? pStub->sModelId : "stub-openai-model"
+                        );
+                    } else if ( iRequestIndex == 1u ) {
+                        if ( !sBody ||
+                             strstr(sBody, "\"tool_call_id\":\"call_mock_echo_1\"") == NULL ||
+                             strstr(sBody, "provider smoke") == NULL ) {
+                            xwork_test_stub_set_error(
+                                pStub,
+                                "openai-compatible second request missing tool result followup"
+                            );
+                            if ( !bStoredTarget ) {
+                                free(sTarget);
+                            }
+                            if ( !bStoredHeaders ) {
+                                free(sRequestHeaders);
+                            }
+                            if ( !bStoredBody ) {
+                                free(sBody);
+                            }
+                            closesocket(hClient);
+                            return 1u;
+                        }
+                        iBodyLen = snprintf(
+                            sResponseBody,
+                            sizeof(sResponseBody),
+                            "{\"id\":\"stub-final-2\",\"object\":\"chat.completion\",\"created\":2,"
+                            "\"model\":\"%s\",\"choices\":[{\"index\":0,\"message\":{"
+                            "\"role\":\"assistant\",\"content\":\"PROVIDER_SMOKE_COMPLETE\"},"
+                            "\"finish_reason\":\"stop\"}]}",
+                            pStub->sModelId ? pStub->sModelId : "stub-openai-model"
+                        );
+                    } else {
                         xwork_test_stub_set_error(
                             pStub,
-                            "openai-compatible first request missing tool call setup"
+                            "openai-compatible stub received unexpected extra request"
                         );
                         if ( !bStoredTarget ) {
                             free(sTarget);
@@ -537,64 +615,7 @@ static DWORD WINAPI xwork_test_provider_stub_thread(LPVOID pParam)
                         closesocket(hClient);
                         return 1u;
                     }
-                    iBodyLen = snprintf(
-                        sResponseBody,
-                        sizeof(sResponseBody),
-                        "{\"id\":\"stub-tool-1\",\"object\":\"chat.completion\",\"created\":1,"
-                        "\"model\":\"%s\",\"choices\":[{\"index\":0,\"message\":{"
-                        "\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_mock_echo_1\","
-                        "\"type\":\"function\",\"function\":{\"name\":\"mock.echo\",\"arguments\":"
-                        "\"{\\\"payload\\\":\\\"provider smoke\\\"}\"}}]},"
-                        "\"finish_reason\":\"tool_calls\"}]}",
-                        pStub->sModelId ? pStub->sModelId : "stub-openai-model"
-                    );
-                } else if ( iRequestIndex == 1u ) {
-                    if ( !sBody ||
-                         strstr(sBody, "\"tool_call_id\":\"call_mock_echo_1\"") == NULL ||
-                         strstr(sBody, "provider smoke") == NULL ) {
-                        xwork_test_stub_set_error(
-                            pStub,
-                            "openai-compatible second request missing tool result followup"
-                        );
-                        if ( !bStoredTarget ) {
-                            free(sTarget);
-                        }
-                        if ( !bStoredHeaders ) {
-                            free(sRequestHeaders);
-                        }
-                        if ( !bStoredBody ) {
-                            free(sBody);
-                        }
-                        closesocket(hClient);
-                        return 1u;
-                    }
-                    iBodyLen = snprintf(
-                        sResponseBody,
-                        sizeof(sResponseBody),
-                        "{\"id\":\"stub-final-2\",\"object\":\"chat.completion\",\"created\":2,"
-                        "\"model\":\"%s\",\"choices\":[{\"index\":0,\"message\":{"
-                        "\"role\":\"assistant\",\"content\":\"PROVIDER_SMOKE_COMPLETE\"},"
-                        "\"finish_reason\":\"stop\"}]}",
-                        pStub->sModelId ? pStub->sModelId : "stub-openai-model"
-                    );
-                } else {
-                    xwork_test_stub_set_error(
-                        pStub,
-                        "openai-compatible stub received unexpected extra request"
-                    );
-                    if ( !bStoredTarget ) {
-                        free(sTarget);
-                    }
-                    if ( !bStoredHeaders ) {
-                        free(sRequestHeaders);
-                    }
-                    if ( !bStoredBody ) {
-                        free(sBody);
-                    }
-                    closesocket(hClient);
-                    return 1u;
-                }
-                break;
+                    break;
 
             case XWORK_PROVIDER_STUB_ANTHROPIC:
                 if ( !sTarget || strstr(sTarget, "/messages") == NULL ) {
@@ -800,6 +821,7 @@ static DWORD WINAPI xwork_test_provider_stub_thread(LPVOID pParam)
                 closesocket(hClient);
                 return 1u;
         }
+        }
 
         if ( iBodyLen <= 0 || (size_t)iBodyLen >= sizeof(sResponseBody) ) {
             xwork_test_stub_set_error(pStub, "failed to build stub response body");
@@ -819,11 +841,13 @@ static DWORD WINAPI xwork_test_provider_stub_thread(LPVOID pParam)
         iHeaderLen = snprintf(
             sHeaders,
             sizeof(sHeaders),
-            "HTTP/1.1 200 OK\r\n"
+            "HTTP/1.1 %d %s\r\n"
             "Content-Type: application/json\r\n"
             "Content-Length: %u\r\n"
             "Connection: close\r\n"
             "\r\n",
+            iHttpStatusCode,
+            sHttpStatusText,
             (unsigned)iBodyLen
         );
         if ( iHeaderLen <= 0 || (size_t)iHeaderLen >= sizeof(sHeaders) ) {
@@ -869,7 +893,7 @@ static DWORD WINAPI xwork_test_provider_stub_thread(LPVOID pParam)
             free(sBody);
         }
 
-        if ( iRequestIndex >= 1u ) {
+        if ( bStopAfterResponse || iRequestIndex >= 1u ) {
             return 0u;
         }
     }
@@ -1416,6 +1440,168 @@ static void xwork_test_run_local_provider_case(
     xwork_test_provider_stub_stop(&tStub);
 }
 
+static void xwork_test_run_local_provider_failure_case(
+    const xwork_profile *pProductProfile
+)
+{
+    xwork_provider_smoke_stub tStub;
+    xwork_provider_smoke_ctx tSmokeCtx;
+    xwork_xllm_profile_options tProviderProfile;
+    xwork_xllm_bootstrap_options tProviderBootstrap;
+    xwork_runtime_options tRuntimeOptions;
+    xwork_runtime *pRuntime = NULL;
+    xwork_workspace_options tWorkspaceOptions;
+    xwork_workspace *pWorkspace = NULL;
+    xwork_tool_def tToolDef;
+    xwork_run_options tRunOptions;
+    xwork_run *pRun = NULL;
+    xwork_run_async *pAsync = NULL;
+    xwork_orchestrator_options tExecOptions;
+    xwork_event tEvent;
+    xwork_status iAsyncStatus;
+    bool bAsyncCompleted = false;
+    const char *asWorkspaceIds[1];
+    char sBaseUrl[128];
+
+    assert(pProductProfile != NULL);
+
+    memset(&tStub, 0, sizeof(tStub));
+    tStub.hListener = INVALID_SOCKET;
+    memset(&tSmokeCtx, 0, sizeof(tSmokeCtx));
+    memset(sBaseUrl, 0, sizeof(sBaseUrl));
+
+    assert(xwork_test_provider_stub_start(&tStub));
+    tStub.eKind = XWORK_PROVIDER_STUB_OPENAI;
+    tStub.sModelId = "stub-openai-model";
+    tStub.iForceHttpStatusCode = 500;
+    tStub.sForceHttpStatusText = "Internal Server Error";
+    tStub.sForceResponseBody = "{\"error\":{\"message\":\"forced provider failure\"}}";
+    assert(tStub.uPort != 0u);
+
+    (void)snprintf(
+        sBaseUrl,
+        sizeof(sBaseUrl),
+        "http://127.0.0.1:%u/v1",
+        (unsigned)tStub.uPort
+    );
+
+    xwork_runtime_options_init(&tRuntimeOptions);
+    assert(xwork_profile_apply_runtime_options(pProductProfile, &tRuntimeOptions) == XWORK_OK);
+    xwork_xllm_profile_options_init(&tProviderProfile);
+    xwork_xllm_bootstrap_options_init(&tProviderBootstrap);
+    assert(
+        xwork_profile_apply_xllm_bootstrap_options(
+            pProductProfile,
+            &tProviderProfile,
+            &tProviderBootstrap
+        ) == XWORK_OK
+    );
+    tProviderProfile.sProfileId = "provider-local-openai-failure";
+    tProviderProfile.sDisplayName = "provider-local-openai-failure";
+    tProviderProfile.sProvider = XWORK_XLLM_ADAPTER_OPENAI_COMPAT;
+    tProviderProfile.sAdapter = XWORK_XLLM_ADAPTER_OPENAI_COMPAT;
+    tProviderProfile.sBaseUrl = sBaseUrl;
+    tProviderProfile.sModelId = "stub-openai-model";
+    tProviderProfile.sApiKey = "stub-openai-key";
+    tProviderProfile.iMaxOutputTokens = 256u;
+    tRuntimeOptions.pLlmBootstrap = &tProviderBootstrap;
+
+    assert(xwork_runtime_create(&tRuntimeOptions, &pRuntime) == XWORK_OK);
+    assert(xwork_runtime_get_llm_runtime(pRuntime) != NULL);
+    assert(
+        xllm_runtime_set_trace_callback(
+            xwork_runtime_get_llm_runtime(pRuntime),
+            xwork_test_trace_callback,
+            &tSmokeCtx
+        ) == XRT_NET_OK
+    );
+
+    xwork_workspace_options_init(&tWorkspaceOptions);
+    tWorkspaceOptions.sWorkspaceId = "main";
+    tWorkspaceOptions.sRootPath = ".";
+    assert(xwork_runtime_add_workspace(pRuntime, &tWorkspaceOptions, &pWorkspace) == XWORK_OK);
+    assert(pWorkspace != NULL);
+
+    xwork_tool_def_init(&tToolDef);
+    tToolDef.sToolId = "mock.echo";
+    tToolDef.sDisplayName = "Mock Echo";
+    tToolDef.sDescription = "Echo a small payload for provider failure validation.";
+    tToolDef.eKind = XWORK_TOOL_VIRTUAL;
+    tToolDef.eSideEffect = XWORK_SIDE_EFFECT_READ_ONLY;
+    tToolDef.eApprovalMode = XWORK_APPROVAL_NEVER;
+    assert(xwork_runtime_register_tool(pRuntime, &tToolDef) == XWORK_OK);
+
+    asWorkspaceIds[0] = "main";
+    xwork_run_options_init(&tRunOptions);
+    assert(xwork_profile_apply_run_options(pProductProfile, &tRunOptions) == XWORK_OK);
+    tRunOptions.sRunId = "run-provider-local-openai-failure";
+    tRunOptions.sInstruction =
+        "Call the tool `mock.echo` with a JSON object that contains "
+        "the text `provider smoke`.";
+    tRunOptions.sLlmProfileId = "provider-local-openai-failure";
+    tRunOptions.sSessionProfileId = "provider-local-openai-failure";
+    tRunOptions.psWorkspaceIds = asWorkspaceIds;
+    tRunOptions.iWorkspaceCount = 1u;
+    assert(xwork_run_create(pRuntime, &tRunOptions, &pRun) == XWORK_OK);
+
+    xwork_orchestrator_options_init(&tExecOptions);
+    assert(
+        xwork_profile_apply_orchestrator_options(
+            pProductProfile,
+            &tExecOptions
+        ) == XWORK_OK
+    );
+    tExecOptions.pfnToolExec = xwork_provider_smoke_tool_exec;
+    tExecOptions.pUserData = &tSmokeCtx;
+    tExecOptions.bAutoApprove = true;
+
+    assert(xwork_run_execute_async(pRun, &tExecOptions, &pAsync) == XWORK_OK);
+    assert(xwork_run_async_wait(pAsync) == XWORK_ERROR_EXTERNAL_FAILURE);
+    assert(
+        xwork_run_async_get_status(
+            pAsync,
+            &iAsyncStatus,
+            &bAsyncCompleted
+        ) == XWORK_OK
+    );
+    assert(bAsyncCompleted);
+    assert(iAsyncStatus == XWORK_ERROR_EXTERNAL_FAILURE);
+    xwork_run_async_destroy(pAsync);
+    pAsync = NULL;
+
+    assert(xwork_run_get_state(pRun) == XWORK_RUN_FAILED);
+    assert(tSmokeCtx.iExecCount == 0u);
+    assert(tSmokeCtx.iRequestTraceCount >= 1u);
+    assert(xwork_run_get_last_output_text(pRun) != NULL);
+    assert(
+        strstr(
+            xwork_run_get_last_output_text(pRun),
+            "xllm session chat failed"
+        ) != NULL
+    );
+
+    xwork_event_init(&tEvent);
+    assert(xwork_run_get_last_event(pRun, &tEvent) == XWORK_OK);
+    assert(tEvent.eKind == XWORK_EVENT_RUN_FAILED);
+    xwork_event_reset(&tEvent);
+
+    xwork_run_destroy(pRun);
+    pRun = NULL;
+    xwork_runtime_destroy(pRuntime);
+    pRuntime = NULL;
+
+    assert(tStub.sError[0] == '\0');
+    assert((size_t)tStub.iRequestCount == 1u);
+    assert(tStub.asRequestTargets[0] != NULL);
+    assert(tStub.asRequestHeaders[0] != NULL);
+    assert(tStub.asRequestBodies[0] != NULL);
+    assert(strstr(tStub.asRequestTargets[0], "/chat/completions") != NULL);
+    assert(strstr(tStub.asRequestBodies[0], "\"tools\"") != NULL);
+    assert(strstr(tStub.asRequestBodies[0], "\"mock.echo\"") != NULL);
+    assert(strstr(tStub.asRequestHeaders[0], "\r\nAuthorization: Bearer stub-openai-key") != NULL);
+    xwork_test_provider_stub_stop(&tStub);
+}
+
 int main(void)
 {
     const char *sAdapter = xwork_test_env_non_empty("XWORK_PROVIDER_SMOKE_ADAPTER");
@@ -1478,8 +1664,10 @@ int main(void)
     xwork_tool_def tToolDef;
     xwork_run_options tRunOptions;
     xwork_run *pRun = NULL;
+    xwork_run_async *pAsync = NULL;
     xwork_orchestrator_options tExecOptions;
     xwork_event tEvent;
+    xwork_status iAsyncStatus;
     const char *asWorkspaceIds[1];
     const char *asBootstrapAnthropicBetaHeaders[2];
     char **psProviderAnthropicBetaHeaders = NULL;
@@ -1488,6 +1676,7 @@ int main(void)
     size_t iParsedConnectTimeoutMs = 0u;
     size_t iParsedReadTimeoutMs = 0u;
     size_t iParsedProxyPort = 0u;
+    bool bAsyncCompleted = false;
     xwork_xllm_debug_mode eParsedDebugMode = XWORK_XLLM_DEBUG_NONE;
     xwork_xllm_redact_mode eParsedRedactMode = XWORK_XLLM_REDACT_DEFAULT;
     xwork_xllm_proxy_kind eParsedProxyKind = XWORK_XLLM_PROXY_UNSPECIFIED;
@@ -1800,6 +1989,7 @@ int main(void)
             NULL,
             0u
         );
+        xwork_test_run_local_provider_failure_case(&tProductProfile);
         return 0;
     }
 
@@ -2118,7 +2308,13 @@ int main(void)
     tExecOptions.pfnToolExec = xwork_provider_smoke_tool_exec;
     tExecOptions.pUserData = &tSmokeCtx;
     tExecOptions.bAutoApprove = true;
-    assert(xwork_run_execute(pRun, &tExecOptions) == XWORK_OK);
+    assert(xwork_run_execute_async(pRun, &tExecOptions, &pAsync) == XWORK_OK);
+    assert(xwork_run_async_wait(pAsync) == XWORK_OK);
+    assert(xwork_run_async_get_status(pAsync, &iAsyncStatus, &bAsyncCompleted) == XWORK_OK);
+    assert(bAsyncCompleted);
+    assert(iAsyncStatus == XWORK_OK);
+    xwork_run_async_destroy(pAsync);
+    pAsync = NULL;
 
     assert(xwork_run_get_state(pRun) == XWORK_RUN_COMPLETED);
     assert(tSmokeCtx.iExecCount == 1u);

@@ -1791,7 +1791,6 @@ static void xllm__turn_release(xllm_turn *pTurn)
     memset(pTurn, 0, sizeof(*pTurn));
 }
 
-#if defined(XLLM__WITH_SESSION)
 static int xllm__turn_clone(xllm_turn *pOut, const xllm_turn *pIn)
 {
     if ( !pOut || !pIn ) {
@@ -1832,6 +1831,12 @@ static int xllm__turn_clone(xllm_turn *pOut, const xllm_turn *pIn)
     }
 
     return XRT_NET_OK;
+}
+
+#if defined(XLLM__WITH_SESSION)
+XLLM_API int xllm_turn_clone(xllm_turn *pOut, const xllm_turn *pIn)
+{
+    return xllm__turn_clone(pOut, pIn);
 }
 #endif
 
@@ -27683,6 +27688,7 @@ typedef struct xllm_session_state xllm_session_state;
 
 XLLM_API void xllm_turn_init(xllm_turn *pTurn);
 XLLM_API void xllm_turn_reset(xllm_turn *pTurn);
+XLLM_API int xllm_turn_clone(xllm_turn *pOut, const xllm_turn *pIn);
 XLLM_API void xllm_session_options_init(xllm_session_options *pOptions);
 XLLM_API void xllm_compact_options_init(xllm_compact_options *pOptions);
 

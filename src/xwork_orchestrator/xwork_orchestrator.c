@@ -1,6 +1,19 @@
 #include "../xwork_core/xwork_internal.h"
+#include "../../lib/xrt.h"
 #include "../../lib/xllm-session.h"
 #include "../../lib/xllm-memory.h"
+
+struct xwork_run_async {
+    xwork_run *pRun;
+    xwork_orchestrator_options tOptions;
+    xthread pThread;
+    xmutex_struct tLock;
+    xllm_cancel_token *pOwnedCancelToken;
+    xwork_status iStatus;
+    bool bCompleted;
+    bool bCancelRequested;
+    bool bLockInitialized;
+};
 
 static void xwork__init_text_part(xllm_content_part *pPart, const char *sText)
 {
@@ -612,6 +625,50 @@ static const char *xwork__artifact_kind_name(xwork_artifact_kind eKind)
     }
 }
 
+static const char *xwork__artifact_output_class_name(xwork_artifact_output_class eClass)
+{
+    switch ( eClass ) {
+        case XWORK_ARTIFACT_OUTPUT_TEXT:
+            return "text";
+        case XWORK_ARTIFACT_OUTPUT_JSON:
+            return "json";
+        case XWORK_ARTIFACT_OUTPUT_FILE_CONTENT:
+            return "file_content";
+        case XWORK_ARTIFACT_OUTPUT_FILE_CHANGE:
+            return "file_change";
+        case XWORK_ARTIFACT_OUTPUT_TERMINAL_STATE:
+            return "terminal_state";
+        case XWORK_ARTIFACT_OUTPUT_TERMINAL_INVENTORY:
+            return "terminal_inventory";
+        case XWORK_ARTIFACT_OUTPUT_UNSPECIFIED:
+        default:
+            return "unspecified";
+    }
+}
+
+static const char *xwork__artifact_report_class_name(xwork_artifact_report_class eClass)
+{
+    switch ( eClass ) {
+        case XWORK_ARTIFACT_REPORT_DOCUMENT:
+            return "document";
+        case XWORK_ARTIFACT_REPORT_SUMMARY:
+            return "summary";
+        case XWORK_ARTIFACT_REPORT_PLAN:
+            return "plan";
+        case XWORK_ARTIFACT_REPORT_REVIEW:
+            return "review";
+        case XWORK_ARTIFACT_REPORT_DIAGNOSTICS:
+            return "diagnostics";
+        case XWORK_ARTIFACT_REPORT_PROGRESS:
+            return "progress";
+        case XWORK_ARTIFACT_REPORT_FINAL:
+            return "final";
+        case XWORK_ARTIFACT_REPORT_UNSPECIFIED:
+        default:
+            return "unspecified";
+    }
+}
+
 static xwork_status xwork__ingest_artifact_to_memory(
     xwork_run *pRun,
     const xwork_artifact *pArtifact
@@ -654,14 +711,109 @@ static xwork_status xwork__ingest_artifact_to_memory(
             ? pArtifact->sName
             : sArtifactId;
 
-        sText = xwork__dup_printf(
-            "Artifact kind: %s\nName: %s\nMime type: %s\nStorage ref: %s\nSummary: %s",
-            xwork__artifact_kind_name(pArtifact->eKind),
-            sArtifactName,
-            pArtifact->sMimeType ? pArtifact->sMimeType : "",
-            pArtifact->sStorageRef ? pArtifact->sStorageRef : "",
-            pArtifact->sSummary ? pArtifact->sSummary : ""
-        );
+        if ( pArtifact->bHasContentStats && pArtifact->bHasCommandIoStats ) {
+            sText = xwork__dup_printf(
+                "Artifact kind: %s\nName: %s\nMime type: %s\nStorage ref: %s\n"
+                "Output class: %s\nOutput role: %s\nReport class: %s\n"
+                "Report subject ref: %s\nSummary: %s\n"
+                "Content bytes: %lu\nContent lines: %lu\n"
+                "Stdout bytes: %lu\nStderr bytes: %lu\n"
+                "Stdout truncated: %s\nStderr truncated: %s",
+                xwork__artifact_kind_name(pArtifact->eKind),
+                sArtifactName,
+                pArtifact->sMimeType ? pArtifact->sMimeType : "",
+                pArtifact->sStorageRef ? pArtifact->sStorageRef : "",
+                xwork__artifact_output_class_name(pArtifact->eOutputClass),
+                pArtifact->sOutputRole ? pArtifact->sOutputRole : "",
+                xwork__artifact_report_class_name(pArtifact->eReportClass),
+                pArtifact->sReportSubjectRef ? pArtifact->sReportSubjectRef : "",
+                pArtifact->sSummary ? pArtifact->sSummary : "",
+                (unsigned long)pArtifact->iContentByteCount,
+                (unsigned long)pArtifact->iContentLineCount,
+                (unsigned long)pArtifact->iStdoutByteCount,
+                (unsigned long)pArtifact->iStderrByteCount,
+                pArtifact->bStdoutTruncated ? "true" : "false",
+                pArtifact->bStderrTruncated ? "true" : "false"
+            );
+        } else if ( pArtifact->bHasContentStats && pArtifact->bHasPatchStats ) {
+            sText = xwork__dup_printf(
+                "Artifact kind: %s\nName: %s\nMime type: %s\nStorage ref: %s\n"
+                "Output class: %s\nOutput role: %s\nReport class: %s\n"
+                "Report subject ref: %s\nSummary: %s\n"
+                "Content bytes: %lu\nContent lines: %lu\n"
+                "Patch files: %lu\nPatch hunks: %lu\n"
+                "Patch added lines: %lu\nPatch deleted lines: %lu",
+                xwork__artifact_kind_name(pArtifact->eKind),
+                sArtifactName,
+                pArtifact->sMimeType ? pArtifact->sMimeType : "",
+                pArtifact->sStorageRef ? pArtifact->sStorageRef : "",
+                xwork__artifact_output_class_name(pArtifact->eOutputClass),
+                pArtifact->sOutputRole ? pArtifact->sOutputRole : "",
+                xwork__artifact_report_class_name(pArtifact->eReportClass),
+                pArtifact->sReportSubjectRef ? pArtifact->sReportSubjectRef : "",
+                pArtifact->sSummary ? pArtifact->sSummary : "",
+                (unsigned long)pArtifact->iContentByteCount,
+                (unsigned long)pArtifact->iContentLineCount,
+                (unsigned long)pArtifact->iPatchFileCount,
+                (unsigned long)pArtifact->iPatchHunkCount,
+                (unsigned long)pArtifact->iPatchAddedLineCount,
+                (unsigned long)pArtifact->iPatchDeletedLineCount
+            );
+        } else if ( pArtifact->bHasContentStats ) {
+            sText = xwork__dup_printf(
+                "Artifact kind: %s\nName: %s\nMime type: %s\nStorage ref: %s\n"
+                "Output class: %s\nOutput role: %s\nReport class: %s\n"
+                "Report subject ref: %s\nSummary: %s\n"
+                "Content bytes: %lu\nContent lines: %lu",
+                xwork__artifact_kind_name(pArtifact->eKind),
+                sArtifactName,
+                pArtifact->sMimeType ? pArtifact->sMimeType : "",
+                pArtifact->sStorageRef ? pArtifact->sStorageRef : "",
+                xwork__artifact_output_class_name(pArtifact->eOutputClass),
+                pArtifact->sOutputRole ? pArtifact->sOutputRole : "",
+                xwork__artifact_report_class_name(pArtifact->eReportClass),
+                pArtifact->sReportSubjectRef ? pArtifact->sReportSubjectRef : "",
+                pArtifact->sSummary ? pArtifact->sSummary : "",
+                (unsigned long)pArtifact->iContentByteCount,
+                (unsigned long)pArtifact->iContentLineCount
+            );
+        } else if ( pArtifact->bHasPatchStats ) {
+            sText = xwork__dup_printf(
+                "Artifact kind: %s\nName: %s\nMime type: %s\nStorage ref: %s\n"
+                "Output class: %s\nOutput role: %s\nReport class: %s\n"
+                "Report subject ref: %s\nSummary: %s\n"
+                "Patch files: %lu\nPatch hunks: %lu\n"
+                "Patch added lines: %lu\nPatch deleted lines: %lu",
+                xwork__artifact_kind_name(pArtifact->eKind),
+                sArtifactName,
+                pArtifact->sMimeType ? pArtifact->sMimeType : "",
+                pArtifact->sStorageRef ? pArtifact->sStorageRef : "",
+                xwork__artifact_output_class_name(pArtifact->eOutputClass),
+                pArtifact->sOutputRole ? pArtifact->sOutputRole : "",
+                xwork__artifact_report_class_name(pArtifact->eReportClass),
+                pArtifact->sReportSubjectRef ? pArtifact->sReportSubjectRef : "",
+                pArtifact->sSummary ? pArtifact->sSummary : "",
+                (unsigned long)pArtifact->iPatchFileCount,
+                (unsigned long)pArtifact->iPatchHunkCount,
+                (unsigned long)pArtifact->iPatchAddedLineCount,
+                (unsigned long)pArtifact->iPatchDeletedLineCount
+            );
+        } else {
+            sText = xwork__dup_printf(
+                "Artifact kind: %s\nName: %s\nMime type: %s\nStorage ref: %s\n"
+                "Output class: %s\nOutput role: %s\nReport class: %s\n"
+                "Report subject ref: %s\nSummary: %s",
+                xwork__artifact_kind_name(pArtifact->eKind),
+                sArtifactName,
+                pArtifact->sMimeType ? pArtifact->sMimeType : "",
+                pArtifact->sStorageRef ? pArtifact->sStorageRef : "",
+                xwork__artifact_output_class_name(pArtifact->eOutputClass),
+                pArtifact->sOutputRole ? pArtifact->sOutputRole : "",
+                xwork__artifact_report_class_name(pArtifact->eReportClass),
+                pArtifact->sReportSubjectRef ? pArtifact->sReportSubjectRef : "",
+                pArtifact->sSummary ? pArtifact->sSummary : ""
+            );
+        }
         if ( !sText ) {
             return XWORK_ERROR_NO_MEMORY;
         }
@@ -775,6 +927,165 @@ static xwork_status xwork__evaluate_tool_approval(
     tInput.eSideEffect = pTool->eSideEffect;
     tInput.bAutoApproveRequested = pOptions->bAutoApprove;
     return xwork_policy_evaluate_approval(&pRun->pRuntime->tPolicy, &tInput, pDecision);
+}
+
+typedef struct {
+    xwork_run *pRun;
+    const xwork_orchestrator_options *pOptions;
+    xllm_cancel_token *pCancelToken;
+    bool bCancelledByCallback;
+} xwork__model_event_bridge_ctx;
+
+static bool xwork__orchestrator_should_interrupt(
+    const xwork_run *pRun,
+    const xwork_orchestrator_options *pOptions,
+    const char *sPhase
+)
+{
+    if ( !pOptions || !pOptions->pfnShouldInterrupt ) {
+        return false;
+    }
+    return pOptions->pfnShouldInterrupt(pRun, sPhase, pOptions->pInterruptUserData);
+}
+
+bool xwork_tool_exec_context_should_cancel(
+    const xwork_run *pRun,
+    const xwork_tool_exec_context *pContext,
+    const char *sPhase
+)
+{
+    if ( !pContext ) {
+        return false;
+    }
+    if ( pContext->pCancelToken &&
+         xllm_cancel_token_is_cancelled(pContext->pCancelToken) ) {
+        return true;
+    }
+    if ( pContext->pfnShouldInterrupt &&
+         pContext->pfnShouldInterrupt(
+             pRun,
+             sPhase && sPhase[0]
+                 ? sPhase
+                 : (pContext->sPhase ? pContext->sPhase : "tool_execution"),
+             pContext->pInterruptUserData
+         ) ) {
+        return true;
+    }
+    return false;
+}
+
+static xllm_stream_mode xwork__to_xllm_stream_mode(xwork_model_stream_mode eMode)
+{
+    switch ( eMode ) {
+        case XWORK_MODEL_STREAM_OFF:
+            return XLLM_STREAM_OFF;
+        case XWORK_MODEL_STREAM_PREFER:
+            return XLLM_STREAM_PREFER;
+        case XWORK_MODEL_STREAM_REQUIRE:
+            return XLLM_STREAM_REQUIRE;
+        case XWORK_MODEL_STREAM_AUTO:
+        default:
+            return XLLM_STREAM_AUTO;
+    }
+}
+
+static void xwork__model_event_from_xllm(
+    const xllm_event *pSource,
+    xwork_model_event *pTarget
+)
+{
+    if ( !pTarget ) {
+        return;
+    }
+    memset(pTarget, 0, sizeof(*pTarget));
+    if ( !pSource ) {
+        return;
+    }
+
+    pTarget->eType = (int)pSource->eType;
+    pTarget->bSynthetic = pSource->bSynthetic;
+    pTarget->iOutputIndex = (size_t)pSource->uOutputIndex;
+
+    switch ( pSource->eType ) {
+        case XLLM_EVENT_START:
+            pTarget->sResponseId = pSource->as.tStart.sResponseId;
+            pTarget->sModel = pSource->as.tStart.sModel;
+            break;
+        case XLLM_EVENT_TEXT_DELTA:
+            pTarget->sText = pSource->as.tTextDelta.sText;
+            break;
+        case XLLM_EVENT_THINKING_DELTA:
+            pTarget->sText = pSource->as.tThinkingDelta.sText;
+            pTarget->sFormat = pSource->as.tThinkingDelta.sFormat;
+            break;
+        case XLLM_EVENT_TOOL_CALL_DELTA:
+            pTarget->sToolCallId = pSource->as.tToolCallDelta.sCallId;
+            pTarget->sToolId = pSource->as.tToolCallDelta.sToolId;
+            pTarget->sToolName = pSource->as.tToolCallDelta.sToolName;
+            pTarget->sArgumentsDelta = pSource->as.tToolCallDelta.sArgumentsDelta;
+            break;
+        case XLLM_EVENT_TOOL_CALL_READY:
+            pTarget->sToolCallId = pSource->as.tToolCallReady.tToolCall.sCallId;
+            pTarget->sToolId = pSource->as.tToolCallReady.tToolCall.sToolId;
+            pTarget->sToolName = pSource->as.tToolCallReady.tToolCall.sToolName;
+            pTarget->sArgumentsDelta = pSource->as.tToolCallReady.tToolCall.sArgumentsJson;
+            break;
+        case XLLM_EVENT_ARTIFACT_BEGIN:
+            pTarget->sArtifactId = pSource->as.tArtifactBegin.tInfo.sArtifactId;
+            break;
+        case XLLM_EVENT_ARTIFACT_CHUNK:
+            pTarget->sArtifactId = pSource->as.tArtifactChunk.sArtifactId;
+            pTarget->pArtifactData = pSource->as.tArtifactChunk.pData;
+            pTarget->iArtifactSize = pSource->as.tArtifactChunk.iSize;
+            break;
+        case XLLM_EVENT_ARTIFACT_READY:
+            pTarget->sArtifactId = pSource->as.tArtifactReady.tInfo.sArtifactId;
+            break;
+        case XLLM_EVENT_REFUSAL:
+            pTarget->sText = pSource->as.tRefusal.tRefusal.sText;
+            break;
+        case XLLM_EVENT_ERROR:
+            pTarget->sText = pSource->as.tError.tError.sMessage;
+            break;
+        default:
+            break;
+    }
+}
+
+static bool xwork__model_event_bridge(const xllm_event *pEvent, void *pUserData)
+{
+    xwork__model_event_bridge_ctx *pCtx = (xwork__model_event_bridge_ctx *)pUserData;
+    xwork_model_event tEvent;
+    bool bContinue = true;
+
+    if ( !pCtx || !pCtx->pOptions ) {
+        return true;
+    }
+
+    if ( xwork__orchestrator_should_interrupt(pCtx->pRun, pCtx->pOptions, "model_event") ) {
+        pCtx->bCancelledByCallback = true;
+        if ( pCtx->pCancelToken ) {
+            xllm_cancel_token_cancel(pCtx->pCancelToken, "xwork interrupted during model event");
+        }
+        return false;
+    }
+
+    if ( pCtx->pOptions->pfnModelEvent ) {
+        xwork__model_event_from_xllm(pEvent, &tEvent);
+        bContinue = pCtx->pOptions->pfnModelEvent(
+            pCtx->pRun,
+            &tEvent,
+            pCtx->pOptions->pModelEventUserData
+        );
+        if ( !bContinue ) {
+            pCtx->bCancelledByCallback = true;
+            if ( pCtx->pCancelToken ) {
+                xllm_cancel_token_cancel(pCtx->pCancelToken, "xwork model event callback cancelled");
+            }
+        }
+    }
+
+    return bContinue;
 }
 
 static xwork_status xwork__record_run_state_event(
@@ -902,6 +1213,75 @@ static xwork_status xwork__save_checkpoint(
         pRun->sLastCheckpointId,
         sSummary
     );
+}
+
+static xwork_status xwork__cancel_run_with_checkpoint(
+    xwork_run *pRun,
+    const char *sPendingStep,
+    const char *sSummary
+)
+{
+    const char *sEffectiveSummary = sSummary ? sSummary : "Run cancelled.";
+    xwork_status iStatus;
+
+    if ( !pRun ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    iStatus = xwork__replace_cstr(&pRun->sLastOutputText, sEffectiveSummary);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    pRun->eState = XWORK_RUN_CANCELLED;
+    iStatus = xwork__save_checkpoint(
+        pRun,
+        XWORK_CHECKPOINT_COMPLETION,
+        sPendingStep ? sPendingStep : "cancelled",
+        pRun->sLastToolResultText,
+        "Checkpoint saved at cancellation."
+    );
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    iStatus = xwork__run_record_event(
+        pRun,
+        XWORK_EVENT_RUN_CANCELLED,
+        pRun->sLastToolId,
+        pRun->sLastApprovalRequestId,
+        pRun->sLastCheckpointId,
+        sEffectiveSummary
+    );
+    return iStatus == XWORK_OK ? XWORK_ERROR_CANCELLED : iStatus;
+}
+
+static xwork_status xwork__check_interrupt_or_cancelled(
+    xwork_run *pRun,
+    const xwork_orchestrator_options *pOptions,
+    const char *sPhase,
+    const char *sPendingStep
+)
+{
+    if ( pOptions &&
+         pOptions->pCancelToken &&
+         xllm_cancel_token_is_cancelled(pOptions->pCancelToken) ) {
+        return xwork__cancel_run_with_checkpoint(
+            pRun,
+            sPendingStep,
+            "Run cancelled by model cancel token."
+        );
+    }
+
+    if ( xwork__orchestrator_should_interrupt(pRun, pOptions, sPhase) ) {
+        return xwork__cancel_run_with_checkpoint(
+            pRun,
+            sPendingStep,
+            "Run interrupted by orchestrator callback."
+        );
+    }
+
+    return XWORK_OK;
 }
 
 static xwork_status xwork__store_tool_call(
@@ -1032,6 +1412,26 @@ static bool xwork__json_table_get_int(xvalue tTable, const char *sKey, int *piVa
     }
 
     *piValue = (int)xvoGetInt(tValue);
+    return true;
+}
+
+static bool xwork__json_table_get_bool(xvalue tTable, const char *sKey, bool *pbValue)
+{
+    xvalue tValue;
+
+    if ( pbValue ) {
+        *pbValue = false;
+    }
+    if ( !tTable || !sKey || !pbValue ) {
+        return false;
+    }
+
+    tValue = xvoTableGetValue(tTable, sKey, (uint32)strlen(sKey));
+    if ( !tValue || xvoType(tValue) != XVO_DT_BOOL ) {
+        return false;
+    }
+
+    *pbValue = xvoGetBool(tValue);
     return true;
 }
 
@@ -1180,6 +1580,8 @@ static xwork_status xwork__emit_builtin_tool_artifact(
             tOptions.sName = xwork__path_leaf_name(sPath);
             tOptions.sStorageRef = sPath;
             tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_FILE_CONTENT;
+            tOptions.sOutputRole = XWORK_TOOL_FILESYSTEM_READ_TEXT;
             tOptions.sOutputText = sText;
             iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
         }
@@ -1196,7 +1598,37 @@ static xwork_status xwork__emit_builtin_tool_artifact(
             tOptions.sName = xwork__path_leaf_name(sPath);
             tOptions.sStorageRef = sPath;
             tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_FILE_CHANGE;
+            tOptions.sOutputRole = XWORK_TOOL_FILESYSTEM_WRITE_TEXT;
             tOptions.sOutputText = sText;
+            iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
+        }
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_LIST) == 0 ||
+                strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_STAT) == 0 ||
+                strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_GLOB) == 0 ) {
+        xwork_output_artifact_options tOptions;
+        const char *sPath = xwork__json_table_get_text(tResult, "resolved_path");
+        const char *sName = "filesystem.query.json";
+
+        if ( strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_LIST) == 0 ) {
+            sName = "filesystem.list.json";
+        } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_STAT) == 0 ) {
+            sName = "filesystem.stat.json";
+        } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_FILESYSTEM_GLOB) == 0 ) {
+            sName = "filesystem.glob.json";
+        }
+        if ( !sPath ) {
+            sPath = xwork__json_table_get_text(tArguments, "path");
+        }
+        if ( pToolResult->sOutputText && pToolResult->sOutputText[0] ) {
+            xwork_output_artifact_options_init(&tOptions);
+            tOptions.sName = sName;
+            tOptions.sMimeType = "application/json";
+            tOptions.sStorageRef = sPath;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_JSON;
+            tOptions.sOutputRole = pToolDef->sToolId;
+            tOptions.sOutputText = pToolResult->sOutputText;
             iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
         }
     } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_EXEC) == 0 ) {
@@ -1208,6 +1640,11 @@ static xwork_status xwork__emit_builtin_tool_artifact(
         const char *sCwd = xwork__json_table_get_text(tResult, "cwd");
         int iExitCode = 0;
         bool bHasExitCode = xwork__json_table_get_int(tResult, "exit_code", &iExitCode);
+        bool bStdoutTruncated = false;
+        bool bStderrTruncated = false;
+
+        (void)xwork__json_table_get_bool(tResult, "stdout_truncated", &bStdoutTruncated);
+        (void)xwork__json_table_get_bool(tResult, "stderr_truncated", &bStderrTruncated);
 
         if ( sStderr && sStderr[0] ) {
             if ( sStdout && sStdout[0] ) {
@@ -1232,6 +1669,11 @@ static xwork_status xwork__emit_builtin_tool_artifact(
             tOptions.sSummary = pToolResult->sVisibleSummary;
             tOptions.sCommandText = sCommand;
             tOptions.sOutputText = sOutput;
+            tOptions.bHasCommandIoStats = true;
+            tOptions.iStdoutByteCount = sStdout ? strlen(sStdout) : 0u;
+            tOptions.iStderrByteCount = sStderr ? strlen(sStderr) : 0u;
+            tOptions.bStdoutTruncated = bStdoutTruncated;
+            tOptions.bStderrTruncated = bStderrTruncated;
             tOptions.bHasExitCode = bHasExitCode;
             tOptions.iExitCode = iExitCode;
             iStatus = xwork_run_emit_command_artifact(pRun, &tOptions, NULL);
@@ -1255,6 +1697,7 @@ static xwork_status xwork__emit_builtin_tool_artifact(
         }
     } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_TERMINAL_WRITE) == 0 ) {
         xwork_command_artifact_options tOptions;
+        xwork_output_artifact_options tStateOptions;
         const char *sInputText = xwork__json_table_get_text(tArguments, "input_text");
         const char *sSessionId = xwork__json_table_get_text(tResult, "session_id");
 
@@ -1270,11 +1713,72 @@ static xwork_status xwork__emit_builtin_tool_artifact(
             tOptions.sOutputText = "";
             iStatus = xwork_run_emit_command_artifact(pRun, &tOptions, NULL);
         }
+        if ( iStatus == XWORK_OK && pToolResult->sOutputText && pToolResult->sOutputText[0] ) {
+            xwork_output_artifact_options_init(&tStateOptions);
+            tStateOptions.sName = "process.terminal_write.json";
+            tStateOptions.sMimeType = "application/json";
+            tStateOptions.sStorageRef = sSessionId;
+            tStateOptions.sSummary = pToolResult->sVisibleSummary;
+            tStateOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_TERMINAL_STATE;
+            tStateOptions.sOutputRole = XWORK_TOOL_PROCESS_TERMINAL_WRITE;
+            tStateOptions.sOutputText = pToolResult->sOutputText;
+            iStatus = xwork_run_emit_output_artifact(pRun, &tStateOptions, NULL);
+        }
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_TERMINAL_READ) == 0 ) {
+        xwork_output_artifact_options tOptions;
+        const char *sSessionId = xwork__json_table_get_text(tResult, "session_id");
+
+        if ( !sSessionId ) {
+            sSessionId = xwork__json_table_get_text(tArguments, "session_id");
+        }
+        if ( pToolResult->sOutputText && pToolResult->sOutputText[0] ) {
+            xwork_output_artifact_options_init(&tOptions);
+            tOptions.sName = "process.terminal_read.json";
+            tOptions.sMimeType = "application/json";
+            tOptions.sStorageRef = sSessionId;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_TERMINAL_STATE;
+            tOptions.sOutputRole = XWORK_TOOL_PROCESS_TERMINAL_READ;
+            tOptions.sOutputText = pToolResult->sOutputText;
+            iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
+        }
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_TERMINAL_RESIZE) == 0 ) {
+        xwork_output_artifact_options tOptions;
+        const char *sSessionId = xwork__json_table_get_text(tResult, "session_id");
+
+        if ( !sSessionId ) {
+            sSessionId = xwork__json_table_get_text(tArguments, "session_id");
+        }
+        if ( pToolResult->sOutputText && pToolResult->sOutputText[0] ) {
+            xwork_output_artifact_options_init(&tOptions);
+            tOptions.sName = "process.terminal_resize.json";
+            tOptions.sMimeType = "application/json";
+            tOptions.sStorageRef = sSessionId;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_TERMINAL_STATE;
+            tOptions.sOutputRole = XWORK_TOOL_PROCESS_TERMINAL_RESIZE;
+            tOptions.sOutputText = pToolResult->sOutputText;
+            iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
+        }
     } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_TERMINAL_STOP) == 0 ) {
         xwork_output_artifact_options tOptions;
         const char *sSessionId = xwork__json_table_get_text(tResult, "session_id");
         const char *sOutputText = xwork__json_table_get_text(tResult, "output_text");
 
+        if ( pToolResult->sOutputText && pToolResult->sOutputText[0] ) {
+            xwork_output_artifact_options_init(&tOptions);
+            tOptions.sName = "process.terminal_stop.json";
+            tOptions.sMimeType = "application/json";
+            tOptions.sStorageRef = sSessionId;
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_TERMINAL_STATE;
+            tOptions.sOutputRole = XWORK_TOOL_PROCESS_TERMINAL_STOP;
+            tOptions.sOutputText = pToolResult->sOutputText;
+            iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
+            if ( iStatus != XWORK_OK ) {
+                goto cleanup;
+            }
+        }
         if ( !sOutputText ) {
             iStatus = xwork__build_terminal_event_output(tResult, &sTerminalOutput);
             if ( iStatus != XWORK_OK ) {
@@ -1290,7 +1794,23 @@ static xwork_status xwork__emit_builtin_tool_artifact(
             tOptions.sName = "process.terminal_session.txt";
             tOptions.sStorageRef = sSessionId;
             tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_TERMINAL_STATE;
+            tOptions.sOutputRole = XWORK_TOOL_PROCESS_TERMINAL_STOP;
             tOptions.sOutputText = sOutputText;
+            iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
+        }
+    } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_PROCESS_LIST_TERMINALS) == 0 ) {
+        xwork_output_artifact_options tOptions;
+
+        if ( pToolResult->sOutputText && pToolResult->sOutputText[0] ) {
+            xwork_output_artifact_options_init(&tOptions);
+            tOptions.sName = "process.list_terminals.json";
+            tOptions.sMimeType = "application/json";
+            tOptions.sStorageRef = "terminal-sessions://active";
+            tOptions.sSummary = pToolResult->sVisibleSummary;
+            tOptions.eOutputClass = XWORK_ARTIFACT_OUTPUT_TERMINAL_INVENTORY;
+            tOptions.sOutputRole = XWORK_TOOL_PROCESS_LIST_TERMINALS;
+            tOptions.sOutputText = pToolResult->sOutputText;
             iStatus = xwork_run_emit_output_artifact(pRun, &tOptions, NULL);
         }
     } else if ( strcmp(pToolDef->sToolId, XWORK_TOOL_VCS_STATUS) == 0 ) {
@@ -1336,6 +1856,24 @@ static xwork_status xwork__execute_tool(
         return XWORK_ERROR_INVALID_ARGUMENT;
     }
 
+    if ( pOptions->pfnToolExecEx ) {
+        xwork_tool_exec_context tToolContext;
+
+        memset(&tToolContext, 0, sizeof(tToolContext));
+        tToolContext.pCancelToken = pOptions->pCancelToken;
+        tToolContext.pfnShouldInterrupt = pOptions->pfnShouldInterrupt;
+        tToolContext.pInterruptUserData = pOptions->pInterruptUserData;
+        tToolContext.sPhase = "tool_execution";
+
+        return pOptions->pfnToolExecEx(
+            pRun,
+            pToolCall,
+            &tToolContext,
+            pToolResult,
+            pOptions->pUserData
+        );
+    }
+
     if ( pOptions->pfnToolExec ) {
         return pOptions->pfnToolExec(pRun, pToolCall, pToolResult, pOptions->pUserData);
     }
@@ -1344,11 +1882,21 @@ static xwork_status xwork__execute_tool(
          pToolDef->eHostService != XWORK_HOST_NONE &&
          pToolDef->sOperationId &&
          pToolDef->sOperationId[0] ) {
-        return xwork_runtime_invoke_host_service(
+        xwork_host_invoke_context tHostContext;
+
+        memset(&tHostContext, 0, sizeof(tHostContext));
+        tHostContext.pRun = pRun;
+        tHostContext.pCancelToken = pOptions->pCancelToken;
+        tHostContext.pfnShouldInterrupt = pOptions->pfnShouldInterrupt;
+        tHostContext.pInterruptUserData = pOptions->pInterruptUserData;
+        tHostContext.sPhase = "tool_execution";
+
+        return xwork_runtime_invoke_host_service_ex(
             pRun->pRuntime,
             pToolDef->eHostService,
             pToolDef->sOperationId,
             pToolCall->sArgumentsJson,
+            &tHostContext,
             pToolResult
         );
     }
@@ -1427,6 +1975,13 @@ static xwork_status xwork__resume_pending_tool(
         pOptions
     );
     if ( iStatus != XWORK_OK ) {
+        if ( iStatus == XWORK_ERROR_CANCELLED ) {
+            return xwork__cancel_run_with_checkpoint(
+                pRun,
+                "tool_cancelled",
+                "tool_execution"
+            );
+        }
         xwork__fail_run_after_tool_error(
             pRun,
             &tToolResult,
@@ -1485,7 +2040,7 @@ static xwork_status xwork__resume_pending_tool(
     );
 }
 
-xwork_status xwork_run_execute(
+static xwork_status xwork__run_execute_body(
     xwork_run *pRun,
     const xwork_orchestrator_options *pOptions
 )
@@ -1522,10 +2077,42 @@ xwork_status xwork_run_execute(
         return XWORK_ERROR_INVALID_STATE;
     }
 
+    {
+        xwork_status iCancelStatus = xwork__check_interrupt_or_cancelled(
+            pRun,
+            pExecOptions,
+            "run_start",
+            "run_start"
+        );
+        if ( iCancelStatus != XWORK_OK ) {
+            return iCancelStatus;
+        }
+    }
+
     if ( xwork__orchestrator_has_pending_tool_call(pRun) ) {
-        xwork_status iResumeStatus = xwork__resume_pending_tool(pRun, pExecOptions);
-        if ( iResumeStatus != XWORK_OK ) {
-            return iResumeStatus;
+        xwork_status iCancelStatus = xwork__check_interrupt_or_cancelled(
+            pRun,
+            pExecOptions,
+            "before_resume_tool",
+            "resume_tool"
+        );
+        if ( iCancelStatus != XWORK_OK ) {
+            return iCancelStatus;
+        }
+        {
+            xwork_status iResumeStatus = xwork__resume_pending_tool(pRun, pExecOptions);
+            if ( iResumeStatus != XWORK_OK ) {
+                return iResumeStatus;
+            }
+        }
+        iCancelStatus = xwork__check_interrupt_or_cancelled(
+            pRun,
+            pExecOptions,
+            "after_resume_tool",
+            "resume_tool"
+        );
+        if ( iCancelStatus != XWORK_OK ) {
+            return iCancelStatus;
         }
     }
 
@@ -1533,6 +2120,8 @@ xwork_status xwork_run_execute(
         xllm_request tMemoryRequest;
         xllm_turn tTurn;
         xllm_error tError;
+        xllm_call_options tCallOptions;
+        xwork__model_event_bridge_ctx tModelEventCtx;
         xllm_response *pResponse = NULL;
         xllm_message atMessages[2];
         xllm_content_part atParts[2];
@@ -1546,6 +2135,7 @@ xwork_status xwork_run_execute(
         size_t iPartCount = 0u;
         size_t iContextBlockCount = 0u;
         xwork_status iStatus;
+        int iChatStatus;
         bool bCanAttachMemoryContext;
         bool bUseDefaultWorkspaceMemory;
         bool bHasToolFollowup;
@@ -1554,13 +2144,28 @@ xwork_status xwork_run_execute(
 
         xllm_request_init(&tMemoryRequest);
         xllm_error_init(&tError);
+        xllm_call_options_init(&tCallOptions);
         xwork_memory_context_init(&tMemoryContext);
         memset(&tTurn, 0, sizeof(tTurn));
+        memset(&tModelEventCtx, 0, sizeof(tModelEventCtx));
         memset(atMessages, 0, sizeof(atMessages));
         memset(atParts, 0, sizeof(atParts));
         memset(atContextBlocks, 0, sizeof(atContextBlocks));
         memset(atContextMessages, 0, sizeof(atContextMessages));
         memset(atContextParts, 0, sizeof(atContextParts));
+
+        iStatus = xwork__check_interrupt_or_cancelled(
+            pRun,
+            pExecOptions,
+            "turn_start",
+            "model_turn"
+        );
+        if ( iStatus != XWORK_OK ) {
+            xllm_request_reset(&tMemoryRequest);
+            xllm_error_free(&tError);
+            xwork_memory_context_reset(&tMemoryContext);
+            return iStatus;
+        }
 
         iStatus = xwork__run_ensure_session(pRun);
         if ( iStatus != XWORK_OK ) {
@@ -1720,6 +2325,20 @@ xwork_status xwork_run_execute(
         tTurn.iToolCount = iToolCount;
         tTurn.tToolPolicy.eMode = XLLM_TOOL_CHOICE_AUTO;
 
+        iStatus = xwork__check_interrupt_or_cancelled(
+            pRun,
+            pExecOptions,
+            "before_model",
+            "model_turn"
+        );
+        if ( iStatus != XWORK_OK ) {
+            free(pTools);
+            xllm_request_reset(&tMemoryRequest);
+            xllm_error_free(&tError);
+            xwork_memory_context_reset(&tMemoryContext);
+            return iStatus;
+        }
+
         iStatus = xwork__run_record_event(
             pRun,
             XWORK_EVENT_MODEL_TURN_STARTED,
@@ -1736,8 +2355,40 @@ xwork_status xwork_run_execute(
             return iStatus;
         }
 
-        if ( xllm_session_chat_ex(pRun->pSession, &tTurn, NULL, &pResponse, &tError) != XRT_NET_OK ||
-             !pResponse ) {
+        tCallOptions.eStreamMode = xwork__to_xllm_stream_mode(pExecOptions->eModelStreamMode);
+        tCallOptions.pCancelToken = pExecOptions->pCancelToken;
+        tModelEventCtx.pRun = pRun;
+        tModelEventCtx.pOptions = pExecOptions;
+        tModelEventCtx.pCancelToken = pExecOptions->pCancelToken;
+        if ( pExecOptions->pfnModelEvent || pExecOptions->pfnShouldInterrupt ) {
+            tCallOptions.pfnOnEvent = xwork__model_event_bridge;
+            tCallOptions.pUserData = &tModelEventCtx;
+        }
+
+        iChatStatus = xllm_session_chat_ex(
+            pRun->pSession,
+            &tTurn,
+            &tCallOptions,
+            &pResponse,
+            &tError
+        );
+        if ( iChatStatus == XRT_NET_CANCELLED ||
+             tError.eCode == XLLM_ERROR_CANCELLED ||
+             tModelEventCtx.bCancelledByCallback ||
+             (pExecOptions->pCancelToken &&
+              xllm_cancel_token_is_cancelled(pExecOptions->pCancelToken)) ) {
+            xllm_response_free(pResponse);
+            free(pTools);
+            xllm_request_reset(&tMemoryRequest);
+            xllm_error_free(&tError);
+            xwork_memory_context_reset(&tMemoryContext);
+            return xwork__cancel_run_with_checkpoint(
+                pRun,
+                "model_turn",
+                "Model turn cancelled."
+            );
+        }
+        if ( iChatStatus != XRT_NET_OK || !pResponse ) {
             char *sErrorSummary = xwork__dup_printf(
                 "xllm session chat failed: %s",
                 tError.sMessage ? tError.sMessage : "unknown error"
@@ -1759,6 +2410,17 @@ xwork_status xwork_run_execute(
         xllm_request_reset(&tMemoryRequest);
         xllm_error_free(&tError);
         xwork_memory_context_reset(&tMemoryContext);
+
+        iStatus = xwork__check_interrupt_or_cancelled(
+            pRun,
+            pExecOptions,
+            "after_model",
+            "model_turn"
+        );
+        if ( iStatus != XWORK_OK ) {
+            xllm_response_free(pResponse);
+            return iStatus;
+        }
 
         sVisibleText = xllm_response_get_text(pResponse);
         if ( xllm_response_get_tool_call_count(pResponse) > 0u ) {
@@ -1807,6 +2469,17 @@ xwork_status xwork_run_execute(
                 pRun->sLastApprovalRequestId,
                 pRun->sLastCheckpointId,
                 "Tool call requested."
+            );
+            if ( iStatus != XWORK_OK ) {
+                xllm_response_free(pResponse);
+                return iStatus;
+            }
+
+            iStatus = xwork__check_interrupt_or_cancelled(
+                pRun,
+                pExecOptions,
+                "before_approval",
+                "approval"
             );
             if ( iStatus != XWORK_OK ) {
                 xllm_response_free(pResponse);
@@ -1896,6 +2569,17 @@ xwork_status xwork_run_execute(
                 }
             }
 
+            iStatus = xwork__check_interrupt_or_cancelled(
+                pRun,
+                pExecOptions,
+                "before_tool",
+                "tool_execution"
+            );
+            if ( iStatus != XWORK_OK ) {
+                xllm_response_free(pResponse);
+                return iStatus;
+            }
+
             memset(&tToolCall, 0, sizeof(tToolCall));
             xwork_tool_result_init(&tToolResult);
             tToolCall.sCallId = pToolCall->sCallId;
@@ -1927,11 +2611,29 @@ xwork_status xwork_run_execute(
             );
             if ( iStatus != XWORK_OK ) {
                 xllm_response_free(pResponse);
+                if ( iStatus == XWORK_ERROR_CANCELLED ) {
+                    return xwork__cancel_run_with_checkpoint(
+                        pRun,
+                        "tool_cancelled",
+                        "tool_execution"
+                    );
+                }
                 xwork__fail_run_after_tool_error(
                     pRun,
                     &tToolResult,
                     "Tool execution failed."
                 );
+                return iStatus;
+            }
+
+            iStatus = xwork__check_interrupt_or_cancelled(
+                pRun,
+                pExecOptions,
+                "after_tool",
+                "tool_execution"
+            );
+            if ( iStatus != XWORK_OK ) {
+                xllm_response_free(pResponse);
                 return iStatus;
             }
 
@@ -2044,4 +2746,275 @@ xwork_status xwork_run_execute(
         XWORK_EVENT_RUN_PAUSED,
         "Run paused after reaching the max turn budget."
     );
+}
+
+xwork_status xwork_run_execute(
+    xwork_run *pRun,
+    const xwork_orchestrator_options *pOptions
+)
+{
+    xwork_status iStatus;
+
+    iStatus = xwork__run_begin_execution(pRun);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    iStatus = xwork__run_execute_body(pRun, pOptions);
+    xwork__run_end_execution(pRun);
+    return iStatus;
+}
+
+static uint32 xwork__run_async_thread_proc(ptr pUserData)
+{
+    xwork_run_async *pAsync = (xwork_run_async *)pUserData;
+    xwork_status iStatus;
+
+    if ( !pAsync ) {
+        return 1u;
+    }
+
+    iStatus = xwork_run_execute(pAsync->pRun, &pAsync->tOptions);
+    xrtMutexLock(&pAsync->tLock);
+    pAsync->iStatus = iStatus;
+    pAsync->bCompleted = true;
+    xrtMutexUnlock(&pAsync->tLock);
+
+    return iStatus == XWORK_OK ? 0u : 1u;
+}
+
+static xwork_status xwork__run_async_read_status(
+    const xwork_run_async *pAsync,
+    xwork_status *pStatus,
+    bool *pbCompleted
+)
+{
+    xwork_run_async *pMutableAsync = (xwork_run_async *)pAsync;
+
+    if ( !pAsync ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    xrtMutexLock(&pMutableAsync->tLock);
+    if ( pStatus ) {
+        *pStatus = pMutableAsync->iStatus;
+    }
+    if ( pbCompleted ) {
+        *pbCompleted = pMutableAsync->bCompleted;
+    }
+    xrtMutexUnlock(&pMutableAsync->tLock);
+    return XWORK_OK;
+}
+
+static uint32 xwork__run_async_timeout_ms(size_t iTimeoutMs)
+{
+    if ( iTimeoutMs > (size_t)0xffffffffu ) {
+        return 0xffffffffu;
+    }
+    return (uint32)iTimeoutMs;
+}
+
+static ptr xwork__run_async_thread_proc_ptr(uint32 (*pProc)(ptr))
+{
+    ptr pValue = NULL;
+
+    if ( sizeof(pValue) < sizeof(pProc) ) {
+        return NULL;
+    }
+    memcpy(&pValue, &pProc, sizeof(pProc));
+    return pValue;
+}
+
+xwork_status xwork_run_execute_async(
+    xwork_run *pRun,
+    const xwork_orchestrator_options *pOptions,
+    xwork_run_async **ppAsync
+)
+{
+    xwork_orchestrator_options tDefaultOptions;
+    const xwork_orchestrator_options *pExecOptions = pOptions;
+    xwork_run_async *pAsync;
+    ptr pThreadProc;
+
+    if ( !pRun || !pRun->pRuntime || !ppAsync ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    *ppAsync = NULL;
+    if ( !pExecOptions ) {
+        xwork_orchestrator_options_init(&tDefaultOptions);
+        pExecOptions = &tDefaultOptions;
+    }
+    if ( pExecOptions->iMaxTurns == 0u ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    pAsync = (xwork_run_async *)calloc(1u, sizeof(*pAsync));
+    if ( !pAsync ) {
+        return XWORK_ERROR_NO_MEMORY;
+    }
+
+    pAsync->pRun = pRun;
+    pAsync->tOptions = *pExecOptions;
+    pAsync->iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
+    xrtMutexInit(&pAsync->tLock);
+    pAsync->bLockInitialized = true;
+
+    if ( !pAsync->tOptions.pCancelToken ) {
+        if ( xllm_cancel_token_create(&pAsync->pOwnedCancelToken) != XRT_NET_OK ||
+             !pAsync->pOwnedCancelToken ) {
+            xrtMutexUnit(&pAsync->tLock);
+            free(pAsync);
+            return XWORK_ERROR_NO_MEMORY;
+        }
+        pAsync->tOptions.pCancelToken = pAsync->pOwnedCancelToken;
+    }
+
+    pThreadProc = xwork__run_async_thread_proc_ptr(xwork__run_async_thread_proc);
+    if ( !pThreadProc ) {
+        if ( pAsync->pOwnedCancelToken ) {
+            xllm_cancel_token_destroy(pAsync->pOwnedCancelToken);
+        }
+        xrtMutexUnit(&pAsync->tLock);
+        free(pAsync);
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+    pAsync->pThread = xrtThreadCreate(pThreadProc, pAsync, 0u);
+    if ( !pAsync->pThread ) {
+        if ( pAsync->pOwnedCancelToken ) {
+            xllm_cancel_token_destroy(pAsync->pOwnedCancelToken);
+        }
+        xrtMutexUnit(&pAsync->tLock);
+        free(pAsync);
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+    *ppAsync = pAsync;
+    return XWORK_OK;
+}
+
+xwork_status xwork_run_async_wait(xwork_run_async *pAsync)
+{
+    xwork_status iRunStatus;
+    xwork_status iStatus;
+    bool bCompleted;
+
+    if ( !pAsync ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    xrtThreadWait(pAsync->pThread);
+    iStatus = xwork__run_async_read_status(pAsync, &iRunStatus, &bCompleted);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+    if ( !bCompleted ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+    return iRunStatus;
+}
+
+xwork_status xwork_run_async_wait_timeout(
+    xwork_run_async *pAsync,
+    size_t iTimeoutMs,
+    bool *pbCompleted
+)
+{
+    int iWaitStatus;
+    xwork_status iRunStatus;
+    xwork_status iStatus;
+    bool bCompleted;
+
+    if ( !pAsync || !pbCompleted ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    *pbCompleted = false;
+    iWaitStatus = xrtThreadWaitTimeout(
+        pAsync->pThread,
+        xwork__run_async_timeout_ms(iTimeoutMs)
+    );
+    if ( iWaitStatus == XRT_WAIT_TIMEOUT ) {
+        return XWORK_OK;
+    }
+    if ( iWaitStatus != XRT_WAIT_OK ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+    iStatus = xwork__run_async_read_status(pAsync, &iRunStatus, &bCompleted);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+    *pbCompleted = bCompleted;
+    return bCompleted ? iRunStatus : XWORK_ERROR_EXTERNAL_FAILURE;
+}
+
+xwork_status xwork_run_async_get_status(
+    const xwork_run_async *pAsync,
+    xwork_status *pStatus,
+    bool *pbCompleted
+)
+{
+    if ( !pAsync || !pStatus || !pbCompleted ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    return xwork__run_async_read_status(pAsync, pStatus, pbCompleted);
+}
+
+xwork_status xwork_run_async_cancel(
+    xwork_run_async *pAsync,
+    const char *sReason
+)
+{
+    bool bCompleted;
+
+    if ( !pAsync ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    xrtMutexLock(&pAsync->tLock);
+    bCompleted = pAsync->bCompleted;
+    pAsync->bCancelRequested = true;
+    xrtMutexUnlock(&pAsync->tLock);
+
+    if ( bCompleted ) {
+        return XWORK_OK;
+    }
+
+    if ( pAsync->tOptions.pCancelToken ) {
+        xllm_cancel_token_cancel(
+            pAsync->tOptions.pCancelToken,
+            sReason ? sReason : "xwork async run cancelled."
+        );
+    }
+    if ( pAsync->pThread ) {
+        xrtThreadStop(pAsync->pThread);
+    }
+    return XWORK_OK;
+}
+
+void xwork_run_async_destroy(xwork_run_async *pAsync)
+{
+    bool bCompleted = false;
+
+    if ( !pAsync ) {
+        return;
+    }
+
+    (void)xwork__run_async_read_status(pAsync, NULL, &bCompleted);
+    if ( !bCompleted ) {
+        (void)xwork_run_async_cancel(pAsync, "xwork async handle destroyed.");
+        xrtThreadWait(pAsync->pThread);
+    }
+
+    if ( pAsync->pThread ) {
+        xrtThreadDestroy(pAsync->pThread);
+    }
+    if ( pAsync->pOwnedCancelToken ) {
+        xllm_cancel_token_destroy(pAsync->pOwnedCancelToken);
+    }
+    if ( pAsync->bLockInitialized ) {
+        xrtMutexUnit(&pAsync->tLock);
+    }
+    free(pAsync);
 }

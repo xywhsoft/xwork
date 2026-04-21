@@ -1786,7 +1786,6 @@ static void xllm__turn_release(xllm_turn *pTurn)
     memset(pTurn, 0, sizeof(*pTurn));
 }
 
-#if defined(XLLM__WITH_SESSION)
 static int xllm__turn_clone(xllm_turn *pOut, const xllm_turn *pIn)
 {
     if ( !pOut || !pIn ) {
@@ -1827,6 +1826,12 @@ static int xllm__turn_clone(xllm_turn *pOut, const xllm_turn *pIn)
     }
 
     return XRT_NET_OK;
+}
+
+#if defined(XLLM__WITH_SESSION)
+XLLM_API int xllm_turn_clone(xllm_turn *pOut, const xllm_turn *pIn)
+{
+    return xllm__turn_clone(pOut, pIn);
 }
 #endif
 
@@ -27819,6 +27824,47 @@ typedef struct {
 
 typedef struct {
     xllm_memory_scope eScope;
+    const xllm_turn *pTurn;
+    const xllm_response *pResponse;
+    const char *sConversationId;
+    const char *sTurnId;
+    const char *sRecordId;
+    const char *sTitle;
+    const char *sSourceUri;
+    bool bReplaceExisting;
+    bool bUseStableIdentity;
+    int32 iPriority;
+    int64 iExpiresAtUnix;
+    int64 iUpdatedAtUnix;
+    bool bIncludeSystemPrompt;
+    bool bIncludeContextBlocks;
+    bool bIncludeThinking;
+    uint32 uChunkChars;
+    uint32 uChunkOverlapChars;
+    xvalue tMetadata;
+    xvalue tVendorExtra;
+} xllm_memory_ingest_turn_response_options;
+
+typedef struct {
+    xllm_memory_scope eScope;
+    const char *sSourceUriPrefix;
+    const char *sMetadataKey;
+    int64 iNowUnix;
+    xvalue tVendorExtra;
+} xllm_memory_remove_expired_options;
+
+typedef struct {
+    xllm_memory_scope eScope;
+    const char *sConversationId;
+    uint32 uKeepLatestRecords;
+    uint64 uMaxTotalChars;
+    uint32 uMaxTotalChunks;
+    xllm_opt_bool tPreferPriorityDesc;
+    xvalue tVendorExtra;
+} xllm_memory_trim_conversation_options;
+
+typedef struct {
+    xllm_memory_scope eScope;
     const char *sPath;
     const char *sRecordId;
     const char *sTitle;
@@ -27957,6 +28003,8 @@ typedef struct {
 typedef struct {
     xllm_memory_scope eScope;
     const char *sQuery;
+    const char *sConversationId;
+    const char *sTurnId;
     const char *sRecordId;
     const char *sSourceUri;
     const char *sRecordIdContains;
@@ -27967,12 +28015,18 @@ typedef struct {
     const char *sMetadataValue;
     uint32 uMaxHits;
     xllm_opt_f64 tMinScore;
+    xllm_opt_f64 tPriorityWeight;
+    xllm_opt_f64 tRecencyWeight;
+    bool bSkipExpired;
+    int64 iNowUnix;
     uint32 uMaxCharsPerHit;
     xvalue tVendorExtra;
 } xllm_memory_search_options;
 
 typedef struct {
     xllm_memory_scope eScope;
+    const char *sConversationId;
+    const char *sTurnId;
     const char *sRecordId;
     const char *sSourceUri;
     const char *sRecordIdContains;
@@ -27984,6 +28038,9 @@ typedef struct {
     const char *sMetadataValue;
     uint32 uOffset;
     uint32 uMaxItems;
+    xllm_opt_bool tSortByUpdatedAtDesc;
+    bool bSkipExpired;
+    int64 iNowUnix;
     uint32 uMaxCharsPerText;
     xvalue tVendorExtra;
 } xllm_memory_list_options;
@@ -27992,11 +28049,30 @@ typedef struct {
     xllm_context_block_kind eKindOverride;
     int32 iPriority;
     bool bPinned;
+    bool bDistinctByRecord;
+    xllm_opt_f64 tMinScore;
     const char *sLabel;
     uint32 uMaxHits;
     uint32 uMaxCharsPerHit;
+    uint32 uMaxTotalChars;
     xvalue tVendorExtra;
 } xllm_memory_context_options;
+
+typedef enum {
+    XLLM_MEMORY_TURN_QUERY_LAST_USER_TEXT = 0,
+    XLLM_MEMORY_TURN_QUERY_ALL_USER_TEXT,
+    XLLM_MEMORY_TURN_QUERY_VISIBLE_TEXT
+} xllm_memory_turn_query_mode;
+
+typedef struct {
+    xllm_memory_search_options tSearchOptions;
+    xllm_memory_context_options tContextOptions;
+    xllm_memory_turn_query_mode eQueryMode;
+    bool bIncludeSystemPrompt;
+    bool bIncludeContextBlocks;
+    uint32 uMaxQueryChars;
+    xvalue tVendorExtra;
+} xllm_memory_turn_search_apply_options;
 
 typedef struct {
     xllm_memory_scope eScope;
@@ -28205,6 +28281,9 @@ XLLM_API int xllm_memory_make_builtin_embedder(
 
 XLLM_API void xllm_memory_options_init(xllm_memory_options *pOptions);
 XLLM_API void xllm_memory_ingest_options_init(xllm_memory_ingest_options *pOptions);
+XLLM_API void xllm_memory_ingest_turn_response_options_init(xllm_memory_ingest_turn_response_options *pOptions);
+XLLM_API void xllm_memory_remove_expired_options_init(xllm_memory_remove_expired_options *pOptions);
+XLLM_API void xllm_memory_trim_conversation_options_init(xllm_memory_trim_conversation_options *pOptions);
 XLLM_API void xllm_memory_ingest_file_options_init(xllm_memory_ingest_file_options *pOptions);
 XLLM_API void xllm_memory_ingest_directory_options_init(xllm_memory_ingest_directory_options *pOptions);
 XLLM_API void xllm_memory_ingest_workspace_options_init(xllm_memory_ingest_workspace_options *pOptions);
@@ -28230,6 +28309,7 @@ XLLM_API void xllm_memory_change_set_reset(xllm_memory_change_set *pResult);
 XLLM_API void xllm_memory_search_options_init(xllm_memory_search_options *pOptions);
 XLLM_API void xllm_memory_list_options_init(xllm_memory_list_options *pOptions);
 XLLM_API void xllm_memory_context_options_init(xllm_memory_context_options *pOptions);
+XLLM_API void xllm_memory_turn_search_apply_options_init(xllm_memory_turn_search_apply_options *pOptions);
 
 XLLM_API int xllm_memory_create(
     xllm_runtime *pRuntime,
@@ -28242,6 +28322,12 @@ XLLM_API void xllm_memory_destroy(xllm_memory *pMemory);
 XLLM_API int xllm_memory_ingest_text(
     xllm_memory *pMemory,
     const xllm_memory_ingest_options *pOptions,
+    xllm_error *pError
+);
+
+XLLM_API int xllm_memory_ingest_turn_response(
+    xllm_memory *pMemory,
+    const xllm_memory_ingest_turn_response_options *pOptions,
     xllm_error *pError
 );
 
@@ -28643,6 +28729,29 @@ XLLM_API int xllm_memory_remove_by_source_uri(
     xllm_error *pError
 );
 
+XLLM_API int xllm_memory_remove_by_conversation(
+    xllm_memory *pMemory,
+    xllm_memory_scope eScope,
+    const char *sConversationId,
+    const char *sTurnId,
+    uint32 *puRemovedCount,
+    xllm_error *pError
+);
+
+XLLM_API int xllm_memory_trim_conversation(
+    xllm_memory *pMemory,
+    const xllm_memory_trim_conversation_options *pOptions,
+    uint32 *puRemovedCount,
+    xllm_error *pError
+);
+
+XLLM_API int xllm_memory_remove_expired(
+    xllm_memory *pMemory,
+    const xllm_memory_remove_expired_options *pOptions,
+    uint32 *puRemovedCount,
+    xllm_error *pError
+);
+
 XLLM_API int xllm_memory_search(
     xllm_memory *pMemory,
     const xllm_memory_search_options *pOptions,
@@ -28671,6 +28780,51 @@ XLLM_API int xllm_memory_apply_search_to_request(
     xllm_error *pError
 );
 
+XLLM_API int xllm_memory_apply_search_to_turn(
+    xllm_turn *pTurn,
+    const xllm_memory_search_result *pResult,
+    const xllm_memory_context_options *pOptions,
+    xllm_error *pError
+);
+
+XLLM_API int xllm_memory_search_and_apply_to_request(
+    xllm_memory *pMemory,
+    const xllm_memory_search_options *pSearchOptions,
+    xllm_request *pRequest,
+    const xllm_memory_context_options *pContextOptions,
+    xllm_error *pError
+);
+
+XLLM_API int xllm_memory_search_and_apply_to_turn(
+    xllm_memory *pMemory,
+    const xllm_memory_search_options *pSearchOptions,
+    xllm_turn *pTurn,
+    const xllm_memory_context_options *pContextOptions,
+    xllm_error *pError
+);
+
+XLLM_API int xllm_memory_search_and_apply_from_turn_to_request(
+    xllm_memory *pMemory,
+    const xllm_turn *pSourceTurn,
+    xllm_request *pRequest,
+    const xllm_memory_turn_search_apply_options *pOptions,
+    xllm_error *pError
+);
+
+XLLM_API int xllm_memory_search_and_apply_from_turn_to_turn(
+    xllm_memory *pMemory,
+    const xllm_turn *pSourceTurn,
+    xllm_turn *pTurn,
+    const xllm_memory_turn_search_apply_options *pOptions,
+    xllm_error *pError
+);
+
+#define xllm_memory_apply_search_to_turn_request xllm_memory_apply_search_to_turn
+#define xllm_memory_search_and_apply_to_turn_request xllm_memory_search_and_apply_to_turn
+#define xllm_memory_search_and_apply_from_turn_request_to_request xllm_memory_search_and_apply_from_turn_to_request
+#define xllm_memory_search_and_apply_from_turn_request_to_turn xllm_memory_search_and_apply_from_turn_to_turn
+#define xllm_memory_search_and_apply_from_turn_request_to_turn_request xllm_memory_search_and_apply_from_turn_to_turn
+
 XLLM_API xllm_memory_scheme xllm_memory_get_scheme(const xllm_memory *pMemory);
 XLLM_API const char *xllm_memory_get_profile_id(const xllm_memory *pMemory);
 XLLM_API size_t xllm_memory_record_count(const xllm_memory *pMemory, xllm_memory_scope eScope);
@@ -28691,6 +28845,7 @@ XLLM_API void xllm_memory_chunk_list_result_reset(xllm_memory_chunk_list_result 
 #include <ctype.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #ifndef _WIN32
 #include <time.h>
@@ -28937,17 +29092,48 @@ static uint64 xllm__memory_now_ms(void)
 
 static const uint64 XLLM__MEMORY_WORKSPACE_DEFAULT_MAX_FILE_BYTES = 1024u * 1024u;
 static const char *XLLM__MEMORY_WORKSPACE_DEFAULT_SOURCE_URI_PREFIX = "workspace://";
+static const char *XLLM__MEMORY_CONVERSATION_SOURCE_URI_PREFIX = "conversation://";
 static const char *XLLM__MEMORY_METADATA_KEY_PATH = "path";
 static const char *XLLM__MEMORY_METADATA_KEY_RELATIVE_PATH = "relative_path";
 static const char *XLLM__MEMORY_METADATA_KEY_BASENAME = "basename";
 static const char *XLLM__MEMORY_METADATA_KEY_EXTENSION = "extension";
 static const char *XLLM__MEMORY_METADATA_KEY_BYTES = "bytes";
 static const char *XLLM__MEMORY_METADATA_KEY_MTIME_UNIX = "mtime_unix";
+static const char *XLLM__MEMORY_METADATA_KEY_CONVERSATION_KIND = "conversation_kind";
+static const char *XLLM__MEMORY_METADATA_KEY_CONVERSATION_ID = "conversation_id";
+static const char *XLLM__MEMORY_METADATA_KEY_TURN_ID = "turn_id";
+static const char *XLLM__MEMORY_METADATA_KEY_STABLE_IDENTITY = "stable_identity";
+static const char *XLLM__MEMORY_METADATA_KEY_PRIORITY = "priority";
+static const char *XLLM__MEMORY_METADATA_KEY_EXPIRES_AT_UNIX = "expires_at_unix";
+static const char *XLLM__MEMORY_METADATA_KEY_CREATED_AT_UNIX = "created_at_unix";
+static const char *XLLM__MEMORY_METADATA_KEY_UPDATED_AT_UNIX = "updated_at_unix";
+static const char *XLLM__MEMORY_METADATA_KEY_TURN_MESSAGE_COUNT = "turn_message_count";
+static const char *XLLM__MEMORY_METADATA_KEY_TURN_CONTEXT_BLOCK_COUNT = "turn_context_block_count";
+static const char *XLLM__MEMORY_METADATA_KEY_HAS_SYSTEM_PROMPT = "has_system_prompt";
+static const char *XLLM__MEMORY_METADATA_KEY_RESPONSE_OUTPUT_COUNT = "response_output_count";
+static const char *XLLM__MEMORY_METADATA_KEY_RESPONSE_TOOL_CALL_COUNT = "response_tool_call_count";
+static const char *XLLM__MEMORY_METADATA_KEY_RESPONSE_STATUS = "response_status";
+static const char *XLLM__MEMORY_METADATA_KEY_INCLUDE_CONTEXT_BLOCKS = "include_context_blocks";
+static const char *XLLM__MEMORY_METADATA_KEY_INCLUDE_THINKING = "include_thinking";
+
+static int xllm__memory_sqlite_delete_record_locked(
+    xllm_memory *pMemory,
+    xllm_memory_scope eScope,
+    const char *sRecordId
+);
+
+typedef struct {
+    char *sText;
+    size_t iLength;
+    size_t iCapacity;
+} xllm__memory_text_builder;
 
 static bool xllm__memory_embedder_is_configured(const xllm_memory_embedder *pEmbedder)
 {
     return pEmbedder && pEmbedder->pfnEmbedText != NULL;
 }
+
+static uint64 xllm__memory_hash_namespace(const char *sNamespace);
 
 static const char *xllm__memory_default_profile_id(xllm_memory_scheme eScheme)
 {
@@ -29134,6 +29320,1065 @@ static xllm_context_block_kind xllm__memory_scope_to_context_kind(xllm_memory_sc
     }
 }
 
+static const char *xllm__memory_role_name(xllm_role eRole)
+{
+    switch ( eRole ) {
+        case XLLM_ROLE_SYSTEM:
+            return "system";
+        case XLLM_ROLE_USER:
+            return "user";
+        case XLLM_ROLE_ASSISTANT:
+            return "assistant";
+        case XLLM_ROLE_TOOL:
+            return "tool";
+        default:
+            return "message";
+    }
+}
+
+static const char *xllm__memory_context_kind_name(xllm_context_block_kind eKind)
+{
+    switch ( eKind ) {
+        case XLLM_CONTEXT_SYSTEM:
+            return "system";
+        case XLLM_CONTEXT_SESSION_SUMMARY:
+            return "session_summary";
+        case XLLM_CONTEXT_HISTORY:
+            return "history";
+        case XLLM_CONTEXT_MEMORY:
+            return "memory";
+        case XLLM_CONTEXT_KNOWLEDGE:
+            return "knowledge";
+        case XLLM_CONTEXT_USER:
+            return "user";
+        case XLLM_CONTEXT_TOOL_RESULT:
+            return "tool_result";
+        default:
+            return "context";
+    }
+}
+
+static const char *xllm__memory_response_status_name(xllm_response_status eStatus)
+{
+    switch ( eStatus ) {
+        case XLLM_STATUS_COMPLETED:
+            return "completed";
+        case XLLM_STATUS_INCOMPLETE:
+            return "incomplete";
+        case XLLM_STATUS_TOOL_CALL_REQUIRED:
+            return "tool_call_required";
+        case XLLM_STATUS_REFUSED:
+            return "refused";
+        case XLLM_STATUS_CONTENT_FILTERED:
+            return "content_filtered";
+        case XLLM_STATUS_CANCELLED:
+            return "cancelled";
+        case XLLM_STATUS_ERRORED:
+            return "errored";
+        default:
+            return "unknown";
+    }
+}
+
+static void xllm__memory_text_builder_init(xllm__memory_text_builder *pBuilder)
+{
+    if ( !pBuilder ) {
+        return;
+    }
+
+    memset(pBuilder, 0, sizeof(*pBuilder));
+}
+
+static void xllm__memory_text_builder_reset(xllm__memory_text_builder *pBuilder)
+{
+    if ( !pBuilder ) {
+        return;
+    }
+
+    if ( pBuilder->sText ) {
+        xrtFree(pBuilder->sText);
+    }
+    memset(pBuilder, 0, sizeof(*pBuilder));
+}
+
+static int xllm__memory_text_builder_reserve(
+    xllm__memory_text_builder *pBuilder,
+    size_t iExtra
+)
+{
+    size_t iRequired;
+    size_t iCapacity;
+    char *sNewText;
+
+    if ( !pBuilder ) {
+        return XRT_NET_ERROR;
+    }
+
+    iRequired = pBuilder->iLength + iExtra + 1u;
+    if ( iRequired <= pBuilder->iCapacity ) {
+        return XRT_NET_OK;
+    }
+
+    iCapacity = (pBuilder->iCapacity > 0u) ? pBuilder->iCapacity : 256u;
+    while ( iCapacity < iRequired ) {
+        if ( iCapacity > (SIZE_MAX / 2u) ) {
+            iCapacity = iRequired;
+            break;
+        }
+        iCapacity *= 2u;
+    }
+
+    sNewText = (char *)xrtRealloc(pBuilder->sText, iCapacity);
+    if ( !sNewText ) {
+        return XRT_NET_ERROR;
+    }
+
+    pBuilder->sText = sNewText;
+    pBuilder->iCapacity = iCapacity;
+    return XRT_NET_OK;
+}
+
+static int xllm__memory_text_builder_append_n(
+    xllm__memory_text_builder *pBuilder,
+    const char *sText,
+    size_t iTextLength
+)
+{
+    if ( !pBuilder || !sText || iTextLength == 0u ) {
+        return XRT_NET_OK;
+    }
+    if ( xllm__memory_text_builder_reserve(pBuilder, iTextLength) != XRT_NET_OK ) {
+        return XRT_NET_ERROR;
+    }
+
+    memcpy(pBuilder->sText + pBuilder->iLength, sText, iTextLength);
+    pBuilder->iLength += iTextLength;
+    pBuilder->sText[pBuilder->iLength] = '\0';
+    return XRT_NET_OK;
+}
+
+static int xllm__memory_text_builder_append_cstr(
+    xllm__memory_text_builder *pBuilder,
+    const char *sText
+)
+{
+    return xllm__memory_text_builder_append_n(
+        pBuilder,
+        sText,
+        sText ? strlen(sText) : 0u
+    );
+}
+
+static int xllm__memory_text_builder_append_i32(
+    xllm__memory_text_builder *pBuilder,
+    int32 iValue
+)
+{
+    char sBuffer[32];
+    int iWritten = snprintf(sBuffer, sizeof(sBuffer), "%d", (int)iValue);
+    if ( iWritten < 0 ) {
+        return XRT_NET_ERROR;
+    }
+    return xllm__memory_text_builder_append_n(pBuilder, sBuffer, (size_t)iWritten);
+}
+
+static char *xllm__memory_text_builder_take(xllm__memory_text_builder *pBuilder)
+{
+    char *sText;
+
+    if ( !pBuilder ) {
+        return NULL;
+    }
+
+    sText = pBuilder->sText;
+    pBuilder->sText = NULL;
+    pBuilder->iLength = 0u;
+    pBuilder->iCapacity = 0u;
+    return sText;
+}
+
+static int xllm__memory_append_part_text(
+    xllm__memory_text_builder *pBuilder,
+    const xllm_content_part *pPart
+)
+{
+    if ( !pBuilder || !pPart ) {
+        return XRT_NET_ERROR;
+    }
+
+    switch ( pPart->eKind ) {
+        case XLLM_PART_TEXT:
+        case XLLM_PART_JSON:
+            if ( pPart->as.tSource.eKind == XLLM_SOURCE_INLINE_TEXT && pPart->as.tSource.as.sText ) {
+                return xllm__memory_text_builder_append_cstr(pBuilder, pPart->as.tSource.as.sText);
+            }
+            return xllm__memory_text_builder_append_cstr(
+                pBuilder,
+                (pPart->eKind == XLLM_PART_JSON) ? "[json]" : "[text]"
+            );
+        case XLLM_PART_IMAGE:
+            return xllm__memory_text_builder_append_cstr(pBuilder, "[image]");
+        case XLLM_PART_FILE:
+            return xllm__memory_text_builder_append_cstr(pBuilder, "[file]");
+        case XLLM_PART_AUDIO:
+            return xllm__memory_text_builder_append_cstr(pBuilder, "[audio]");
+        case XLLM_PART_VIDEO:
+            return xllm__memory_text_builder_append_cstr(pBuilder, "[video]");
+        default:
+            return xllm__memory_text_builder_append_cstr(pBuilder, "[part]");
+    }
+}
+
+static int xllm__memory_append_message_line(
+    xllm__memory_text_builder *pBuilder,
+    const xllm_message *pMessage
+)
+{
+    size_t i;
+    bool bHasContent = false;
+
+    if ( !pBuilder || !pMessage ) {
+        return XRT_NET_ERROR;
+    }
+
+    if ( xllm__memory_text_builder_append_cstr(pBuilder, xllm__memory_role_name(pMessage->eRole)) != XRT_NET_OK ||
+         xllm__memory_text_builder_append_cstr(pBuilder, ": ") != XRT_NET_OK ) {
+        return XRT_NET_ERROR;
+    }
+
+    if ( pMessage->eRole == XLLM_ROLE_TOOL ) {
+        if ( pMessage->sToolName && pMessage->sToolName[0] ) {
+            if ( xllm__memory_text_builder_append_cstr(pBuilder, "tool=") != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(pBuilder, pMessage->sToolName) != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(pBuilder, " ") != XRT_NET_OK ) {
+                return XRT_NET_ERROR;
+            }
+        }
+        if ( pMessage->sToolCallId && pMessage->sToolCallId[0] ) {
+            if ( xllm__memory_text_builder_append_cstr(pBuilder, "call_id=") != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(pBuilder, pMessage->sToolCallId) != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(pBuilder, " ") != XRT_NET_OK ) {
+                return XRT_NET_ERROR;
+            }
+        }
+    }
+
+    for ( i = 0u; i < pMessage->iToolCallCount; ++i ) {
+        const xllm_tool_call *pToolCall = &pMessage->pToolCalls[i];
+
+        if ( bHasContent && xllm__memory_text_builder_append_cstr(pBuilder, " | ") != XRT_NET_OK ) {
+            return XRT_NET_ERROR;
+        }
+        if ( xllm__memory_text_builder_append_cstr(pBuilder, "tool_call ") != XRT_NET_OK ||
+             xllm__memory_text_builder_append_cstr(
+                 pBuilder,
+                 (pToolCall->sToolName && pToolCall->sToolName[0]) ? pToolCall->sToolName : pToolCall->sToolId
+             ) != XRT_NET_OK ) {
+            return XRT_NET_ERROR;
+        }
+        if ( pToolCall->sArgumentsJson && pToolCall->sArgumentsJson[0] ) {
+            if ( xllm__memory_text_builder_append_cstr(pBuilder, "(") != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(pBuilder, pToolCall->sArgumentsJson) != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(pBuilder, ")") != XRT_NET_OK ) {
+                return XRT_NET_ERROR;
+            }
+        }
+        bHasContent = true;
+    }
+
+    for ( i = 0u; i < pMessage->iPartCount; ++i ) {
+        if ( bHasContent && xllm__memory_text_builder_append_cstr(pBuilder, " | ") != XRT_NET_OK ) {
+            return XRT_NET_ERROR;
+        }
+        if ( xllm__memory_append_part_text(pBuilder, &pMessage->pParts[i]) != XRT_NET_OK ) {
+            return XRT_NET_ERROR;
+        }
+        bHasContent = true;
+    }
+
+    if ( !bHasContent && xllm__memory_text_builder_append_cstr(pBuilder, "(empty)") != XRT_NET_OK ) {
+        return XRT_NET_ERROR;
+    }
+
+    return xllm__memory_text_builder_append_cstr(pBuilder, "\n");
+}
+
+static int xllm__memory_append_message_query_text(
+    xllm__memory_text_builder *pBuilder,
+    const xllm_message *pMessage
+)
+{
+    size_t i;
+    bool bHasContent = false;
+
+    if ( !pBuilder || !pMessage ) {
+        return XRT_NET_ERROR;
+    }
+
+    if ( pMessage->eRole == XLLM_ROLE_TOOL ) {
+        if ( pMessage->sToolName && pMessage->sToolName[0] ) {
+            if ( xllm__memory_text_builder_append_cstr(pBuilder, "tool=") != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(pBuilder, pMessage->sToolName) != XRT_NET_OK ) {
+                return XRT_NET_ERROR;
+            }
+            bHasContent = true;
+        }
+        if ( pMessage->sToolCallId && pMessage->sToolCallId[0] ) {
+            if ( bHasContent && xllm__memory_text_builder_append_cstr(pBuilder, " ") != XRT_NET_OK ) {
+                return XRT_NET_ERROR;
+            }
+            if ( xllm__memory_text_builder_append_cstr(pBuilder, "call_id=") != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(pBuilder, pMessage->sToolCallId) != XRT_NET_OK ) {
+                return XRT_NET_ERROR;
+            }
+            bHasContent = true;
+        }
+    }
+
+    for ( i = 0u; i < pMessage->iToolCallCount; ++i ) {
+        const xllm_tool_call *pToolCall = &pMessage->pToolCalls[i];
+
+        if ( bHasContent && xllm__memory_text_builder_append_cstr(pBuilder, " | ") != XRT_NET_OK ) {
+            return XRT_NET_ERROR;
+        }
+        if ( xllm__memory_text_builder_append_cstr(pBuilder, "tool_call ") != XRT_NET_OK ||
+             xllm__memory_text_builder_append_cstr(
+                 pBuilder,
+                 (pToolCall->sToolName && pToolCall->sToolName[0]) ? pToolCall->sToolName : pToolCall->sToolId
+             ) != XRT_NET_OK ) {
+            return XRT_NET_ERROR;
+        }
+        if ( pToolCall->sArgumentsJson && pToolCall->sArgumentsJson[0] ) {
+            if ( xllm__memory_text_builder_append_cstr(pBuilder, "(") != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(pBuilder, pToolCall->sArgumentsJson) != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(pBuilder, ")") != XRT_NET_OK ) {
+                return XRT_NET_ERROR;
+            }
+        }
+        bHasContent = true;
+    }
+
+    for ( i = 0u; i < pMessage->iPartCount; ++i ) {
+        if ( bHasContent && xllm__memory_text_builder_append_cstr(pBuilder, " | ") != XRT_NET_OK ) {
+            return XRT_NET_ERROR;
+        }
+        if ( xllm__memory_append_part_text(pBuilder, &pMessage->pParts[i]) != XRT_NET_OK ) {
+            return XRT_NET_ERROR;
+        }
+        bHasContent = true;
+    }
+
+    if ( !bHasContent ) {
+        return xllm__memory_text_builder_append_cstr(pBuilder, "(empty)");
+    }
+
+    return XRT_NET_OK;
+}
+
+static int xllm__memory_append_context_blocks(
+    xllm__memory_text_builder *pBuilder,
+    const xllm_turn *pTurn
+)
+{
+    size_t i;
+
+    if ( !pBuilder || !pTurn ) {
+        return XRT_NET_ERROR;
+    }
+
+    for ( i = 0u; i < pTurn->iContextBlockCount; ++i ) {
+        const xllm_context_block *pBlock = &pTurn->pContextBlocks[i];
+        size_t j;
+
+        if ( xllm__memory_text_builder_append_cstr(pBuilder, "context[") != XRT_NET_OK ||
+             xllm__memory_text_builder_append_cstr(pBuilder, xllm__memory_context_kind_name(pBlock->eKind)) != XRT_NET_OK ||
+             xllm__memory_text_builder_append_cstr(pBuilder, "]") != XRT_NET_OK ) {
+            return XRT_NET_ERROR;
+        }
+        if ( pBlock->iPriority != 0 ) {
+            if ( xllm__memory_text_builder_append_cstr(pBuilder, " priority=") != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_i32(pBuilder, pBlock->iPriority) != XRT_NET_OK ) {
+                return XRT_NET_ERROR;
+            }
+        }
+        if ( pBlock->bPinned ) {
+            if ( xllm__memory_text_builder_append_cstr(pBuilder, " pinned=true") != XRT_NET_OK ) {
+                return XRT_NET_ERROR;
+            }
+        }
+        if ( xllm__memory_text_builder_append_cstr(pBuilder, "\n") != XRT_NET_OK ) {
+            return XRT_NET_ERROR;
+        }
+
+        for ( j = 0u; j < pBlock->iMessageCount; ++j ) {
+            if ( xllm__memory_append_message_line(pBuilder, &pBlock->pMessages[j]) != XRT_NET_OK ) {
+                return XRT_NET_ERROR;
+            }
+        }
+    }
+
+    return XRT_NET_OK;
+}
+
+static int xllm__memory_append_response_outputs(
+    xllm__memory_text_builder *pBuilder,
+    const xllm_response *pResponse,
+    bool bIncludeThinking
+)
+{
+    size_t i;
+    bool bAppended = false;
+
+    if ( !pBuilder || !pResponse ) {
+        return XRT_NET_ERROR;
+    }
+
+    for ( i = 0u; i < pResponse->iOutputCount; ++i ) {
+        const xllm_output_item *pOutput = &pResponse->pOutputs[i];
+
+        switch ( pOutput->eKind ) {
+            case XLLM_OUTPUT_MESSAGE: {
+                xllm_message tMessage;
+                memset(&tMessage, 0, sizeof(tMessage));
+                tMessage.eRole = XLLM_ROLE_ASSISTANT;
+                tMessage.pParts = pOutput->as.tMessage.pParts;
+                tMessage.iPartCount = pOutput->as.tMessage.iPartCount;
+                if ( xllm__memory_append_message_line(pBuilder, &tMessage) != XRT_NET_OK ) {
+                    return XRT_NET_ERROR;
+                }
+                bAppended = true;
+                break;
+            }
+            case XLLM_OUTPUT_TOOL_CALL: {
+                xllm_tool_call tToolCall;
+                xllm_message tMessage;
+                memset(&tToolCall, 0, sizeof(tToolCall));
+                memset(&tMessage, 0, sizeof(tMessage));
+                tToolCall.sCallId = pOutput->as.tToolCall.sCallId;
+                tToolCall.sToolId = pOutput->as.tToolCall.sToolId;
+                tToolCall.sToolName = pOutput->as.tToolCall.sToolName;
+                tToolCall.sArgumentsJson = pOutput->as.tToolCall.sArgumentsJson;
+                tMessage.eRole = XLLM_ROLE_ASSISTANT;
+                tMessage.pToolCalls = &tToolCall;
+                tMessage.iToolCallCount = 1u;
+                if ( xllm__memory_append_message_line(pBuilder, &tMessage) != XRT_NET_OK ) {
+                    return XRT_NET_ERROR;
+                }
+                bAppended = true;
+                break;
+            }
+            case XLLM_OUTPUT_REFUSAL:
+                if ( pOutput->as.tRefusal.sText && pOutput->as.tRefusal.sText[0] ) {
+                    if ( xllm__memory_text_builder_append_cstr(pBuilder, "assistant: refusal ") != XRT_NET_OK ||
+                         xllm__memory_text_builder_append_cstr(pBuilder, pOutput->as.tRefusal.sText) != XRT_NET_OK ||
+                         xllm__memory_text_builder_append_cstr(pBuilder, "\n") != XRT_NET_OK ) {
+                        return XRT_NET_ERROR;
+                    }
+                    bAppended = true;
+                }
+                break;
+            case XLLM_OUTPUT_THINKING:
+                if ( bIncludeThinking && pOutput->as.tThinking.sText && pOutput->as.tThinking.sText[0] ) {
+                    if ( xllm__memory_text_builder_append_cstr(pBuilder, "assistant_thinking: ") != XRT_NET_OK ||
+                         xllm__memory_text_builder_append_cstr(pBuilder, pOutput->as.tThinking.sText) != XRT_NET_OK ||
+                         xllm__memory_text_builder_append_cstr(pBuilder, "\n") != XRT_NET_OK ) {
+                        return XRT_NET_ERROR;
+                    }
+                    bAppended = true;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    if ( !bAppended ) {
+        const char *sText = xllm_response_get_text(pResponse);
+        if ( sText && sText[0] ) {
+            if ( xllm__memory_text_builder_append_cstr(pBuilder, "assistant: ") != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(pBuilder, sText) != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(pBuilder, "\n") != XRT_NET_OK ) {
+                return XRT_NET_ERROR;
+            }
+        }
+    }
+
+    return XRT_NET_OK;
+}
+
+static bool xllm__memory_table_set_owned_text(
+    xvalue tTable,
+    const char *sKey,
+    const char *sValue
+)
+{
+    str sCopy;
+    xvalue tText;
+
+    if ( !tTable || xvoType(tTable) != XVO_DT_TABLE || !sKey ) {
+        return false;
+    }
+
+    if ( !sValue || !sValue[0] ) {
+        return xvoTableSetText(tTable, (str)sKey, 0u, (str)"", 0u, FALSE);
+    }
+
+    sCopy = xrtCopyStr((str)sValue, 0u);
+    if ( !sCopy ) {
+        return false;
+    }
+
+    tText = xvoCreateText((ptr)sCopy, (uint32)strlen((const char *)sCopy), TRUE);
+    if ( !tText ) {
+        xrtFree(sCopy);
+        return false;
+    }
+
+    if ( !xvoTableSetValue(tTable, (str)sKey, 0u, tText, TRUE) ) {
+        xvoUnref(tText);
+        return false;
+    }
+
+    return true;
+}
+
+typedef struct {
+    xvalue tDestTable;
+    bool bFailed;
+} xllm__memory_shared_table_copy_state;
+
+static bool xllm__memory_shared_table_copy_proc(
+    Dict_Key *pKey,
+    xvalue *ppVal,
+    xllm__memory_shared_table_copy_state *pState
+)
+{
+    xvalue tCopy;
+
+    if ( !pKey || !ppVal || !pState || pState->bFailed ) {
+        return FALSE;
+    }
+
+    tCopy = xvoDeepCopy(ppVal[0]);
+    if ( !tCopy && ppVal[0] ) {
+        tCopy = xvoCopy(ppVal[0]);
+    }
+    if ( ppVal[0] && !tCopy ) {
+        pState->bFailed = true;
+        return FALSE;
+    }
+
+    if ( !xvoTableSetValue(pState->tDestTable, pKey->Key, pKey->KeyLen, tCopy, TRUE) ) {
+        if ( tCopy ) {
+            xvoUnref(tCopy);
+        }
+        pState->bFailed = true;
+    }
+
+    return FALSE;
+}
+
+static xvalue xllm__memory_create_shared_table_copy(xvalue tSourceTable)
+{
+    xvalue tDestTable;
+    xllm__memory_shared_table_copy_state tState;
+
+    /* turn-response metadata can be created on worker threads and read later on the caller thread */
+    tDestTable = xvoCreateTableEx(XRT_OBJMODE_SHARED);
+    if ( !tDestTable ) {
+        return 0;
+    }
+
+    if ( !tSourceTable || xvoType(tSourceTable) != XVO_DT_TABLE ) {
+        return tDestTable;
+    }
+
+    memset(&tState, 0, sizeof(tState));
+    tState.tDestTable = tDestTable;
+    xrtDictWalk(tSourceTable->vTable, (ptr)xllm__memory_shared_table_copy_proc, &tState);
+    if ( tState.bFailed ) {
+        xvoUnref(tDestTable);
+        return 0;
+    }
+
+    return tDestTable;
+}
+
+static xvalue xllm__memory_make_turn_response_metadata(
+    xvalue tUserMetadata,
+    const xllm_memory_ingest_turn_response_options *pOptions,
+    int64 iCreatedAtUnix,
+    int64 iUpdatedAtUnix
+)
+{
+    xvalue tMetadata = 0;
+    uint32 uTurnMessageCount = 0u;
+    uint32 uTurnContextBlockCount = 0u;
+    uint32 uResponseOutputCount = 0u;
+    uint32 uResponseToolCallCount = 0u;
+    bool bHasSystemPrompt = false;
+
+    if ( pOptions && pOptions->pTurn ) {
+        uTurnMessageCount = (uint32)pOptions->pTurn->iMessageCount;
+        uTurnContextBlockCount = (uint32)pOptions->pTurn->iContextBlockCount;
+        bHasSystemPrompt = pOptions->pTurn->sSystemPrompt && pOptions->pTurn->sSystemPrompt[0];
+    }
+    if ( pOptions && pOptions->pResponse ) {
+        uResponseOutputCount = (uint32)pOptions->pResponse->iOutputCount;
+        uResponseToolCallCount = (uint32)xllm_response_get_tool_call_count(pOptions->pResponse);
+    }
+
+    tMetadata = xllm__memory_create_shared_table_copy(tUserMetadata);
+    if ( !tMetadata ) {
+        return 0;
+    }
+
+    if ( !xvoTableSetText(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_CONVERSATION_KIND, 0u, (str)"turn_response", 0u, FALSE) ||
+         !xllm__memory_table_set_owned_text(
+             tMetadata,
+             XLLM__MEMORY_METADATA_KEY_CONVERSATION_ID,
+             (pOptions && pOptions->sConversationId) ? pOptions->sConversationId : ""
+         ) ||
+         !xllm__memory_table_set_owned_text(
+             tMetadata,
+             XLLM__MEMORY_METADATA_KEY_TURN_ID,
+             (pOptions && pOptions->sTurnId) ? pOptions->sTurnId : ""
+         ) ||
+         !xvoTableSetInt(
+             tMetadata,
+             (str)XLLM__MEMORY_METADATA_KEY_STABLE_IDENTITY,
+             0u,
+             (pOptions && pOptions->bUseStableIdentity) ? 1 : 0
+         ) ||
+         ((iCreatedAtUnix > 0) &&
+          !xvoTableSetInt(
+              tMetadata,
+              (str)XLLM__MEMORY_METADATA_KEY_CREATED_AT_UNIX,
+              0u,
+              iCreatedAtUnix
+          )) ||
+         ((iUpdatedAtUnix > 0) &&
+          !xvoTableSetInt(
+              tMetadata,
+              (str)XLLM__MEMORY_METADATA_KEY_UPDATED_AT_UNIX,
+              0u,
+              iUpdatedAtUnix
+          )) ||
+         ((pOptions && pOptions->iPriority != 0) &&
+          !xvoTableSetInt(
+              tMetadata,
+              (str)XLLM__MEMORY_METADATA_KEY_PRIORITY,
+              0u,
+              (int64)pOptions->iPriority
+          )) ||
+         ((pOptions && pOptions->iExpiresAtUnix > 0) &&
+          !xvoTableSetInt(
+              tMetadata,
+              (str)XLLM__MEMORY_METADATA_KEY_EXPIRES_AT_UNIX,
+              0u,
+              pOptions->iExpiresAtUnix
+          )) ||
+         !xvoTableSetInt(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_TURN_MESSAGE_COUNT, 0u, (int64)uTurnMessageCount) ||
+         !xvoTableSetInt(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_TURN_CONTEXT_BLOCK_COUNT, 0u, (int64)uTurnContextBlockCount) ||
+         !xvoTableSetInt(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_HAS_SYSTEM_PROMPT, 0u, bHasSystemPrompt ? 1 : 0) ||
+         !xvoTableSetInt(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_RESPONSE_OUTPUT_COUNT, 0u, (int64)uResponseOutputCount) ||
+         !xvoTableSetInt(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_RESPONSE_TOOL_CALL_COUNT, 0u, (int64)uResponseToolCallCount) ||
+         !xvoTableSetText(
+             tMetadata,
+             (str)XLLM__MEMORY_METADATA_KEY_RESPONSE_STATUS,
+             0u,
+             (str)((pOptions && pOptions->pResponse) ? xllm__memory_response_status_name(pOptions->pResponse->eStatus) : "none"),
+             0u,
+             FALSE
+         ) ||
+         !xvoTableSetInt(
+             tMetadata,
+             (str)XLLM__MEMORY_METADATA_KEY_INCLUDE_CONTEXT_BLOCKS,
+             0u,
+             (pOptions && pOptions->bIncludeContextBlocks) ? 1 : 0
+         ) ||
+         !xvoTableSetInt(
+             tMetadata,
+             (str)XLLM__MEMORY_METADATA_KEY_INCLUDE_THINKING,
+             0u,
+             (pOptions && pOptions->bIncludeThinking) ? 1 : 0
+         ) ) {
+        xvoUnref(tMetadata);
+        return 0;
+    }
+
+    return tMetadata;
+}
+
+static char *xllm__memory_make_turn_response_source_uri_from_suffix(const char *sSuffix)
+{
+    size_t iPrefixLength;
+    size_t iSuffixLength;
+    char *sSourceUri;
+
+    if ( !sSuffix || !sSuffix[0] ) {
+        return NULL;
+    }
+
+    iPrefixLength = strlen(XLLM__MEMORY_CONVERSATION_SOURCE_URI_PREFIX);
+    iSuffixLength = strlen(sSuffix);
+    sSourceUri = (char *)xrtCalloc(iPrefixLength + iSuffixLength + 1u, sizeof(char));
+    if ( !sSourceUri ) {
+        return NULL;
+    }
+
+    memcpy(sSourceUri, XLLM__MEMORY_CONVERSATION_SOURCE_URI_PREFIX, iPrefixLength);
+    memcpy(sSourceUri + iPrefixLength, sSuffix, iSuffixLength);
+    return sSourceUri;
+}
+
+static char *xllm__memory_make_turn_response_stable_source_suffix(
+    const xllm_memory_ingest_turn_response_options *pOptions
+)
+{
+    size_t iConversationLength;
+    size_t iTurnLength;
+    char *sSuffix;
+
+    if ( !pOptions ) {
+        return NULL;
+    }
+    if ( !pOptions->bUseStableIdentity ) {
+        return NULL;
+    }
+    if ( !pOptions->sConversationId || !pOptions->sConversationId[0] ) {
+        return NULL;
+    }
+
+    iConversationLength = strlen(pOptions->sConversationId);
+    iTurnLength = (pOptions->sTurnId && pOptions->sTurnId[0]) ? strlen(pOptions->sTurnId) : 0u;
+    sSuffix = (char *)xrtCalloc(iConversationLength + (iTurnLength > 0u ? (1u + iTurnLength) : 0u) + 1u, sizeof(char));
+    if ( !sSuffix ) {
+        return NULL;
+    }
+
+    memcpy(sSuffix, pOptions->sConversationId, iConversationLength);
+    if ( iTurnLength > 0u ) {
+        sSuffix[iConversationLength] = '/';
+        memcpy(sSuffix + iConversationLength + 1u, pOptions->sTurnId, iTurnLength);
+    }
+    return sSuffix;
+}
+
+static char *xllm__memory_make_turn_response_source_uri(
+    const xllm_memory_ingest_turn_response_options *pOptions,
+    const char *sRecordId
+)
+{
+    char *sStableSuffix = NULL;
+    char *sSourceUri = NULL;
+
+    if ( pOptions && pOptions->sSourceUri && pOptions->sSourceUri[0] ) {
+        return xllm__dup_cstr(pOptions->sSourceUri);
+    }
+
+    sStableSuffix = xllm__memory_make_turn_response_stable_source_suffix(pOptions);
+    if ( sStableSuffix ) {
+        sSourceUri = xllm__memory_make_turn_response_source_uri_from_suffix(sStableSuffix);
+        xllm__free_cstr(&sStableSuffix);
+        return sSourceUri;
+    }
+
+    if ( !sRecordId || !sRecordId[0] ) {
+        return NULL;
+    }
+    return xllm__memory_make_turn_response_source_uri_from_suffix(sRecordId);
+}
+
+static char *xllm__memory_make_turn_response_record_id(
+    const xllm_memory_ingest_turn_response_options *pOptions,
+    const char *sSourceUri
+)
+{
+    char sBuffer[96];
+    uint64 uNowMs;
+    uint64 uRand;
+
+    if ( pOptions && pOptions->sRecordId && pOptions->sRecordId[0] ) {
+        return xllm__dup_cstr(pOptions->sRecordId);
+    }
+
+    if ( pOptions && pOptions->bUseStableIdentity && sSourceUri && sSourceUri[0] ) {
+        uint64 uHash = xllm__memory_hash_namespace(sSourceUri);
+        snprintf(
+            sBuffer,
+            sizeof(sBuffer),
+            "conversation:%08x%08x",
+            (unsigned)(uHash >> 32u),
+            (unsigned)(uHash & 0xffffffffu)
+        );
+        return xllm__dup_cstr(sBuffer);
+    }
+
+    uNowMs = xllm__memory_now_ms();
+    uRand = xrtRand64();
+    snprintf(
+        sBuffer,
+        sizeof(sBuffer),
+        "conversation_%llu_%08x%08x",
+        (unsigned long long)uNowMs,
+        (unsigned)(uRand >> 32),
+        (unsigned)uRand
+    );
+    return xllm__dup_cstr(sBuffer);
+}
+
+static int64 xllm__memory_lookup_record_metadata_int(
+    xllm_memory *pMemory,
+    xllm_memory_scope eScope,
+    const char *sRecordId,
+    const char *sMetadataKey
+)
+{
+    int64 iValue = 0;
+    size_t i;
+
+    if ( !pMemory || !sRecordId || !sRecordId[0] || !sMetadataKey || !sMetadataKey[0] ) {
+        return 0;
+    }
+
+    xrtMutexLock(pMemory->pMutex);
+    for ( i = 0u; i < pMemory->iRecordCount; ++i ) {
+        if ( pMemory->pRecords[i].eScope == eScope &&
+             pMemory->pRecords[i].sRecordId &&
+             strcmp(pMemory->pRecords[i].sRecordId, sRecordId) == 0 ) {
+            if ( pMemory->pRecords[i].tMetadata && xvoType(pMemory->pRecords[i].tMetadata) == XVO_DT_TABLE ) {
+                iValue = xvoTableGetInt(pMemory->pRecords[i].tMetadata, (str)sMetadataKey, 0u);
+            }
+            break;
+        }
+    }
+    xrtMutexUnlock(pMemory->pMutex);
+    return iValue;
+}
+
+static char *xllm__memory_build_turn_response_transcript(
+    const xllm_memory_ingest_turn_response_options *pOptions,
+    xllm_error *pError
+)
+{
+    xllm__memory_text_builder tBuilder;
+
+    if ( !pOptions || (!pOptions->pTurn && !pOptions->pResponse) ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "turn_response ingest requires a turn, a response, or both");
+        return NULL;
+    }
+
+    xllm__memory_text_builder_init(&tBuilder);
+
+    if ( pOptions->pTurn ) {
+        size_t i;
+
+        if ( pOptions->bIncludeSystemPrompt &&
+             pOptions->pTurn->sSystemPrompt &&
+             pOptions->pTurn->sSystemPrompt[0] ) {
+            if ( xllm__memory_text_builder_append_cstr(&tBuilder, "system: ") != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(&tBuilder, pOptions->pTurn->sSystemPrompt) != XRT_NET_OK ||
+                 xllm__memory_text_builder_append_cstr(&tBuilder, "\n") != XRT_NET_OK ) {
+                goto fail;
+            }
+        }
+
+        if ( pOptions->bIncludeContextBlocks &&
+             pOptions->pTurn->pContextBlocks &&
+             pOptions->pTurn->iContextBlockCount > 0u &&
+             xllm__memory_append_context_blocks(&tBuilder, pOptions->pTurn) != XRT_NET_OK ) {
+            goto fail;
+        }
+
+        for ( i = 0u; i < pOptions->pTurn->iMessageCount; ++i ) {
+            if ( xllm__memory_append_message_line(&tBuilder, &pOptions->pTurn->pMessages[i]) != XRT_NET_OK ) {
+                goto fail;
+            }
+        }
+    }
+
+    if ( pOptions->pResponse &&
+         xllm__memory_append_response_outputs(&tBuilder, pOptions->pResponse, pOptions->bIncludeThinking) != XRT_NET_OK ) {
+        goto fail;
+    }
+
+    if ( tBuilder.iLength == 0u ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "turn_response ingest produced empty transcript");
+        goto fail;
+    }
+
+    return xllm__memory_text_builder_take(&tBuilder);
+
+fail:
+    if ( !pError || !pError->sMessage ) {
+        xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to build turn_response transcript");
+    }
+    xllm__memory_text_builder_reset(&tBuilder);
+    return NULL;
+}
+
+static int xllm__memory_dup_query_text(
+    const char *sText,
+    size_t iTextLength,
+    uint32 uMaxQueryChars,
+    char **psQuery,
+    xllm_error *pError
+)
+{
+    size_t iStart = 0u;
+    size_t iEnd = iTextLength;
+    char *sQuery;
+
+    if ( !sText || !psQuery ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "memory turn search/apply requires query text");
+        return XRT_NET_ERROR;
+    }
+
+    *psQuery = NULL;
+    if ( uMaxQueryChars > 0u && iTextLength > (size_t)uMaxQueryChars ) {
+        iStart = iTextLength - (size_t)uMaxQueryChars;
+    }
+    while ( iStart < iEnd && isspace((unsigned char)sText[iStart]) ) {
+        ++iStart;
+    }
+    while ( iEnd > iStart && isspace((unsigned char)sText[iEnd - 1u]) ) {
+        --iEnd;
+    }
+    if ( iEnd <= iStart ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "memory turn search/apply produced empty query");
+        return XRT_NET_ERROR;
+    }
+
+    sQuery = (char *)xrtCalloc((iEnd - iStart) + 1u, sizeof(char));
+    if ( !sQuery ) {
+        xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to allocate memory turn search query");
+        return XRT_NET_ERROR;
+    }
+    memcpy(sQuery, sText + iStart, iEnd - iStart);
+    sQuery[iEnd - iStart] = '\0';
+    *psQuery = sQuery;
+    return XRT_NET_OK;
+}
+
+static int xllm__memory_build_search_query_from_turn(
+    const xllm_turn *pTurn,
+    const xllm_memory_turn_search_apply_options *pOptions,
+    char **psQuery,
+    xllm_error *pError
+)
+{
+    xllm_memory_turn_search_apply_options tDefaultOptions;
+    const xllm_memory_turn_search_apply_options *pUseOptions = pOptions;
+    xllm__memory_text_builder tBuilder;
+    bool bAppended = false;
+    size_t i;
+    int iStatus = XRT_NET_ERROR;
+
+    if ( !pTurn || !psQuery ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "memory turn search/apply requires source turn");
+        return XRT_NET_ERROR;
+    }
+
+    *psQuery = NULL;
+    if ( !pUseOptions ) {
+        xllm_memory_turn_search_apply_options_init(&tDefaultOptions);
+        pUseOptions = &tDefaultOptions;
+    }
+
+    if ( pUseOptions->tSearchOptions.sQuery && pUseOptions->tSearchOptions.sQuery[0] ) {
+        return xllm__memory_dup_query_text(
+            pUseOptions->tSearchOptions.sQuery,
+            strlen(pUseOptions->tSearchOptions.sQuery),
+            pUseOptions->uMaxQueryChars,
+            psQuery,
+            pError
+        );
+    }
+
+    xllm__memory_text_builder_init(&tBuilder);
+
+    if ( pUseOptions->bIncludeSystemPrompt &&
+         pTurn->sSystemPrompt &&
+         pTurn->sSystemPrompt[0] ) {
+        if ( xllm__memory_text_builder_append_cstr(&tBuilder, "system: ") != XRT_NET_OK ||
+             xllm__memory_text_builder_append_cstr(&tBuilder, pTurn->sSystemPrompt) != XRT_NET_OK ||
+             xllm__memory_text_builder_append_cstr(&tBuilder, "\n") != XRT_NET_OK ) {
+            goto oom;
+        }
+        bAppended = true;
+    }
+
+    if ( pUseOptions->bIncludeContextBlocks && pTurn->iContextBlockCount > 0u ) {
+        if ( xllm__memory_append_context_blocks(&tBuilder, pTurn) != XRT_NET_OK ) {
+            goto oom;
+        }
+        bAppended = true;
+    }
+
+    switch ( pUseOptions->eQueryMode ) {
+        case XLLM_MEMORY_TURN_QUERY_ALL_USER_TEXT:
+            for ( i = 0u; i < pTurn->iMessageCount; ++i ) {
+                if ( pTurn->pMessages[i].eRole != XLLM_ROLE_USER ) {
+                    continue;
+                }
+                if ( bAppended && xllm__memory_text_builder_append_cstr(&tBuilder, "\n") != XRT_NET_OK ) {
+                    goto oom;
+                }
+                if ( xllm__memory_append_message_query_text(&tBuilder, &pTurn->pMessages[i]) != XRT_NET_OK ) {
+                    goto oom;
+                }
+                bAppended = true;
+            }
+            break;
+        case XLLM_MEMORY_TURN_QUERY_VISIBLE_TEXT:
+            for ( i = 0u; i < pTurn->iMessageCount; ++i ) {
+                if ( xllm__memory_append_message_line(&tBuilder, &pTurn->pMessages[i]) != XRT_NET_OK ) {
+                    goto oom;
+                }
+                bAppended = true;
+            }
+            break;
+        case XLLM_MEMORY_TURN_QUERY_LAST_USER_TEXT:
+        default:
+            for ( i = pTurn->iMessageCount; i > 0u; --i ) {
+                if ( pTurn->pMessages[i - 1u].eRole != XLLM_ROLE_USER ) {
+                    continue;
+                }
+                if ( bAppended && xllm__memory_text_builder_append_cstr(&tBuilder, "\n") != XRT_NET_OK ) {
+                    goto oom;
+                }
+                if ( xllm__memory_append_message_query_text(&tBuilder, &pTurn->pMessages[i - 1u]) != XRT_NET_OK ) {
+                    goto oom;
+                }
+                bAppended = true;
+                break;
+            }
+            break;
+    }
+
+    if ( !bAppended || tBuilder.iLength == 0u ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "memory turn search/apply produced empty query");
+        goto cleanup;
+    }
+
+    iStatus = xllm__memory_dup_query_text(
+        tBuilder.sText,
+        tBuilder.iLength,
+        pUseOptions->uMaxQueryChars,
+        psQuery,
+        pError
+    );
+    goto cleanup;
+
+oom:
+    xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to build memory turn search query");
+
+cleanup:
+    xllm__memory_text_builder_reset(&tBuilder);
+    return iStatus;
+}
+
 static void xllm__memory_chunk_free(xllm__memory_chunk_entry *pChunk)
 {
     if ( !pChunk ) {
@@ -29169,6 +30414,22 @@ static void xllm__memory_record_free(xllm__memory_record_entry *pRecord)
         xrtFree(pRecord->pChunks);
     }
     memset(pRecord, 0, sizeof(*pRecord));
+}
+
+static xvalue xllm__memory_clone_public_metadata(xvalue tMetadata)
+{
+    xvalue tCopy;
+
+    if ( !tMetadata ) {
+        return 0;
+    }
+
+    tCopy = xvoDeepCopy(tMetadata);
+    if ( tCopy ) {
+        return tCopy;
+    }
+
+    return xvoCopy(tMetadata);
 }
 
 static int xllm__memory_append_record_info_clone(
@@ -31089,11 +32350,7 @@ static xvalue xllm__memory_make_file_metadata(
     const char *sBasename;
     const char *sExtension;
 
-    if ( tUserMetadata && xvoType(tUserMetadata) == XVO_DT_TABLE ) {
-        tMetadata = xvoCopy(tUserMetadata);
-    } else {
-        tMetadata = xvoCreateTable();
-    }
+    tMetadata = xllm__memory_create_shared_table_copy(tUserMetadata);
     if ( !tMetadata ) {
         return 0;
     }
@@ -31102,10 +32359,10 @@ static xvalue xllm__memory_make_file_metadata(
     sBasename = xllm__memory_path_basename_ptr(sPath);
     sExtension = xllm__memory_path_extension_ptr(sPath);
 
-    if ( !xvoTableSetText(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_PATH, 0u, (str)sPath, 0u, FALSE) ||
-         !xvoTableSetText(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_RELATIVE_PATH, 0u, (str)(sRelativePath ? sRelativePath : ""), 0u, FALSE) ||
-         !xvoTableSetText(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_BASENAME, 0u, (str)(sBasename ? sBasename : ""), 0u, FALSE) ||
-         !xvoTableSetText(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_EXTENSION, 0u, (str)(sExtension ? sExtension : ""), 0u, FALSE) ||
+    if ( !xllm__memory_table_set_owned_text(tMetadata, XLLM__MEMORY_METADATA_KEY_PATH, sPath) ||
+         !xllm__memory_table_set_owned_text(tMetadata, XLLM__MEMORY_METADATA_KEY_RELATIVE_PATH, sRelativePath ? sRelativePath : "") ||
+         !xllm__memory_table_set_owned_text(tMetadata, XLLM__MEMORY_METADATA_KEY_BASENAME, sBasename ? sBasename : "") ||
+         !xllm__memory_table_set_owned_text(tMetadata, XLLM__MEMORY_METADATA_KEY_EXTENSION, sExtension ? sExtension : "") ||
          !xvoTableSetInt(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_BYTES, 0u, (int64)uFileSize) ||
          !xvoTableSetInt(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_MTIME_UNIX, 0u, iMtimeUnix) ) {
         if ( sRelativePath ) {
@@ -31658,6 +32915,98 @@ static double xllm__memory_score_text(const char *sQuery, const char *sText)
     return fScore;
 }
 
+static int64 xllm__memory_record_priority(const xllm__memory_record_entry *pRecord)
+{
+    if ( !pRecord || !pRecord->tMetadata || xvoType(pRecord->tMetadata) != XVO_DT_TABLE ) {
+        return 0;
+    }
+
+    return xvoTableGetInt(pRecord->tMetadata, (str)XLLM__MEMORY_METADATA_KEY_PRIORITY, 0u);
+}
+
+static double xllm__memory_score_priority_boost(
+    const xllm__memory_record_entry *pRecord,
+    const xllm_memory_search_options *pOptions
+)
+{
+    double fWeight;
+    int64 iPriority;
+
+    if ( !pRecord || !pOptions || !pOptions->tPriorityWeight.bSet ) {
+        return 0.0;
+    }
+
+    fWeight = pOptions->tPriorityWeight.fValue;
+    if ( fWeight == 0.0 ) {
+        return 0.0;
+    }
+
+    iPriority = xllm__memory_record_priority(pRecord);
+    if ( iPriority == 0 ) {
+        return 0.0;
+    }
+
+    return ((double)iPriority) * fWeight;
+}
+
+static int64 xllm__memory_record_updated_at(const xllm__memory_record_entry *pRecord)
+{
+    if ( !pRecord || !pRecord->tMetadata || xvoType(pRecord->tMetadata) != XVO_DT_TABLE ) {
+        return 0;
+    }
+
+    return xvoTableGetInt(pRecord->tMetadata, (str)XLLM__MEMORY_METADATA_KEY_UPDATED_AT_UNIX, 0u);
+}
+
+static double xllm__memory_score_recency_boost(
+    const xllm__memory_record_entry *pRecord,
+    const xllm_memory_search_options *pOptions,
+    int64 iNowUnix
+)
+{
+    double fWeight;
+    int64 iUpdatedAtUnix;
+    double fAgeDays;
+
+    if ( !pRecord || !pOptions || !pOptions->tRecencyWeight.bSet ) {
+        return 0.0;
+    }
+
+    fWeight = pOptions->tRecencyWeight.fValue;
+    if ( fWeight == 0.0 ) {
+        return 0.0;
+    }
+
+    iUpdatedAtUnix = xllm__memory_record_updated_at(pRecord);
+    if ( iUpdatedAtUnix <= 0 ) {
+        return 0.0;
+    }
+    if ( iNowUnix <= 0 || iUpdatedAtUnix >= iNowUnix ) {
+        return fWeight;
+    }
+
+    fAgeDays = ((double)(iNowUnix - iUpdatedAtUnix)) / 86400.0;
+    if ( fAgeDays < 0.0 ) {
+        fAgeDays = 0.0;
+    }
+    return fWeight / (1.0 + fAgeDays);
+}
+
+static bool xllm__memory_record_is_expired(
+    const xllm__memory_record_entry *pRecord,
+    int64 iNowUnix
+)
+{
+    int64 iExpiresAtUnix;
+
+    if ( !pRecord || !pRecord->tMetadata || xvoType(pRecord->tMetadata) != XVO_DT_TABLE ) {
+        return false;
+    }
+
+    iExpiresAtUnix = xvoTableGetInt(pRecord->tMetadata, (str)XLLM__MEMORY_METADATA_KEY_EXPIRES_AT_UNIX, 0u);
+    return iExpiresAtUnix > 0 && iExpiresAtUnix <= iNowUnix;
+}
+
 static double xllm__memory_score_chunk(
     const xllm_memory *pMemory,
     const xllm_memory_embedding *pQueryEmbedding,
@@ -31732,10 +33081,13 @@ static int xllm__memory_hit_clone_from_chunk(
     pHit->sSourceUri = xllm__dup_cstr(pRecord->sSourceUri);
     pHit->fScore = fScore;
     pHit->uChunkIndex = pChunk->uChunkIndex;
-    pHit->tMetadata = pRecord->tMetadata;
     pHit->tVendorExtra = pRecord->tVendorExtra;
-    xllm__xvalue_addref(pHit->tMetadata);
+    pHit->tMetadata = xllm__memory_clone_public_metadata(pRecord->tMetadata);
     xllm__xvalue_addref(pHit->tVendorExtra);
+    if ( pRecord->tMetadata && !pHit->tMetadata ) {
+        xllm__memory_hit_reset(pHit);
+        return XRT_NET_ERROR;
+    }
 
     iLen = pChunk->sText ? strlen(pChunk->sText) : 0u;
     if ( uMaxCharsPerHit > 0u && iLen > (size_t)uMaxCharsPerHit ) {
@@ -31808,6 +33160,8 @@ static int xllm__memory_result_insert_sorted(
 static bool xllm__memory_record_matches_filters(
     const xllm__memory_record_entry *pRecord,
     xllm_memory_scope eScope,
+    const char *sConversationId,
+    const char *sTurnId,
     const char *sRecordId,
     const char *sSourceUri,
     const char *sRecordIdContains,
@@ -31823,6 +33177,28 @@ static bool xllm__memory_record_matches_filters(
     }
     if ( eScope != XLLM_MEMORY_SCOPE_ANY && pRecord->eScope != eScope ) {
         return false;
+    }
+    if ( sConversationId && sConversationId[0] ) {
+        const char *sValue = NULL;
+
+        if ( !pRecord->tMetadata || xvoType(pRecord->tMetadata) != XVO_DT_TABLE ) {
+            return false;
+        }
+        sValue = (const char *)xvoTableGetText(pRecord->tMetadata, (str)XLLM__MEMORY_METADATA_KEY_CONVERSATION_ID, 0u);
+        if ( !sValue || strcmp(sValue, sConversationId) != 0 ) {
+            return false;
+        }
+    }
+    if ( sTurnId && sTurnId[0] ) {
+        const char *sValue = NULL;
+
+        if ( !pRecord->tMetadata || xvoType(pRecord->tMetadata) != XVO_DT_TABLE ) {
+            return false;
+        }
+        sValue = (const char *)xvoTableGetText(pRecord->tMetadata, (str)XLLM__MEMORY_METADATA_KEY_TURN_ID, 0u);
+        if ( !sValue || strcmp(sValue, sTurnId) != 0 ) {
+            return false;
+        }
     }
     if ( sRecordId && sRecordId[0] ) {
         if ( !pRecord->sRecordId || strcmp(pRecord->sRecordId, sRecordId) != 0 ) {
@@ -31852,6 +33228,40 @@ static bool xllm__memory_record_matches_filters(
     return true;
 }
 
+static int xllm__memory_remove_record_at_locked(
+    xllm_memory *pMemory,
+    size_t iIndex,
+    xllm_error *pError,
+    const char *sErrorMessage
+)
+{
+    size_t j;
+
+    if ( !pMemory || iIndex >= pMemory->iRecordCount ) {
+        xllm__error_set(pError, XLLM_ERROR_INTERNAL, "invalid memory record removal index");
+        return XRT_NET_ERROR;
+    }
+
+    if ( xllm__memory_sqlite_delete_record_locked(
+            pMemory,
+            pMemory->pRecords[iIndex].eScope,
+            pMemory->pRecords[iIndex].sRecordId
+         ) != SQLITE_OK ) {
+        xllm__error_set(
+            pError,
+            XLLM_ERROR_INTERNAL,
+            (sErrorMessage && sErrorMessage[0]) ? sErrorMessage : "failed to remove memory record from sqlite"
+        );
+        return XRT_NET_ERROR;
+    }
+    xllm__memory_record_free(&pMemory->pRecords[iIndex]);
+    for ( j = iIndex + 1u; j < pMemory->iRecordCount; ++j ) {
+        pMemory->pRecords[j - 1u] = pMemory->pRecords[j];
+    }
+    --pMemory->iRecordCount;
+    return XRT_NET_OK;
+}
+
 static bool xllm__memory_chunk_matches_filters(
     const xllm__memory_record_entry *pRecord,
     const xllm__memory_chunk_entry *pChunk,
@@ -31864,6 +33274,8 @@ static bool xllm__memory_chunk_matches_filters(
         if ( !xllm__memory_record_matches_filters(
                 pRecord,
                 pOptions->eScope,
+                pOptions->sConversationId,
+                pOptions->sTurnId,
                 pOptions->sRecordId,
                 pOptions->sSourceUri,
                 pOptions->sRecordIdContains,
@@ -31902,13 +33314,13 @@ static int xllm__memory_record_info_clone(
     pInfo->sSourceUri = xllm__dup_cstr(pRecord->sSourceUri);
     pInfo->iTextLength = pRecord->sText ? strlen(pRecord->sText) : 0u;
     pInfo->uChunkCount = (uint32)pRecord->iChunkCount;
-    pInfo->tMetadata = pRecord->tMetadata;
     pInfo->tVendorExtra = pRecord->tVendorExtra;
-    xllm__xvalue_addref(pInfo->tMetadata);
+    pInfo->tMetadata = xllm__memory_clone_public_metadata(pRecord->tMetadata);
     xllm__xvalue_addref(pInfo->tVendorExtra);
     if ( (pRecord->sRecordId && !pInfo->sRecordId) ||
          (pRecord->sTitle && !pInfo->sTitle) ||
-         (pRecord->sSourceUri && !pInfo->sSourceUri) ) {
+         (pRecord->sSourceUri && !pInfo->sSourceUri) ||
+         (pRecord->tMetadata && !pInfo->tMetadata) ) {
         xllm__memory_record_info_reset(pInfo);
         return XRT_NET_ERROR;
     }
@@ -32026,13 +33438,13 @@ static int xllm__memory_record_info_copy_public(
     pDest->sRecordId = xllm__dup_cstr(pSrc->sRecordId);
     pDest->sTitle = xllm__dup_cstr(pSrc->sTitle);
     pDest->sSourceUri = xllm__dup_cstr(pSrc->sSourceUri);
-    pDest->tMetadata = pSrc->tMetadata;
     pDest->tVendorExtra = pSrc->tVendorExtra;
-    xllm__xvalue_addref(pDest->tMetadata);
+    pDest->tMetadata = xllm__memory_clone_public_metadata(pSrc->tMetadata);
     xllm__xvalue_addref(pDest->tVendorExtra);
     if ( (pSrc->sRecordId && !pDest->sRecordId) ||
          (pSrc->sTitle && !pDest->sTitle) ||
-         (pSrc->sSourceUri && !pDest->sSourceUri) ) {
+         (pSrc->sSourceUri && !pDest->sSourceUri) ||
+         (pSrc->tMetadata && !pDest->tMetadata) ) {
         xllm__memory_record_info_reset(pDest);
         return XRT_NET_ERROR;
     }
@@ -32513,9 +33925,8 @@ static int xllm__memory_chunk_info_clone(
     pInfo->sSourceUri = xllm__dup_cstr(pRecord->sSourceUri);
     pInfo->uChunkIndex = pChunk->uChunkIndex;
     pInfo->uEmbeddingDim = pChunk->uEmbeddingDim;
-    pInfo->tMetadata = pRecord->tMetadata;
     pInfo->tVendorExtra = pRecord->tVendorExtra;
-    xllm__xvalue_addref(pInfo->tMetadata);
+    pInfo->tMetadata = xllm__memory_clone_public_metadata(pRecord->tMetadata);
     xllm__xvalue_addref(pInfo->tVendorExtra);
 
     iLength = pChunk->sText ? strlen(pChunk->sText) : 0u;
@@ -32534,7 +33945,8 @@ static int xllm__memory_chunk_info_clone(
     if ( (pRecord->sRecordId && !pInfo->sRecordId) ||
          (pChunk->sChunkId && !pInfo->sChunkId) ||
          (pRecord->sTitle && !pInfo->sTitle) ||
-         (pRecord->sSourceUri && !pInfo->sSourceUri) ) {
+         (pRecord->sSourceUri && !pInfo->sSourceUri) ||
+         (pRecord->tMetadata && !pInfo->tMetadata) ) {
         xllm__memory_chunk_info_reset(pInfo);
         return XRT_NET_ERROR;
     }
@@ -32862,7 +34274,7 @@ static int xllm__memory_sqlite_ensure_vector_table_locked(
     snprintf(
         sSql,
         sizeof(sSql),
-        "CREATE VIRTUAL TABLE IF NOT EXISTS %s USING vec0(embedding float[%u], distance_metric=cosine);",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS %s USING vec0(embedding float[%u] distance_metric=cosine);",
         pMemory->sVectorTableName,
         (unsigned)uVectorDim
     );
@@ -32949,6 +34361,9 @@ static int xllm__memory_sqlite_upsert_chunk_vector_locked(
     if ( iRc != SQLITE_OK ) {
         return iRc;
     }
+    if ( !pMemory->bVectorTableReady ) {
+        return SQLITE_OK;
+    }
 
     sEmbeddingJson = xllm__memory_embedding_json_stringify(pChunk->pfEmbedding, pChunk->uEmbeddingDim);
     if ( !sEmbeddingJson ) {
@@ -32958,7 +34373,7 @@ static int xllm__memory_sqlite_upsert_chunk_vector_locked(
     snprintf(
         sSql,
         sizeof(sSql),
-        "INSERT OR REPLACE INTO %s(rowid, embedding) VALUES(?1, ?2);",
+        "INSERT INTO %s(rowid, embedding) VALUES(?1, ?2);",
         pMemory->sVectorTableName
     );
     iRc = sqlite3_prepare_v2(pMemory->pSqliteDb, sSql, -1, &pStmt, NULL);
@@ -33521,9 +34936,13 @@ static int xllm__chunk_text(
         if ( iSoftEnd > iTextLength ) {
             iSoftEnd = iTextLength;
         }
-        iEnd = xllm__chunk_find_preferred_break(sText, iStart, iSoftEnd);
-        if ( iEnd <= iStart ) {
-            iEnd = iSoftEnd;
+        if ( iSoftEnd >= iTextLength ) {
+            iEnd = iTextLength;
+        } else {
+            iEnd = xllm__chunk_find_preferred_break(sText, iStart, iSoftEnd);
+            if ( iEnd <= iStart ) {
+                iEnd = iSoftEnd;
+            }
         }
 
         while ( iStart < iEnd && ((unsigned char)sText[iStart]) <= 0x20u ) {
@@ -46504,6 +47923,47 @@ XLLM_API void xllm_memory_ingest_options_init(xllm_memory_ingest_options *pOptio
     pOptions->bReplaceExisting = true;
 }
 
+XLLM_API void xllm_memory_ingest_turn_response_options_init(xllm_memory_ingest_turn_response_options *pOptions)
+{
+    if ( !pOptions ) {
+        return;
+    }
+
+    memset(pOptions, 0, sizeof(*pOptions));
+    pOptions->eScope = XLLM_MEMORY_SCOPE_MEMORY;
+    pOptions->bReplaceExisting = true;
+    pOptions->bUseStableIdentity = false;
+    pOptions->iPriority = 0;
+    pOptions->iExpiresAtUnix = 0;
+    pOptions->iUpdatedAtUnix = 0;
+    pOptions->bIncludeSystemPrompt = false;
+    pOptions->bIncludeContextBlocks = false;
+    pOptions->bIncludeThinking = false;
+}
+
+XLLM_API void xllm_memory_remove_expired_options_init(xllm_memory_remove_expired_options *pOptions)
+{
+    if ( !pOptions ) {
+        return;
+    }
+
+    memset(pOptions, 0, sizeof(*pOptions));
+    pOptions->eScope = XLLM_MEMORY_SCOPE_MEMORY;
+    pOptions->sSourceUriPrefix = XLLM__MEMORY_CONVERSATION_SOURCE_URI_PREFIX;
+    pOptions->sMetadataKey = XLLM__MEMORY_METADATA_KEY_EXPIRES_AT_UNIX;
+}
+
+XLLM_API void xllm_memory_trim_conversation_options_init(xllm_memory_trim_conversation_options *pOptions)
+{
+    if ( !pOptions ) {
+        return;
+    }
+
+    memset(pOptions, 0, sizeof(*pOptions));
+    pOptions->eScope = XLLM_MEMORY_SCOPE_MEMORY;
+    pOptions->uKeepLatestRecords = 32u;
+}
+
 XLLM_API void xllm_memory_ingest_file_options_init(xllm_memory_ingest_file_options *pOptions)
 {
     if ( !pOptions ) {
@@ -46773,6 +48233,23 @@ XLLM_API void xllm_memory_context_options_init(xllm_memory_context_options *pOpt
     pOptions->iPriority = 10;
     pOptions->uMaxHits = 4u;
     pOptions->uMaxCharsPerHit = 600u;
+    pOptions->uMaxTotalChars = 0u;
+    pOptions->bDistinctByRecord = false;
+}
+
+XLLM_API void xllm_memory_turn_search_apply_options_init(xllm_memory_turn_search_apply_options *pOptions)
+{
+    if ( !pOptions ) {
+        return;
+    }
+
+    memset(pOptions, 0, sizeof(*pOptions));
+    xllm_memory_search_options_init(&pOptions->tSearchOptions);
+    xllm_memory_context_options_init(&pOptions->tContextOptions);
+    pOptions->eQueryMode = XLLM_MEMORY_TURN_QUERY_LAST_USER_TEXT;
+    pOptions->bIncludeSystemPrompt = false;
+    pOptions->bIncludeContextBlocks = false;
+    pOptions->uMaxQueryChars = 0u;
 }
 
 XLLM_API int xllm_memory_create(
@@ -46925,6 +48402,7 @@ XLLM_API int xllm_memory_ingest_text(
     const xllm_memory_ingest_options *pUseOptions = pOptions;
     xllm__memory_record_entry tRecord;
     size_t iExisting = (size_t)-1;
+    int iPersistRc = SQLITE_OK;
     size_t i;
 
     if ( !pMemory ) {
@@ -46986,19 +48464,41 @@ XLLM_API int xllm_memory_ingest_text(
             xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "memory record already exists");
             return XRT_NET_ERROR;
         }
-        if ( xllm__memory_sqlite_persist_record_locked(pMemory, &tRecord) != SQLITE_OK ) {
+        iPersistRc = xllm__memory_sqlite_persist_record_locked(pMemory, &tRecord);
+        if ( iPersistRc != SQLITE_OK ) {
+            char sBuffer[512];
+            const char *sSqliteMessage = (pMemory->pSqliteDb != NULL) ? sqlite3_errmsg(pMemory->pSqliteDb) : NULL;
             xrtMutexUnlock(pMemory->pMutex);
             xllm__memory_record_free(&tRecord);
-            xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to persist memory record to sqlite");
+            snprintf(
+                sBuffer,
+                sizeof(sBuffer),
+                "failed to persist memory record to sqlite rc=%d%s%s",
+                iPersistRc,
+                (sSqliteMessage && sSqliteMessage[0]) ? " msg=" : "",
+                (sSqliteMessage && sSqliteMessage[0]) ? sSqliteMessage : ""
+            );
+            xllm__error_set(pError, XLLM_ERROR_INTERNAL, sBuffer);
             return XRT_NET_ERROR;
         }
         xllm__memory_record_free(&pMemory->pRecords[iExisting]);
         pMemory->pRecords[iExisting] = tRecord;
     } else {
-        if ( xllm__memory_sqlite_persist_record_locked(pMemory, &tRecord) != SQLITE_OK ) {
+        iPersistRc = xllm__memory_sqlite_persist_record_locked(pMemory, &tRecord);
+        if ( iPersistRc != SQLITE_OK ) {
+            char sBuffer[512];
+            const char *sSqliteMessage = (pMemory->pSqliteDb != NULL) ? sqlite3_errmsg(pMemory->pSqliteDb) : NULL;
             xrtMutexUnlock(pMemory->pMutex);
             xllm__memory_record_free(&tRecord);
-            xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to persist memory record to sqlite");
+            snprintf(
+                sBuffer,
+                sizeof(sBuffer),
+                "failed to persist memory record to sqlite rc=%d%s%s",
+                iPersistRc,
+                (sSqliteMessage && sSqliteMessage[0]) ? " msg=" : "",
+                (sSqliteMessage && sSqliteMessage[0]) ? sSqliteMessage : ""
+            );
+            xllm__error_set(pError, XLLM_ERROR_INTERNAL, sBuffer);
             return XRT_NET_ERROR;
         }
         if ( xllm__append_buffer(
@@ -47016,6 +48516,123 @@ XLLM_API int xllm_memory_ingest_text(
     }
     xrtMutexUnlock(pMemory->pMutex);
     return XRT_NET_OK;
+}
+
+XLLM_API int xllm_memory_ingest_turn_response(
+    xllm_memory *pMemory,
+    const xllm_memory_ingest_turn_response_options *pOptions,
+    xllm_error *pError
+)
+{
+    xllm_memory_ingest_turn_response_options tDefaultOptions;
+    const xllm_memory_ingest_turn_response_options *pUseOptions = pOptions;
+    xllm_memory_ingest_options tIngestOptions;
+    char *sRecordId = NULL;
+    char *sTitle = NULL;
+    char *sSourceUri = NULL;
+    char *sTranscript = NULL;
+    xvalue tMetadata = 0;
+    int iStatus;
+
+    if ( !pMemory ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "memory handle is required");
+        return XRT_NET_ERROR;
+    }
+
+    if ( !pUseOptions ) {
+        xllm_memory_ingest_turn_response_options_init(&tDefaultOptions);
+        pUseOptions = &tDefaultOptions;
+    }
+    if ( pUseOptions->eScope != XLLM_MEMORY_SCOPE_MEMORY &&
+         pUseOptions->eScope != XLLM_MEMORY_SCOPE_KNOWLEDGE ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "turn_response ingest scope must be memory or knowledge");
+        return XRT_NET_ERROR;
+    }
+    if ( !pUseOptions->pTurn && !pUseOptions->pResponse ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "turn_response ingest requires a turn, a response, or both");
+        return XRT_NET_ERROR;
+    }
+
+    sTitle = (pUseOptions->sTitle && pUseOptions->sTitle[0])
+        ? xllm__dup_cstr(pUseOptions->sTitle)
+        : xllm__dup_cstr("Conversation memory");
+    sSourceUri = xllm__memory_make_turn_response_source_uri(pUseOptions, pUseOptions->sRecordId);
+    sRecordId = xllm__memory_make_turn_response_record_id(pUseOptions, sSourceUri);
+    if ( !sTitle || !sRecordId ) {
+        xllm__free_cstr(&sRecordId);
+        xllm__free_cstr(&sTitle);
+        xllm__free_cstr(&sSourceUri);
+        xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to allocate turn_response ingest record metadata");
+        return XRT_NET_ERROR;
+    }
+    if ( !sSourceUri ) {
+        sSourceUri = xllm__memory_make_turn_response_source_uri(pUseOptions, sRecordId);
+    }
+    if ( !sSourceUri ) {
+        xllm__free_cstr(&sRecordId);
+        xllm__free_cstr(&sTitle);
+        xllm__free_cstr(&sSourceUri);
+        xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to allocate turn_response ingest source uri");
+        return XRT_NET_ERROR;
+    }
+
+    sTranscript = xllm__memory_build_turn_response_transcript(pUseOptions, pError);
+    if ( !sTranscript ) {
+        xllm__free_cstr(&sRecordId);
+        xllm__free_cstr(&sTitle);
+        xllm__free_cstr(&sSourceUri);
+        return XRT_NET_ERROR;
+    }
+
+    {
+        int64 iCreatedAtUnix = xllm__memory_lookup_record_metadata_int(
+            pMemory,
+            pUseOptions->eScope,
+            sRecordId,
+            XLLM__MEMORY_METADATA_KEY_CREATED_AT_UNIX
+        );
+        int64 iUpdatedAtUnix = (pUseOptions->iUpdatedAtUnix > 0) ? pUseOptions->iUpdatedAtUnix : xrtToUnixTime(xrtNow());
+
+        if ( iCreatedAtUnix <= 0 ) {
+            iCreatedAtUnix = iUpdatedAtUnix;
+        }
+        tMetadata = xllm__memory_make_turn_response_metadata(
+            pUseOptions->tMetadata,
+            pUseOptions,
+            iCreatedAtUnix,
+            iUpdatedAtUnix
+        );
+    }
+    if ( !tMetadata ) {
+        xllm__free_cstr(&sRecordId);
+        xllm__free_cstr(&sTitle);
+        xllm__free_cstr(&sSourceUri);
+        xrtFree(sTranscript);
+        xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to build turn_response metadata");
+        return XRT_NET_ERROR;
+    }
+
+    xllm_memory_ingest_options_init(&tIngestOptions);
+    tIngestOptions.eScope = pUseOptions->eScope;
+    tIngestOptions.sRecordId = sRecordId;
+    tIngestOptions.sTitle = sTitle;
+    tIngestOptions.sSourceUri = sSourceUri;
+    tIngestOptions.sText = sTranscript;
+    tIngestOptions.bReplaceExisting = pUseOptions->bReplaceExisting;
+    tIngestOptions.uChunkChars = pUseOptions->uChunkChars;
+    tIngestOptions.uChunkOverlapChars = pUseOptions->uChunkOverlapChars;
+    tIngestOptions.tMetadata = tMetadata;
+    tIngestOptions.tVendorExtra = pUseOptions->tVendorExtra;
+    iStatus = xllm_memory_ingest_text(pMemory, &tIngestOptions, pError);
+
+    xvoUnref(tMetadata);
+    xllm__free_cstr(&sRecordId);
+    xllm__free_cstr(&sTitle);
+    xllm__free_cstr(&sSourceUri);
+    if ( sTranscript ) {
+        xrtFree(sTranscript);
+    }
+    return iStatus;
 }
 
 XLLM_API int xllm_memory_ingest_file(
@@ -49639,17 +51256,15 @@ XLLM_API int xllm_memory_remove(
     for ( i = 0u; i < pMemory->iRecordCount; ++i ) {
         bool bScopeMatches = (eScope == XLLM_MEMORY_SCOPE_ANY) || (pMemory->pRecords[i].eScope == eScope);
         if ( bScopeMatches && strcmp(pMemory->pRecords[i].sRecordId, sRecordId) == 0 ) {
-            size_t j;
-            if ( xllm__memory_sqlite_delete_record_locked(pMemory, pMemory->pRecords[i].eScope, sRecordId) != SQLITE_OK ) {
+            if ( xllm__memory_remove_record_at_locked(
+                    pMemory,
+                    i,
+                    pError,
+                    "failed to remove memory record from sqlite"
+                 ) != XRT_NET_OK ) {
                 xrtMutexUnlock(pMemory->pMutex);
-                xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to remove memory record from sqlite");
                 return XRT_NET_ERROR;
             }
-            xllm__memory_record_free(&pMemory->pRecords[i]);
-            for ( j = i + 1u; j < pMemory->iRecordCount; ++j ) {
-                pMemory->pRecords[j - 1u] = pMemory->pRecords[j];
-            }
-            --pMemory->iRecordCount;
             xrtMutexUnlock(pMemory->pMutex);
             return XRT_NET_OK;
         }
@@ -49685,24 +51300,565 @@ XLLM_API int xllm_memory_remove_by_source_uri(
         bool bSourceUriMatches = pMemory->pRecords[i].sSourceUri && strcmp(pMemory->pRecords[i].sSourceUri, sSourceUri) == 0;
 
         if ( bScopeMatches && bSourceUriMatches ) {
-            size_t j;
-
-            if ( xllm__memory_sqlite_delete_record_locked(pMemory, pMemory->pRecords[i].eScope, pMemory->pRecords[i].sRecordId) != SQLITE_OK ) {
+            if ( xllm__memory_remove_record_at_locked(
+                    pMemory,
+                    i,
+                    pError,
+                    "failed to remove memory record from sqlite"
+                 ) != XRT_NET_OK ) {
                 xrtMutexUnlock(pMemory->pMutex);
-                xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to remove memory record from sqlite");
                 return XRT_NET_ERROR;
             }
-            xllm__memory_record_free(&pMemory->pRecords[i]);
-            for ( j = i + 1u; j < pMemory->iRecordCount; ++j ) {
-                pMemory->pRecords[j - 1u] = pMemory->pRecords[j];
-            }
-            --pMemory->iRecordCount;
             ++uRemovedCount;
             continue;
         }
         ++i;
     }
     xrtMutexUnlock(pMemory->pMutex);
+    if ( puRemovedCount ) {
+        *puRemovedCount = uRemovedCount;
+    }
+    return XRT_NET_OK;
+}
+
+static int64 xllm__memory_metadata_updated_at(xvalue tMetadata)
+{
+    if ( !tMetadata || xvoType(tMetadata) != XVO_DT_TABLE ) {
+        return 0;
+    }
+
+    return xvoTableGetInt(tMetadata, (str)XLLM__MEMORY_METADATA_KEY_UPDATED_AT_UNIX, 0u);
+}
+
+static int xllm__memory_nullable_cstr_cmp(const char *sLeft, const char *sRight)
+{
+    if ( sLeft && sRight ) {
+        return strcmp(sLeft, sRight);
+    }
+    if ( sLeft ) {
+        return 1;
+    }
+    if ( sRight ) {
+        return -1;
+    }
+    return 0;
+}
+
+typedef struct {
+    size_t iIndex;
+    int64 iPriority;
+    int64 iUpdatedAtUnix;
+    size_t iTextLength;
+    size_t iChunkCount;
+    const char *sSourceUri;
+    const char *sRecordId;
+} xllm__memory_record_sort_entry;
+
+static int xllm__memory_record_sort_entry_compare_updated_desc(
+    const void *pLeftVoid,
+    const void *pRightVoid
+)
+{
+    const xllm__memory_record_sort_entry *pLeft = (const xllm__memory_record_sort_entry *)pLeftVoid;
+    const xllm__memory_record_sort_entry *pRight = (const xllm__memory_record_sort_entry *)pRightVoid;
+    int iCmp;
+
+    if ( pLeft && pRight ) {
+        if ( pLeft->iUpdatedAtUnix > pRight->iUpdatedAtUnix ) {
+            return -1;
+        }
+        if ( pLeft->iUpdatedAtUnix < pRight->iUpdatedAtUnix ) {
+            return 1;
+        }
+    }
+
+    iCmp = xllm__memory_nullable_cstr_cmp(pLeft ? pLeft->sSourceUri : NULL, pRight ? pRight->sSourceUri : NULL);
+    if ( iCmp != 0 ) {
+        return iCmp;
+    }
+    return xllm__memory_nullable_cstr_cmp(pLeft ? pLeft->sRecordId : NULL, pRight ? pRight->sRecordId : NULL);
+}
+
+static int xllm__memory_record_sort_entry_compare_priority_updated_desc(
+    const void *pLeftVoid,
+    const void *pRightVoid
+)
+{
+    const xllm__memory_record_sort_entry *pLeft = (const xllm__memory_record_sort_entry *)pLeftVoid;
+    const xllm__memory_record_sort_entry *pRight = (const xllm__memory_record_sort_entry *)pRightVoid;
+
+    if ( pLeft && pRight ) {
+        if ( pLeft->iPriority > pRight->iPriority ) {
+            return -1;
+        }
+        if ( pLeft->iPriority < pRight->iPriority ) {
+            return 1;
+        }
+    }
+    return xllm__memory_record_sort_entry_compare_updated_desc(pLeftVoid, pRightVoid);
+}
+
+static int xllm__memory_record_sort_entry_compare_index_desc(
+    const void *pLeftVoid,
+    const void *pRightVoid
+)
+{
+    const xllm__memory_record_sort_entry *pLeft = (const xllm__memory_record_sort_entry *)pLeftVoid;
+    const xllm__memory_record_sort_entry *pRight = (const xllm__memory_record_sort_entry *)pRightVoid;
+
+    if ( pLeft && pRight ) {
+        if ( pLeft->iIndex > pRight->iIndex ) {
+            return -1;
+        }
+        if ( pLeft->iIndex < pRight->iIndex ) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int xllm__memory_record_info_compare_updated_desc(
+    const void *pLeftVoid,
+    const void *pRightVoid
+)
+{
+    const xllm_memory_record_info *pLeft = (const xllm_memory_record_info *)pLeftVoid;
+    const xllm_memory_record_info *pRight = (const xllm_memory_record_info *)pRightVoid;
+    int64 iLeftUpdatedAt = xllm__memory_metadata_updated_at(pLeft ? pLeft->tMetadata : 0);
+    int64 iRightUpdatedAt = xllm__memory_metadata_updated_at(pRight ? pRight->tMetadata : 0);
+    int iCmp;
+
+    if ( iLeftUpdatedAt > iRightUpdatedAt ) {
+        return -1;
+    }
+    if ( iLeftUpdatedAt < iRightUpdatedAt ) {
+        return 1;
+    }
+
+    iCmp = xllm__memory_nullable_cstr_cmp(pLeft ? pLeft->sSourceUri : NULL, pRight ? pRight->sSourceUri : NULL);
+    if ( iCmp != 0 ) {
+        return iCmp;
+    }
+    return xllm__memory_nullable_cstr_cmp(pLeft ? pLeft->sRecordId : NULL, pRight ? pRight->sRecordId : NULL);
+}
+
+static int xllm__memory_chunk_info_compare_updated_desc(
+    const void *pLeftVoid,
+    const void *pRightVoid
+)
+{
+    const xllm_memory_chunk_info *pLeft = (const xllm_memory_chunk_info *)pLeftVoid;
+    const xllm_memory_chunk_info *pRight = (const xllm_memory_chunk_info *)pRightVoid;
+    int64 iLeftUpdatedAt = xllm__memory_metadata_updated_at(pLeft ? pLeft->tMetadata : 0);
+    int64 iRightUpdatedAt = xllm__memory_metadata_updated_at(pRight ? pRight->tMetadata : 0);
+    int iCmp;
+
+    if ( iLeftUpdatedAt > iRightUpdatedAt ) {
+        return -1;
+    }
+    if ( iLeftUpdatedAt < iRightUpdatedAt ) {
+        return 1;
+    }
+
+    iCmp = xllm__memory_nullable_cstr_cmp(pLeft ? pLeft->sSourceUri : NULL, pRight ? pRight->sSourceUri : NULL);
+    if ( iCmp != 0 ) {
+        return iCmp;
+    }
+    if ( pLeft && pRight ) {
+        if ( pLeft->uChunkIndex < pRight->uChunkIndex ) {
+            return -1;
+        }
+        if ( pLeft->uChunkIndex > pRight->uChunkIndex ) {
+            return 1;
+        }
+    }
+    iCmp = xllm__memory_nullable_cstr_cmp(pLeft ? pLeft->sRecordId : NULL, pRight ? pRight->sRecordId : NULL);
+    if ( iCmp != 0 ) {
+        return iCmp;
+    }
+    return xllm__memory_nullable_cstr_cmp(pLeft ? pLeft->sChunkId : NULL, pRight ? pRight->sChunkId : NULL);
+}
+
+static int xllm__memory_record_info_trim_sorted_result(
+    xllm_memory_record_list_result *pResult,
+    size_t iOffset,
+    size_t iLimit,
+    xllm_error *pError
+)
+{
+    xllm_memory_record_info *pTrimmed = NULL;
+    size_t iSelectedCount = 0u;
+    size_t i;
+
+    if ( !pResult ) {
+        return XRT_NET_ERROR;
+    }
+    if ( iOffset >= pResult->iRecordCount ) {
+        xllm__memory_record_info_array_reset(pResult->pRecords, pResult->iRecordCount);
+        pResult->pRecords = NULL;
+        pResult->iRecordCount = 0u;
+        return XRT_NET_OK;
+    }
+
+    iSelectedCount = pResult->iRecordCount - iOffset;
+    if ( iSelectedCount > iLimit ) {
+        iSelectedCount = iLimit;
+    }
+    pTrimmed = (xllm_memory_record_info *)xrtCalloc(iSelectedCount > 0u ? iSelectedCount : 1u, sizeof(*pTrimmed));
+    if ( iSelectedCount > 0u && !pTrimmed ) {
+        xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to allocate trimmed memory record list");
+        return XRT_NET_ERROR;
+    }
+    for ( i = 0u; i < iSelectedCount; ++i ) {
+        pTrimmed[i] = pResult->pRecords[iOffset + i];
+        memset(&pResult->pRecords[iOffset + i], 0, sizeof(pResult->pRecords[iOffset + i]));
+    }
+    xllm__memory_record_info_array_reset(pResult->pRecords, pResult->iRecordCount);
+    pResult->pRecords = pTrimmed;
+    pResult->iRecordCount = iSelectedCount;
+    return XRT_NET_OK;
+}
+
+static void xllm__memory_chunk_info_array_reset(
+    xllm_memory_chunk_info *pInfos,
+    size_t iInfoCount
+)
+{
+    size_t i;
+
+    if ( !pInfos ) {
+        return;
+    }
+    for ( i = 0u; i < iInfoCount; ++i ) {
+        xllm__memory_chunk_info_reset(&pInfos[i]);
+    }
+    xrtFree(pInfos);
+}
+
+static int xllm__memory_chunk_info_trim_sorted_result(
+    xllm_memory_chunk_list_result *pResult,
+    size_t iOffset,
+    size_t iLimit,
+    xllm_error *pError
+)
+{
+    xllm_memory_chunk_info *pTrimmed = NULL;
+    size_t iSelectedCount = 0u;
+    size_t i;
+
+    if ( !pResult ) {
+        return XRT_NET_ERROR;
+    }
+    if ( iOffset >= pResult->iChunkCount ) {
+        xllm__memory_chunk_info_array_reset(pResult->pChunks, pResult->iChunkCount);
+        pResult->pChunks = NULL;
+        pResult->iChunkCount = 0u;
+        return XRT_NET_OK;
+    }
+
+    iSelectedCount = pResult->iChunkCount - iOffset;
+    if ( iSelectedCount > iLimit ) {
+        iSelectedCount = iLimit;
+    }
+    pTrimmed = (xllm_memory_chunk_info *)xrtCalloc(iSelectedCount > 0u ? iSelectedCount : 1u, sizeof(*pTrimmed));
+    if ( iSelectedCount > 0u && !pTrimmed ) {
+        xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to allocate trimmed memory chunk list");
+        return XRT_NET_ERROR;
+    }
+    for ( i = 0u; i < iSelectedCount; ++i ) {
+        pTrimmed[i] = pResult->pChunks[iOffset + i];
+        memset(&pResult->pChunks[iOffset + i], 0, sizeof(pResult->pChunks[iOffset + i]));
+    }
+    xllm__memory_chunk_info_array_reset(pResult->pChunks, pResult->iChunkCount);
+    pResult->pChunks = pTrimmed;
+    pResult->iChunkCount = iSelectedCount;
+    return XRT_NET_OK;
+}
+
+XLLM_API int xllm_memory_remove_by_conversation(
+    xllm_memory *pMemory,
+    xllm_memory_scope eScope,
+    const char *sConversationId,
+    const char *sTurnId,
+    uint32 *puRemovedCount,
+    xllm_error *pError
+)
+{
+    uint32 uRemovedCount = 0u;
+    size_t i = 0u;
+
+    if ( puRemovedCount ) {
+        *puRemovedCount = 0u;
+    }
+    if ( !pMemory || !sConversationId || !sConversationId[0] ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "memory remove by conversation requires conversation_id");
+        return XRT_NET_ERROR;
+    }
+
+    xrtMutexLock(pMemory->pMutex);
+    while ( i < pMemory->iRecordCount ) {
+        if ( xllm__memory_record_matches_filters(
+                &pMemory->pRecords[i],
+                eScope,
+                sConversationId,
+                sTurnId,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL
+             ) ) {
+            if ( xllm__memory_remove_record_at_locked(
+                    pMemory,
+                    i,
+                    pError,
+                    "failed to remove conversation memory record from sqlite"
+                 ) != XRT_NET_OK ) {
+                xrtMutexUnlock(pMemory->pMutex);
+                return XRT_NET_ERROR;
+            }
+            ++uRemovedCount;
+            continue;
+        }
+        ++i;
+    }
+    xrtMutexUnlock(pMemory->pMutex);
+    if ( puRemovedCount ) {
+        *puRemovedCount = uRemovedCount;
+    }
+    return XRT_NET_OK;
+}
+
+XLLM_API int xllm_memory_trim_conversation(
+    xllm_memory *pMemory,
+    const xllm_memory_trim_conversation_options *pOptions,
+    uint32 *puRemovedCount,
+    xllm_error *pError
+)
+{
+    xllm_memory_trim_conversation_options tDefaultOptions;
+    const xllm_memory_trim_conversation_options *pUseOptions = pOptions;
+    xllm__memory_record_sort_entry *pMatches = NULL;
+    int (*fnKeepOrder)(const void *, const void *) = xllm__memory_record_sort_entry_compare_updated_desc;
+    size_t iMatchCount = 0u;
+    size_t iRemoveCount = 0u;
+    size_t iWrite = 0u;
+    size_t iKeepCount = 0u;
+    uint64 uKeptChars = 0u;
+    uint64 uKeptChunks = 0u;
+    uint32 uRemovedCount = 0u;
+    size_t i;
+
+    if ( puRemovedCount ) {
+        *puRemovedCount = 0u;
+    }
+    if ( !pMemory ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "memory trim conversation requires memory handle");
+        return XRT_NET_ERROR;
+    }
+    if ( !pUseOptions ) {
+        xllm_memory_trim_conversation_options_init(&tDefaultOptions);
+        pUseOptions = &tDefaultOptions;
+    }
+    if ( !pUseOptions->sConversationId || !pUseOptions->sConversationId[0] ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "memory trim conversation requires conversation_id");
+        return XRT_NET_ERROR;
+    }
+    if ( pUseOptions->tPreferPriorityDesc.bSet && pUseOptions->tPreferPriorityDesc.bValue ) {
+        fnKeepOrder = xllm__memory_record_sort_entry_compare_priority_updated_desc;
+    }
+
+    xrtMutexLock(pMemory->pMutex);
+    for ( i = 0u; i < pMemory->iRecordCount; ++i ) {
+        if ( xllm__memory_record_matches_filters(
+                &pMemory->pRecords[i],
+                pUseOptions->eScope,
+                pUseOptions->sConversationId,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL
+             ) ) {
+            ++iMatchCount;
+        }
+    }
+
+    if ( iMatchCount == 0u ) {
+        xrtMutexUnlock(pMemory->pMutex);
+        return XRT_NET_OK;
+    }
+
+    pMatches = (xllm__memory_record_sort_entry *)xrtCalloc(iMatchCount, sizeof(*pMatches));
+    if ( !pMatches ) {
+        xrtMutexUnlock(pMemory->pMutex);
+        xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to allocate conversation trim candidate list");
+        return XRT_NET_ERROR;
+    }
+
+    for ( i = 0u; i < pMemory->iRecordCount; ++i ) {
+        if ( xllm__memory_record_matches_filters(
+                &pMemory->pRecords[i],
+                pUseOptions->eScope,
+                pUseOptions->sConversationId,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL
+             ) ) {
+            pMatches[iWrite].iIndex = i;
+            pMatches[iWrite].iPriority = xllm__memory_record_priority(&pMemory->pRecords[i]);
+            pMatches[iWrite].iUpdatedAtUnix = xllm__memory_metadata_updated_at(pMemory->pRecords[i].tMetadata);
+            pMatches[iWrite].iTextLength = pMemory->pRecords[i].sText ? strlen(pMemory->pRecords[i].sText) : 0u;
+            pMatches[iWrite].iChunkCount = pMemory->pRecords[i].iChunkCount;
+            pMatches[iWrite].sSourceUri = pMemory->pRecords[i].sSourceUri;
+            pMatches[iWrite].sRecordId = pMemory->pRecords[i].sRecordId;
+            ++iWrite;
+        }
+    }
+
+    qsort(pMatches, iMatchCount, sizeof(*pMatches), fnKeepOrder);
+    for ( i = 0u; i < iMatchCount; ++i ) {
+        bool bKeep = true;
+        uint64 uCandidateChars = (uint64)pMatches[i].iTextLength;
+        uint64 uCandidateChunks = (uint64)pMatches[i].iChunkCount;
+
+        if ( iKeepCount >= (size_t)pUseOptions->uKeepLatestRecords ) {
+            bKeep = false;
+        }
+        if ( bKeep &&
+             pUseOptions->uMaxTotalChars > 0u &&
+             (uKeptChars + uCandidateChars) > pUseOptions->uMaxTotalChars ) {
+            bKeep = false;
+        }
+        if ( bKeep &&
+             pUseOptions->uMaxTotalChunks > 0u &&
+             (uKeptChunks + uCandidateChunks) > (uint64)pUseOptions->uMaxTotalChunks ) {
+            bKeep = false;
+        }
+
+        if ( bKeep ) {
+            ++iKeepCount;
+            uKeptChars += uCandidateChars;
+            uKeptChunks += uCandidateChunks;
+        } else {
+            pMatches[iRemoveCount++] = pMatches[i];
+        }
+    }
+
+    if ( iRemoveCount > 1u ) {
+        qsort(
+            pMatches,
+            iRemoveCount,
+            sizeof(*pMatches),
+            xllm__memory_record_sort_entry_compare_index_desc
+        );
+    }
+
+    for ( i = 0u; i < iRemoveCount; ++i ) {
+        if ( xllm__memory_remove_record_at_locked(
+                pMemory,
+                pMatches[i].iIndex,
+                pError,
+                "failed to trim conversation memory record from sqlite"
+             ) != XRT_NET_OK ) {
+            xrtMutexUnlock(pMemory->pMutex);
+            xrtFree(pMatches);
+            return XRT_NET_ERROR;
+        }
+        ++uRemovedCount;
+    }
+    xrtMutexUnlock(pMemory->pMutex);
+    xrtFree(pMatches);
+
+    if ( puRemovedCount ) {
+        *puRemovedCount = uRemovedCount;
+    }
+    return XRT_NET_OK;
+}
+
+XLLM_API int xllm_memory_remove_expired(
+    xllm_memory *pMemory,
+    const xllm_memory_remove_expired_options *pOptions,
+    uint32 *puRemovedCount,
+    xllm_error *pError
+)
+{
+    xllm_memory_remove_expired_options tDefaultOptions;
+    const xllm_memory_remove_expired_options *pUseOptions = pOptions;
+    const char *sMetadataKey;
+    const char *sSourceUriPrefix;
+    int64 iNowUnix;
+    uint32 uRemovedCount = 0u;
+    size_t i = 0u;
+
+    if ( puRemovedCount ) {
+        *puRemovedCount = 0u;
+    }
+    if ( !pMemory ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "memory remove_expired requires memory handle");
+        return XRT_NET_ERROR;
+    }
+
+    if ( !pUseOptions ) {
+        xllm_memory_remove_expired_options_init(&tDefaultOptions);
+        pUseOptions = &tDefaultOptions;
+    }
+
+    sMetadataKey = (pUseOptions->sMetadataKey && pUseOptions->sMetadataKey[0])
+        ? pUseOptions->sMetadataKey
+        : XLLM__MEMORY_METADATA_KEY_EXPIRES_AT_UNIX;
+    sSourceUriPrefix = (pUseOptions->sSourceUriPrefix && pUseOptions->sSourceUriPrefix[0])
+        ? pUseOptions->sSourceUriPrefix
+        : NULL;
+    iNowUnix = (pUseOptions->iNowUnix > 0) ? pUseOptions->iNowUnix : xrtToUnixTime(xrtNow());
+
+    xrtMutexLock(pMemory->pMutex);
+    while ( i < pMemory->iRecordCount ) {
+        const xllm__memory_record_entry *pRecord = &pMemory->pRecords[i];
+        bool bScopeMatches = (pUseOptions->eScope == XLLM_MEMORY_SCOPE_ANY) || (pRecord->eScope == pUseOptions->eScope);
+        bool bSourceUriMatches = true;
+        int64 iExpiresAtUnix = 0;
+
+        if ( sSourceUriPrefix ) {
+            size_t iPrefixLength = strlen(sSourceUriPrefix);
+            bSourceUriMatches =
+                pRecord->sSourceUri &&
+                strncmp(pRecord->sSourceUri, sSourceUriPrefix, iPrefixLength) == 0;
+        }
+        if ( pRecord->tMetadata && xvoType(pRecord->tMetadata) == XVO_DT_TABLE ) {
+            iExpiresAtUnix = xvoTableGetInt(pRecord->tMetadata, sMetadataKey, 0u);
+        }
+
+        if ( bScopeMatches && bSourceUriMatches && iExpiresAtUnix > 0 && iExpiresAtUnix <= iNowUnix ) {
+            if ( xllm__memory_remove_record_at_locked(
+                    pMemory,
+                    i,
+                    pError,
+                    "failed to remove expired memory record from sqlite"
+                 ) != XRT_NET_OK ) {
+                xrtMutexUnlock(pMemory->pMutex);
+                return XRT_NET_ERROR;
+            }
+            ++uRemovedCount;
+            continue;
+        }
+        ++i;
+    }
+    xrtMutexUnlock(pMemory->pMutex);
+
     if ( puRemovedCount ) {
         *puRemovedCount = uRemovedCount;
     }
@@ -49724,6 +51880,7 @@ XLLM_API int xllm_memory_search(
     size_t iMaxHits;
     uint32 uVectorCandidateLimit;
     double fMinScore;
+    int64 iNowUnix = 0;
     size_t i;
 
     if ( !pMemory || !pResult ) {
@@ -49755,6 +51912,9 @@ XLLM_API int xllm_memory_search(
     }
     uVectorCandidateLimit = (uint32)((iMaxHits * 8u) + 8u);
     fMinScore = pUseOptions->tMinScore.bSet ? pUseOptions->tMinScore.fValue : 0.25;
+    if ( pUseOptions->bSkipExpired || pUseOptions->tRecencyWeight.bSet ) {
+        iNowUnix = pUseOptions->iNowUnix > 0 ? pUseOptions->iNowUnix : xrtToUnixTime(xrtNow());
+    }
     if ( pMemory->bEnableHybridSearch && pMemory->tEmbedder.pfnEmbedText ) {
         if ( xllm__memory_embed_text(
                 &pMemory->tEmbedder,
@@ -49784,11 +51944,15 @@ XLLM_API int xllm_memory_search(
     }
     for ( i = 0u; i < pMemory->iRecordCount; ++i ) {
         const xllm__memory_record_entry *pRecord = &pMemory->pRecords[i];
+        double fPriorityBoost = xllm__memory_score_priority_boost(pRecord, pUseOptions);
+        double fRecencyBoost = xllm__memory_score_recency_boost(pRecord, pUseOptions, iNowUnix);
         size_t j;
 
         if ( !xllm__memory_record_matches_filters(
                 pRecord,
                 pUseOptions->eScope,
+                pUseOptions->sConversationId,
+                pUseOptions->sTurnId,
                 pUseOptions->sRecordId,
                 pUseOptions->sSourceUri,
                 pUseOptions->sRecordIdContains,
@@ -49798,6 +51962,9 @@ XLLM_API int xllm_memory_search(
                 pUseOptions->sMetadataKey,
                 pUseOptions->sMetadataValue
              ) ) {
+            continue;
+        }
+        if ( pUseOptions->bSkipExpired && xllm__memory_record_is_expired(pRecord, iNowUnix) ) {
             continue;
         }
 
@@ -49815,6 +51982,7 @@ XLLM_API int xllm_memory_search(
             if ( !xllm__memory_ascii_contains(pRecord->pChunks[j].sText, pUseOptions->sTextContains) ) {
                 continue;
             }
+            fScore += fPriorityBoost + fRecencyBoost;
             if ( fScore < fMinScore ) {
                 continue;
             }
@@ -49848,10 +52016,61 @@ XLLM_API int xllm_memory_search(
     return XRT_NET_OK;
 }
 
+static int xllm__memory_make_context_block_from_search_result(
+    const xllm_memory_search_result *pResult,
+    const xllm_memory_context_options *pOptions,
+    xllm_context_block *pBlock,
+    xllm_error *pError
+);
+
+static int xllm__memory_append_context_block(
+    xllm_context_block **ppContextBlocks,
+    size_t *piContextBlockCount,
+    xllm_context_block *pBlock,
+    xllm_error *pError
+);
+
 XLLM_API int xllm_memory_apply_search_to_request(
     xllm_request *pRequest,
     const xllm_memory_search_result *pResult,
     const xllm_memory_context_options *pOptions,
+    xllm_error *pError
+)
+{
+    xllm_context_block tBlock;
+    int iStatus;
+
+    if ( !pRequest || !pResult || pResult->iHitCount == 0u ) {
+        return XRT_NET_OK;
+    }
+
+    memset(&tBlock, 0, sizeof(tBlock));
+    iStatus = xllm__memory_make_context_block_from_search_result(pResult, pOptions, &tBlock, pError);
+    if ( iStatus != XRT_NET_OK ) {
+        return iStatus;
+    }
+    if ( tBlock.iMessageCount == 0u || !tBlock.pMessages ) {
+        return XRT_NET_OK;
+    }
+
+    iStatus = xllm__memory_append_context_block(
+        &pRequest->pContextBlocks,
+        &pRequest->iContextBlockCount,
+        &tBlock,
+        pError
+    );
+    if ( iStatus != XRT_NET_OK ) {
+        xllm__context_block_free(&tBlock);
+        return iStatus;
+    }
+
+    return XRT_NET_OK;
+}
+
+static int xllm__memory_make_context_block_from_search_result(
+    const xllm_memory_search_result *pResult,
+    const xllm_memory_context_options *pOptions,
+    xllm_context_block *pBlock,
     xllm_error *pError
 )
 {
@@ -49861,14 +52080,20 @@ XLLM_API int xllm_memory_apply_search_to_request(
     xllm_message tMessage;
     xllm_content_part tPart;
     xllm_context_block_kind eKind;
-    xllm_context_block *pNewBlocks;
+    size_t iCandidateCount;
+    size_t iMaxHitCount;
     size_t iHitCount;
+    size_t iSelectedHitCount = 0u;
     size_t iBufferSize = 64u;
     size_t i;
+    size_t *pSelectedHitIndices = NULL;
+    size_t *pTextLengths = NULL;
     char *sText = NULL;
     size_t iOffset = 0u;
+    uint64 uRemainingTotalChars = 0u;
+    bool bHasTotalCharsBudget = false;
 
-    if ( !pRequest || !pResult || pResult->iHitCount == 0u ) {
+    if ( !pResult || !pBlock || pResult->iHitCount == 0u ) {
         return XRT_NET_OK;
     }
 
@@ -49877,16 +52102,64 @@ XLLM_API int xllm_memory_apply_search_to_request(
         pUseOptions = &tDefaultOptions;
     }
 
-    iHitCount = pResult->iHitCount;
-    if ( pUseOptions->uMaxHits > 0u && iHitCount > (size_t)pUseOptions->uMaxHits ) {
-        iHitCount = (size_t)pUseOptions->uMaxHits;
+    iCandidateCount = pResult->iHitCount;
+    iMaxHitCount = pUseOptions->uMaxHits > 0u ? (size_t)pUseOptions->uMaxHits : iCandidateCount;
+    if ( iMaxHitCount > iCandidateCount ) {
+        iMaxHitCount = iCandidateCount;
+    }
+    bHasTotalCharsBudget = pUseOptions->uMaxTotalChars > 0u;
+    uRemainingTotalChars = (uint64)pUseOptions->uMaxTotalChars;
+    pSelectedHitIndices = (size_t *)xrtCalloc(iCandidateCount > 0u ? iCandidateCount : 1u, sizeof(*pSelectedHitIndices));
+    pTextLengths = (size_t *)xrtCalloc(iCandidateCount > 0u ? iCandidateCount : 1u, sizeof(*pTextLengths));
+    if ( (iCandidateCount > 0u && !pSelectedHitIndices) ||
+         (iCandidateCount > 0u && !pTextLengths) ) {
+        xrtFree(pSelectedHitIndices);
+        xrtFree(pTextLengths);
+        xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to allocate memory context hit lengths");
+        return XRT_NET_ERROR;
     }
 
-    for ( i = 0u; i < iHitCount; ++i ) {
+    for ( i = 0u; i < iCandidateCount; ++i ) {
         size_t iTextLength = pResult->pHits[i].sText ? strlen(pResult->pHits[i].sText) : 0u;
+        size_t j;
+        bool bDuplicateRecord = false;
+
+        if ( iSelectedHitCount >= iMaxHitCount ) {
+            break;
+        }
+        if ( pUseOptions->tMinScore.bSet && pResult->pHits[i].fScore < pUseOptions->tMinScore.fValue ) {
+            continue;
+        }
+        if ( pUseOptions->bDistinctByRecord ) {
+            for ( j = 0u; j < iSelectedHitCount; ++j ) {
+                const xllm_memory_hit *pSelectedHit = &pResult->pHits[pSelectedHitIndices[j]];
+                const char *sSelectedRecordId = pSelectedHit->sRecordId ? pSelectedHit->sRecordId : "";
+                const char *sCandidateRecordId = pResult->pHits[i].sRecordId ? pResult->pHits[i].sRecordId : "";
+
+                if ( strcmp(sSelectedRecordId, sCandidateRecordId) == 0 ) {
+                    bDuplicateRecord = true;
+                    break;
+                }
+            }
+        }
+        if ( bDuplicateRecord ) {
+            continue;
+        }
         if ( pUseOptions->uMaxCharsPerHit > 0u && iTextLength > (size_t)pUseOptions->uMaxCharsPerHit ) {
             iTextLength = (size_t)pUseOptions->uMaxCharsPerHit;
         }
+        if ( bHasTotalCharsBudget ) {
+            if ( uRemainingTotalChars == 0u ) {
+                break;
+            }
+            if ( (uint64)iTextLength > uRemainingTotalChars ) {
+                iTextLength = (size_t)uRemainingTotalChars;
+            }
+            uRemainingTotalChars -= (uint64)iTextLength;
+        }
+        pSelectedHitIndices[iSelectedHitCount] = i;
+        pTextLengths[iSelectedHitCount] = iTextLength;
+        ++iSelectedHitCount;
         iBufferSize += 160u + iTextLength;
         if ( pResult->pHits[i].sTitle ) {
             iBufferSize += strlen(pResult->pHits[i].sTitle);
@@ -49898,12 +52171,20 @@ XLLM_API int xllm_memory_apply_search_to_request(
             iBufferSize += strlen(pResult->pHits[i].sRecordId);
         }
     }
+    iHitCount = iSelectedHitCount;
+    if ( iHitCount == 0u ) {
+        xrtFree(pSelectedHitIndices);
+        xrtFree(pTextLengths);
+        return XRT_NET_OK;
+    }
     if ( pUseOptions->sLabel ) {
         iBufferSize += strlen(pUseOptions->sLabel);
     }
 
     sText = (char *)xrtCalloc(iBufferSize + 1u, sizeof(char));
     if ( !sText ) {
+        xrtFree(pSelectedHitIndices);
+        xrtFree(pTextLengths);
         xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to allocate memory context text");
         return XRT_NET_ERROR;
     }
@@ -49918,11 +52199,8 @@ XLLM_API int xllm_memory_apply_search_to_request(
         (unsigned)iHitCount
     );
     for ( i = 0u; i < iHitCount && iOffset < iBufferSize; ++i ) {
-        const xllm_memory_hit *pHit = &pResult->pHits[i];
-        size_t iTextLength = pHit->sText ? strlen(pHit->sText) : 0u;
-        if ( pUseOptions->uMaxCharsPerHit > 0u && iTextLength > (size_t)pUseOptions->uMaxCharsPerHit ) {
-            iTextLength = (size_t)pUseOptions->uMaxCharsPerHit;
-        }
+        const xllm_memory_hit *pHit = &pResult->pHits[pSelectedHitIndices[i]];
+        size_t iTextLength = pTextLengths[i];
 
         iOffset += (size_t)snprintf(
             sText + iOffset,
@@ -49942,6 +52220,10 @@ XLLM_API int xllm_memory_apply_search_to_request(
             iOffset += (size_t)snprintf(sText + iOffset, iBufferSize + 1u - iOffset, "Content:\n%.*s\n", (int)iTextLength, pHit->sText ? pHit->sText : "");
         }
     }
+    xrtFree(pSelectedHitIndices);
+    pSelectedHitIndices = NULL;
+    xrtFree(pTextLengths);
+    pTextLengths = NULL;
 
     memset(&tPart, 0, sizeof(tPart));
     tPart.eKind = XLLM_PART_TEXT;
@@ -49955,6 +52237,8 @@ XLLM_API int xllm_memory_apply_search_to_request(
     tMessage.pParts = (xllm_content_part *)xrtCalloc(1u, sizeof(xllm_content_part));
     if ( !tMessage.pParts ) {
         xllm__content_part_free(&tPart);
+        xrtFree(pSelectedHitIndices);
+        xrtFree(pTextLengths);
         xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to allocate memory context message");
         return XRT_NET_ERROR;
     }
@@ -49973,6 +52257,8 @@ XLLM_API int xllm_memory_apply_search_to_request(
     if ( !tBlock.pMessages ) {
         xllm__message_free(&tMessage);
         xllm__xvalue_release(&tBlock.tVendorExtra);
+        xrtFree(pSelectedHitIndices);
+        xrtFree(pTextLengths);
         xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to allocate memory context block");
         return XRT_NET_ERROR;
     }
@@ -49980,20 +52266,222 @@ XLLM_API int xllm_memory_apply_search_to_request(
     memset(&tMessage, 0, sizeof(tMessage));
     tBlock.iMessageCount = 1u;
 
+    *pBlock = tBlock;
+    memset(&tBlock, 0, sizeof(tBlock));
+    return XRT_NET_OK;
+}
+
+static int xllm__memory_append_context_block(
+    xllm_context_block **ppContextBlocks,
+    size_t *piContextBlockCount,
+    xllm_context_block *pBlock,
+    xllm_error *pError
+)
+{
+    xllm_context_block *pNewBlocks;
+
+    if ( !ppContextBlocks || !piContextBlockCount || !pBlock ) {
+        xllm__error_set(pError, XLLM_ERROR_INVALID_REQUEST, "invalid memory context append target");
+        return XRT_NET_ERROR;
+    }
+
     pNewBlocks = (xllm_context_block *)xrtRealloc(
-        pRequest->pContextBlocks,
-        (pRequest->iContextBlockCount + 1u) * sizeof(xllm_context_block)
+        *ppContextBlocks,
+        (*piContextBlockCount + 1u) * sizeof(xllm_context_block)
     );
     if ( !pNewBlocks ) {
-        xllm__context_block_free(&tBlock);
         xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to append memory context block");
         return XRT_NET_ERROR;
     }
 
-    pRequest->pContextBlocks = pNewBlocks;
-    pRequest->pContextBlocks[pRequest->iContextBlockCount] = tBlock;
-    ++pRequest->iContextBlockCount;
+    *ppContextBlocks = pNewBlocks;
+    (*ppContextBlocks)[*piContextBlockCount] = *pBlock;
+    ++(*piContextBlockCount);
+    memset(pBlock, 0, sizeof(*pBlock));
     return XRT_NET_OK;
+}
+
+XLLM_API int xllm_memory_apply_search_to_turn(
+    xllm_turn *pTurn,
+    const xllm_memory_search_result *pResult,
+    const xllm_memory_context_options *pOptions,
+    xllm_error *pError
+)
+{
+    xllm_context_block tBlock;
+    int iStatus;
+
+    if ( !pTurn || !pResult || pResult->iHitCount == 0u ) {
+        return XRT_NET_OK;
+    }
+
+    memset(&tBlock, 0, sizeof(tBlock));
+    iStatus = xllm__memory_make_context_block_from_search_result(pResult, pOptions, &tBlock, pError);
+    if ( iStatus != XRT_NET_OK ) {
+        return iStatus;
+    }
+    if ( tBlock.iMessageCount == 0u || !tBlock.pMessages ) {
+        return XRT_NET_OK;
+    }
+
+    iStatus = xllm__memory_append_context_block(
+        &pTurn->pContextBlocks,
+        &pTurn->iContextBlockCount,
+        &tBlock,
+        pError
+    );
+    if ( iStatus != XRT_NET_OK ) {
+        xllm__context_block_free(&tBlock);
+        return iStatus;
+    }
+
+    return XRT_NET_OK;
+}
+
+XLLM_API int xllm_memory_search_and_apply_to_request(
+    xllm_memory *pMemory,
+    const xllm_memory_search_options *pSearchOptions,
+    xllm_request *pRequest,
+    const xllm_memory_context_options *pContextOptions,
+    xllm_error *pError
+)
+{
+    xllm_memory_search_result tSearchResult;
+    int iStatus;
+
+    memset(&tSearchResult, 0, sizeof(tSearchResult));
+    iStatus = xllm_memory_search(pMemory, pSearchOptions, &tSearchResult, pError);
+    if ( iStatus != XRT_NET_OK ) {
+        return iStatus;
+    }
+
+    iStatus = xllm_memory_apply_search_to_request(pRequest, &tSearchResult, pContextOptions, pError);
+    xllm_memory_search_result_reset(&tSearchResult);
+    return iStatus;
+}
+
+XLLM_API int xllm_memory_search_and_apply_to_turn(
+    xllm_memory *pMemory,
+    const xllm_memory_search_options *pSearchOptions,
+    xllm_turn *pTurn,
+    const xllm_memory_context_options *pContextOptions,
+    xllm_error *pError
+)
+{
+    xllm_memory_search_result tSearchResult;
+    int iStatus;
+
+    memset(&tSearchResult, 0, sizeof(tSearchResult));
+    iStatus = xllm_memory_search(pMemory, pSearchOptions, &tSearchResult, pError);
+    if ( iStatus != XRT_NET_OK ) {
+        return iStatus;
+    }
+
+    iStatus = xllm_memory_apply_search_to_turn(pTurn, &tSearchResult, pContextOptions, pError);
+    xllm_memory_search_result_reset(&tSearchResult);
+    return iStatus;
+}
+
+static int xllm__memory_search_and_apply_from_turn(
+    xllm_memory *pMemory,
+    const xllm_turn *pSourceTurn,
+    xllm_request *pRequest,
+    xllm_turn *pTurn,
+    const xllm_memory_turn_search_apply_options *pOptions,
+    xllm_error *pError
+)
+{
+    xllm_memory_turn_search_apply_options tDefaultOptions;
+    const xllm_memory_turn_search_apply_options *pUseOptions = pOptions;
+    xllm_memory_search_options tSearchOptions;
+    xllm_memory_search_result tSearchResult;
+    char *sDerivedQuery = NULL;
+    int iStatus;
+
+    if ( !pMemory || !pSourceTurn || (!pRequest && !pTurn) ) {
+        xllm__error_set(
+            pError,
+            XLLM_ERROR_INVALID_REQUEST,
+            "memory turn search/apply requires memory, source turn, and apply target"
+        );
+        return XRT_NET_ERROR;
+    }
+
+    if ( !pUseOptions ) {
+        xllm_memory_turn_search_apply_options_init(&tDefaultOptions);
+        pUseOptions = &tDefaultOptions;
+    }
+
+    memset(&tSearchResult, 0, sizeof(tSearchResult));
+    tSearchOptions = pUseOptions->tSearchOptions;
+    if ( !tSearchOptions.sQuery || !tSearchOptions.sQuery[0] ) {
+        iStatus = xllm__memory_build_search_query_from_turn(pSourceTurn, pUseOptions, &sDerivedQuery, pError);
+        if ( iStatus != XRT_NET_OK ) {
+            return iStatus;
+        }
+        tSearchOptions.sQuery = sDerivedQuery;
+    }
+
+    iStatus = xllm_memory_search(pMemory, &tSearchOptions, &tSearchResult, pError);
+    if ( iStatus == XRT_NET_OK ) {
+        if ( pRequest ) {
+            iStatus = xllm_memory_apply_search_to_request(
+                pRequest,
+                &tSearchResult,
+                &pUseOptions->tContextOptions,
+                pError
+            );
+        } else {
+            iStatus = xllm_memory_apply_search_to_turn(
+                pTurn,
+                &tSearchResult,
+                &pUseOptions->tContextOptions,
+                pError
+            );
+        }
+    }
+
+    xllm_memory_search_result_reset(&tSearchResult);
+    if ( sDerivedQuery ) {
+        xrtFree(sDerivedQuery);
+    }
+    return iStatus;
+}
+
+XLLM_API int xllm_memory_search_and_apply_from_turn_to_request(
+    xllm_memory *pMemory,
+    const xllm_turn *pSourceTurn,
+    xllm_request *pRequest,
+    const xllm_memory_turn_search_apply_options *pOptions,
+    xllm_error *pError
+)
+{
+    return xllm__memory_search_and_apply_from_turn(
+        pMemory,
+        pSourceTurn,
+        pRequest,
+        NULL,
+        pOptions,
+        pError
+    );
+}
+
+XLLM_API int xllm_memory_search_and_apply_from_turn_to_turn(
+    xllm_memory *pMemory,
+    const xllm_turn *pSourceTurn,
+    xllm_turn *pTurn,
+    const xllm_memory_turn_search_apply_options *pOptions,
+    xllm_error *pError
+)
+{
+    return xllm__memory_search_and_apply_from_turn(
+        pMemory,
+        pSourceTurn,
+        NULL,
+        pTurn,
+        pOptions,
+        pError
+    );
 }
 
 XLLM_API int xllm_memory_list_records(
@@ -50009,6 +52497,8 @@ XLLM_API int xllm_memory_list_records(
     size_t iLimit;
     size_t iMatched = 0u;
     size_t iCapacity = 0u;
+    int64 iNowUnix = 0;
+    bool bSortByUpdatedAtDesc = false;
     size_t i;
 
     if ( !pMemory || !pResult ) {
@@ -50031,6 +52521,10 @@ XLLM_API int xllm_memory_list_records(
     xllm__xvalue_addref(pResult->tVendorExtra);
     iOffset = (size_t)pUseOptions->uOffset;
     iLimit = pUseOptions->uMaxItems > 0u ? (size_t)pUseOptions->uMaxItems : 32u;
+    bSortByUpdatedAtDesc = pUseOptions->tSortByUpdatedAtDesc.bSet && pUseOptions->tSortByUpdatedAtDesc.bValue;
+    if ( pUseOptions->bSkipExpired ) {
+        iNowUnix = pUseOptions->iNowUnix > 0 ? pUseOptions->iNowUnix : xrtToUnixTime(xrtNow());
+    }
 
     xrtMutexLock(pMemory->pMutex);
     for ( i = 0u; i < pMemory->iRecordCount; ++i ) {
@@ -50039,6 +52533,8 @@ XLLM_API int xllm_memory_list_records(
         if ( !xllm__memory_record_matches_filters(
                 &pMemory->pRecords[i],
                 pUseOptions->eScope,
+                pUseOptions->sConversationId,
+                pUseOptions->sTurnId,
                 pUseOptions->sRecordId,
                 pUseOptions->sSourceUri,
                 pUseOptions->sRecordIdContains,
@@ -50050,11 +52546,16 @@ XLLM_API int xllm_memory_list_records(
              ) ) {
             continue;
         }
-        if ( iMatched++ < iOffset ) {
+        if ( pUseOptions->bSkipExpired && xllm__memory_record_is_expired(&pMemory->pRecords[i], iNowUnix) ) {
             continue;
         }
-        if ( pResult->iRecordCount >= iLimit ) {
-            break;
+        if ( !bSortByUpdatedAtDesc ) {
+            if ( iMatched++ < iOffset ) {
+                continue;
+            }
+            if ( pResult->iRecordCount >= iLimit ) {
+                break;
+            }
         }
         if ( xllm__memory_record_info_clone(&tInfo, &pMemory->pRecords[i]) != XRT_NET_OK ) {
             xrtMutexUnlock(pMemory->pMutex);
@@ -50075,8 +52576,25 @@ XLLM_API int xllm_memory_list_records(
             xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to append memory record info");
             return XRT_NET_ERROR;
         }
+        if ( bSortByUpdatedAtDesc ) {
+            ++iMatched;
+        }
     }
     xrtMutexUnlock(pMemory->pMutex);
+    if ( bSortByUpdatedAtDesc && pResult->iRecordCount > 1u ) {
+        qsort(
+            pResult->pRecords,
+            pResult->iRecordCount,
+            sizeof(*pResult->pRecords),
+            xllm__memory_record_info_compare_updated_desc
+        );
+    }
+    if ( bSortByUpdatedAtDesc ) {
+        if ( xllm__memory_record_info_trim_sorted_result(pResult, iOffset, iLimit, pError) != XRT_NET_OK ) {
+            xllm_memory_record_list_result_reset(pResult);
+            return XRT_NET_ERROR;
+        }
+    }
     return XRT_NET_OK;
 }
 
@@ -50093,6 +52611,8 @@ XLLM_API int xllm_memory_list_chunks(
     size_t iLimit;
     size_t iMatched = 0u;
     size_t iCapacity = 0u;
+    int64 iNowUnix = 0;
+    bool bSortByUpdatedAtDesc = false;
     size_t i;
 
     if ( !pMemory || !pResult ) {
@@ -50115,10 +52635,18 @@ XLLM_API int xllm_memory_list_chunks(
     xllm__xvalue_addref(pResult->tVendorExtra);
     iOffset = (size_t)pUseOptions->uOffset;
     iLimit = pUseOptions->uMaxItems > 0u ? (size_t)pUseOptions->uMaxItems : 32u;
+    bSortByUpdatedAtDesc = pUseOptions->tSortByUpdatedAtDesc.bSet && pUseOptions->tSortByUpdatedAtDesc.bValue;
+    if ( pUseOptions->bSkipExpired ) {
+        iNowUnix = pUseOptions->iNowUnix > 0 ? pUseOptions->iNowUnix : xrtToUnixTime(xrtNow());
+    }
 
     xrtMutexLock(pMemory->pMutex);
     for ( i = 0u; i < pMemory->iRecordCount; ++i ) {
         size_t j;
+
+        if ( pUseOptions->bSkipExpired && xllm__memory_record_is_expired(&pMemory->pRecords[i], iNowUnix) ) {
+            continue;
+        }
 
         for ( j = 0u; j < pMemory->pRecords[i].iChunkCount; ++j ) {
             xllm_memory_chunk_info tInfo;
@@ -50126,12 +52654,14 @@ XLLM_API int xllm_memory_list_chunks(
             if ( !xllm__memory_chunk_matches_filters(&pMemory->pRecords[i], &pMemory->pRecords[i].pChunks[j], pUseOptions) ) {
                 continue;
             }
-            if ( iMatched++ < iOffset ) {
-                continue;
-            }
-            if ( pResult->iChunkCount >= iLimit ) {
-                xrtMutexUnlock(pMemory->pMutex);
-                return XRT_NET_OK;
+            if ( !bSortByUpdatedAtDesc ) {
+                if ( iMatched++ < iOffset ) {
+                    continue;
+                }
+                if ( pResult->iChunkCount >= iLimit ) {
+                    xrtMutexUnlock(pMemory->pMutex);
+                    return XRT_NET_OK;
+                }
             }
             if ( xllm__memory_chunk_info_clone(
                     &tInfo,
@@ -50157,9 +52687,26 @@ XLLM_API int xllm_memory_list_chunks(
                 xllm__error_set(pError, XLLM_ERROR_INTERNAL, "failed to append memory chunk info");
                 return XRT_NET_ERROR;
             }
+            if ( bSortByUpdatedAtDesc ) {
+                ++iMatched;
+            }
         }
     }
     xrtMutexUnlock(pMemory->pMutex);
+    if ( bSortByUpdatedAtDesc && pResult->iChunkCount > 1u ) {
+        qsort(
+            pResult->pChunks,
+            pResult->iChunkCount,
+            sizeof(*pResult->pChunks),
+            xllm__memory_chunk_info_compare_updated_desc
+        );
+    }
+    if ( bSortByUpdatedAtDesc ) {
+        if ( xllm__memory_chunk_info_trim_sorted_result(pResult, iOffset, iLimit, pError) != XRT_NET_OK ) {
+            xllm_memory_chunk_list_result_reset(pResult);
+            return XRT_NET_ERROR;
+        }
+    }
     return XRT_NET_OK;
 }
 

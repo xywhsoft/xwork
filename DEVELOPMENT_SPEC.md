@@ -20,6 +20,7 @@
 
 - 设计基线：[DESIGN.md](/D:/git/xwork/DESIGN.md)
 - 项目入口说明：[README.md](/D:/git/xwork/README.md)
+- Agent runtime 进度跟踪：[AGENT_RUNTIME_TRACKING_SPEC.md](/D:/git/xwork/AGENT_RUNTIME_TRACKING_SPEC.md)
 - 公共 API 草案：[xwork.h](/D:/git/xwork/xwork.h)
 - 公共实现入口：[xwork.c](/D:/git/xwork/xwork.c)
 - 已落成的最小共享 runtime 主线：
@@ -28,6 +29,8 @@
   - `xllm` model-turn + tool-loop 最小编排闭环
   - approval pause/resume 与 checkpoint load/recover
   - workspace memory attach / tool-result ingest / artifact ingest 入口
+  - workspace root -> `xllm_memory_sync_workspace` 的最小同步入口
+  - workspace file -> `xllm_memory_sync_file` 的最小增量同步入口
   - typed patch/report/command/output artifact emit helper
   - in-memory persistence 与 file persistence backend
   - persisted run/event/checkpoint/artifact 查询面
@@ -157,6 +160,11 @@
 
 - 通用 artifact 对象已能携带 `content_text / command_text / exit_code`
 - 公共 helper 已补 `emit_patch/report/command/output_artifact`
+- 带 `content_text` 的 artifact 已补通用内容统计：`content_byte_count / content_line_count`，并贯穿 runtime 对象、summary、snapshot、file persistence 与 workspace memory ingest
+- command artifact 已补最小结构化 I/O 统计：`stdout_byte_count / stderr_byte_count / stdout_truncated / stderr_truncated`，并贯穿 runtime 对象、summary、snapshot、file persistence 与 workspace memory ingest
+- patch artifact 已补最小结构化统计：`file_count / hunk_count / added_line_count / deleted_line_count`，并贯穿 runtime 对象、summary、snapshot、file persistence 与 workspace memory ingest
+- report/output artifact 已补最小 typed output metadata：`output_class / output_role`，并贯穿 runtime 对象、summary、snapshot、file persistence、summary query 与 workspace memory ingest；builtin filesystem/terminal bridge 会填充 file-content/file-change/terminal-state/terminal-inventory 分类
+- report artifact 已补专用 typed metadata：`report_class / report_subject_ref`，并贯穿 runtime 对象、summary、snapshot、file persistence、summary query 与 workspace memory ingest
 
 ### 5.8 `xwork_host`
 
@@ -237,6 +245,13 @@
 - `filesystem.read_text` 最小 request contract 已支持 `offset_bytes`
 - `filesystem.read_text` 最小 response contract 已显式返回 `file_size_bytes` / `remaining_bytes` / `eof` / `next_offset_bytes`
 - `filesystem.read_text/write_text` 失败路径已保留最小结构化结果，可区分 not_found / already_exists / parent_not_found
+- orchestrator 已能把 `xllm` stream preference、model event callback、xllm cancel token 和协作式 interrupt check 接入同步 model-turn/tool-loop；取消会落 cancelled checkpoint 和 `RUN_CANCELLED` event
+- host service invoke 已有 per-call context，可把 run/cancel/interrupt 元数据传入 builtin host；local `process.exec` 已能在 spawn 前和 subprocess polling wait 中协作取消
+- 自定义 tool executor 已有 `pfnToolExecEx` 扩展回调、`xwork_tool_exec_context` 与 `xwork_tool_exec_context_should_cancel()` helper，可自行轮询取消并让 orchestrator 收口为 cancelled run
+- orchestrator 已提供最小 async run handle：`xwork_run_execute_async` / `xwork_run_async_wait` / `xwork_run_async_wait_timeout` / `xwork_run_async_get_status` / `xwork_run_async_cancel` / `xwork_run_async_destroy`，内部复用同步 loop，并通过 owned 或外部 `xllm_cancel_token` 接入协作式取消；smoke 已覆盖 mock tool、未完成 handle destroy 与 local `process.exec` subprocess 取消
+- async run 公共 API 已写明 run/options/callback user data 的浅拷贝生命周期约束，以及 wait timeout 与未完成状态读取语义
+- run execution 已有 per-run execution guard，同一个 run 的并发 `xwork_run_execute` 入口会返回 `XWORK_ERROR_INVALID_STATE`
+- provider smoke 主执行路径已切到 async run handle，保留 local stub provider matrix 验证 request/response normalization，并补了离线 model-call failure 路径
 - `process.exec` 最小 request contract 已支持 `cwd` 覆盖
 - `process.exec` 最小 request contract 已支持 `max_output_bytes` 截断
 - `process.exec` 最小 request contract 已支持 `env:["KEY=VALUE"]`
@@ -256,9 +271,24 @@
 - interactive terminal session state result 已显式返回 `output_text` / `output_bytes`，并带 `event_end_seq` / `has_more_events` / `event_stream_done`，调用方不必自己拆 event 或推断是否还有后续输出
 - `process.terminal_write` 已支持 `include_state:true`、可选 `after_seq` / `max_events`，以及 `write_eof:true` 显式关闭 terminal stdin；单次写入后可直接返回 post-write 增量 terminal state
 - interactive terminal session state result 现在也带稳定元数据 `session_index` / `stdin_closed`，调用方不需要再从单次 write 结果反推会话状态
-- local host 现在支持 `process.list_terminals`，并且 terminal session 可以携带稳定的 `session_name`，调用方可以重新发现并管理活跃 interactive terminal session，而不需要把所有会话状态都自行缓存到外部
+- local host 现在支持带 `session_name` / `running` / `done` / `after_session_index` / `limit` 过滤条件的 `process.list_terminals`，并返回基于 `session_index_asc` 的分页元数据（`has_more_sessions` / `next_after_session_index`）；terminal session 也可以携带稳定的 `session_name`，调用方可以重新发现并分页查询活跃 interactive terminal session，而不需要把所有会话状态都自行缓存到外部
+- builtin `process.list_terminals` 现在也会在 orchestrator run 中合成 JSON output artifact（`terminal-sessions://active`），让 terminal inventory 能跟其他 run artifact 一起进入持久化与恢复链路
+- builtin `process.terminal_resize` 现在也会在 orchestrator run 中合成 JSON output artifact，让 terminal geometry 变化能和 terminal session 其他状态一起进入 artifact/persistence 链路
+- builtin `process.terminal_write` 现在也会在返回 terminal state 时合成 JSON output artifact，让 post-write terminal state window 能和 write command 一起进入 artifact/persistence 链路
+- builtin `process.terminal_read` 现在也会在 orchestrator run 中合成 JSON output artifact，让增量 terminal state window 能和 terminal transcript 一起进入 artifact/persistence 链路
+- builtin `process.terminal_stop` 现在也会在 orchestrator run 中合成 JSON output artifact，让 terminal session 的最终 stop state 能和 transcript/output 一起进入 artifact/persistence 链路
+- 在 interactive terminal 支持可用时，file persistence smoke 现在也会验证 terminal session 的 `resize/write/read/stop` 这些 JSON artifact 可以被列出并读回；同时公共 persistence API 也补了按 artifact 名称直接查找的最小读面
+- persisted artifact 现在也有轻量 summary list 读面（`id/kind/output_class/output_role/name/mime/storage_ref/summary/sequence`，以及存在时的 content/patch stats），调用方可以先检查 terminal JSON artifact 链，再按需加载完整 artifact
+- persisted artifact summary 现在也支持最小 metadata query（`kind` / `output_class` / `output_role` / `name_prefix` / `mime` / `storage_ref` / `exit_code` / `sequence`），调用方可以先按条件筛出 terminal JSON artifact，再按需加载完整对象
+- artifact summary query 现在也支持精确 `artifact_name`，调用方可以不退回完整 artifact load 就定位单个 persisted terminal JSON artifact
+- persisted artifact summary query 现在也支持 `after_sequence + limit`，而 summary list 会返回 `has_more/next_after_sequence`，terminal artifact 链可以按 sequence 稳定翻页
+- artifact summary query 现在也支持 `mime_prefix` / `storage_ref_prefix`，调用方可以按 transport metadata 切出同一条 terminal session artifact 链，而不需要完整读取 artifact 内容
+- artifact summary query 现在也支持 `output_role_prefix`，并且 terminal JSON artifact 的 durable smoke 会验证 `terminal_state` 分类和对应 role 可恢复
+- artifact summary query 现在也支持 `report_class` / `report_subject_ref_prefix`，durable smoke 会验证 report plan artifact 的专用 metadata 可恢复
+- artifact summary query 的 durable smoke 现在也覆盖 `exit_code` 和 min/max `sequence` 过滤，确保 command artifact 的 metadata 查询语义可恢复
 - builtin `process.exec` artifact bridge 已保留 stderr，不再只落 stdout
-- `process.exec` 失败路径已保留最小结构化结果，可区分 invalid request / timeout / non-zero exit，并带回请求 stop policy 与观察到的 stop reason
+- command artifact 现在也能保留结构化 stdout/stderr byte counts 与 per-stream truncation flags，`process.exec` artifact bridge 已将 host result 中的相关字段映射进 artifact metadata
+- `process.exec` 失败路径已保留最小结构化结果，可区分 invalid request / timeout / cancelled / non-zero exit，并带回请求 stop policy 与观察到的 stop reason
 - `process.exec` 最小 stdin contract 已会校验 configured `iMaxProcessInputBytes`
 - `process.exec` 最小 env contract 已会校验 configured `iMaxProcessEnvEntries`
 
@@ -266,7 +296,7 @@
 
 - 收紧 request/response contract，而不是继续堆新的 host kind
 - 补更真实的 filesystem/process/vcs 操作面和平台差异处理
-- 为后续 streaming / richer artifacts 保留稳定边界
+- 继续硬化 async run 生命周期、并发观察与 richer artifacts 边界
 
 ### M3: `xllm` 编排最小闭环
 
@@ -298,6 +328,8 @@
 
 - 将 workspace 与 `xllm_memory` 编排打通
 - 固定 memory search 注入 request 的策略入口
+- 提供 workspace root 到 `xllm_memory` 的最小 sync helper
+- 提供单文件变更到 `xllm_memory` 的最小 sync helper
 
 ### M7: `xcode` / `xclaw` profile
 
@@ -342,7 +374,7 @@
 1. 扩 builtin host tool 面，并继续硬化 filesystem/process/vcs request contract
 2. 继续硬化 persistence format、versioning 和 direct query surface
 3. 扩大真实 `xllm` smoke 覆盖，保留离线 stub 基线并增加 provider matrix
-4. 补更细的 artifact 语义和输出类型，而不是继续堆更多顶层对象
-5. 在当前同步 loop 之上再考虑 streaming / interrupt / richer orchestration
+4. 硬化 async run 的 handle lifetime、并发观察和取消覆盖
+5. 扩大真实 `xllm` provider smoke，并把 provider 错误路径矩阵扩展到离线 HTTP failure 基线之外
 
 当前阶段最重要的不是再发明更多名词，而是把已经存在的 runtime 主线做稳、做可测、做可恢复。

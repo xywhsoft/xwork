@@ -1,4 +1,21 @@
 #include "../xwork_core/xwork_internal.h"
+#include "../../lib/xllm-memory.h"
+
+void xwork_workspace_memory_sync_summary_init(xwork_workspace_memory_sync_summary *pSummary)
+{
+    if ( pSummary ) {
+        memset(pSummary, 0, sizeof(*pSummary));
+    }
+}
+
+void xwork_workspace_memory_file_sync_summary_init(
+    xwork_workspace_memory_file_sync_summary *pSummary
+)
+{
+    if ( pSummary ) {
+        memset(pSummary, 0, sizeof(*pSummary));
+    }
+}
 
 xwork_status xwork_runtime_add_workspace(
     xwork_runtime *pRuntime,
@@ -103,4 +120,131 @@ bool xwork_workspace_is_memory_enabled(const xwork_workspace *pWorkspace)
 xllm_memory *xwork_workspace_get_memory(const xwork_workspace *pWorkspace)
 {
     return pWorkspace ? pWorkspace->pMemory : NULL;
+}
+
+xwork_status xwork_workspace_sync_memory(
+    xwork_workspace *pWorkspace,
+    xwork_workspace_memory_sync_summary *pSummary
+)
+{
+    xllm_memory_ingest_workspace_options tOptions;
+    xllm_memory_sync_workspace_result tResult;
+    xllm_error tError;
+    int iStatus;
+
+    if ( !pWorkspace || !pWorkspace->bEnableMemory || !pWorkspace->pMemory ||
+         !pWorkspace->sRootPath || !pWorkspace->sRootPath[0] ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    if ( pSummary ) {
+        xwork_workspace_memory_sync_summary_init(pSummary);
+    }
+
+    xllm_memory_ingest_workspace_options_init(&tOptions);
+    xllm_memory_sync_workspace_result_init(&tResult);
+    xllm_error_init(&tError);
+
+    tOptions.eScope = XLLM_MEMORY_SCOPE_MEMORY;
+    tOptions.sPath = pWorkspace->sRootPath;
+    tOptions.bRecursive = true;
+    tOptions.bReplaceExisting = true;
+    tOptions.bSkipHidden = true;
+    tOptions.bSkipUnchanged = true;
+    tOptions.bLoadGitIgnore = true;
+    tOptions.sSourceUriPrefix = "workspace://";
+
+    iStatus = xllm_memory_sync_workspace(pWorkspace->pMemory, &tOptions, &tResult, &tError);
+    if ( iStatus != XRT_NET_OK ) {
+        xllm_error_free(&tError);
+        xllm_memory_sync_workspace_result_reset(&tResult);
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+    if ( pSummary ) {
+        pSummary->iVisitedFileCount = (size_t)tResult.tIngest.uVisitedFileCount;
+        pSummary->iIngestedFileCount = (size_t)tResult.tIngest.uIngestedFileCount;
+        pSummary->iCreatedRecordCount = (size_t)tResult.tIngest.uCreatedRecordCount;
+        pSummary->iUpdatedRecordCount = (size_t)tResult.tIngest.uUpdatedRecordCount;
+        pSummary->iSkippedFileCount = (size_t)tResult.tIngest.uSkippedFileCount;
+        pSummary->iFailedFileCount = (size_t)tResult.tIngest.uFailedFileCount;
+        pSummary->iExaminedRecordCount = (size_t)tResult.uExaminedRecordCount;
+        pSummary->iRemovedRecordCount = (size_t)tResult.uRemovedRecordCount;
+    }
+
+    xllm_error_free(&tError);
+    xllm_memory_sync_workspace_result_reset(&tResult);
+    return XWORK_OK;
+}
+
+xwork_status xwork_workspace_sync_memory_file(
+    xwork_workspace *pWorkspace,
+    const char *sPath,
+    xwork_workspace_memory_file_sync_summary *pSummary
+)
+{
+    xllm_memory_sync_file_options tOptions;
+    xllm_memory_change_set tChanges;
+    xllm_error tError;
+    size_t i;
+    int iStatus;
+
+    if ( !pWorkspace || !pWorkspace->bEnableMemory || !pWorkspace->pMemory ||
+         !pWorkspace->sRootPath || !pWorkspace->sRootPath[0] ||
+         !sPath || !sPath[0] ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    if ( pSummary ) {
+        xwork_workspace_memory_file_sync_summary_init(pSummary);
+    }
+
+    xllm_memory_sync_file_options_init(&tOptions);
+    xllm_memory_change_set_init(&tChanges);
+    xllm_error_init(&tError);
+
+    tOptions.eScope = XLLM_MEMORY_SCOPE_MEMORY;
+    tOptions.sPath = sPath;
+    tOptions.sRootPath = pWorkspace->sRootPath;
+    tOptions.bReplaceExisting = true;
+    tOptions.bUseWorkspaceDefaults = true;
+    tOptions.bSkipHidden = true;
+    tOptions.bSkipUnchanged = true;
+    tOptions.sSourceUriPrefix = "workspace://";
+
+    iStatus = xllm_memory_sync_file(pWorkspace->pMemory, &tOptions, &tChanges, &tError);
+    if ( iStatus != XRT_NET_OK ) {
+        xllm_error_free(&tError);
+        xllm_memory_change_set_reset(&tChanges);
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+    if ( pSummary ) {
+        pSummary->iChangeCount = tChanges.iChangeCount;
+        for ( i = 0u; i < tChanges.iChangeCount; ++i ) {
+            switch ( tChanges.pChanges[i].eKind ) {
+                case XLLM_MEMORY_CHANGE_CREATED:
+                    ++pSummary->iCreatedCount;
+                    break;
+                case XLLM_MEMORY_CHANGE_UPDATED:
+                    ++pSummary->iUpdatedCount;
+                    break;
+                case XLLM_MEMORY_CHANGE_REMOVED:
+                    ++pSummary->iRemovedCount;
+                    break;
+                case XLLM_MEMORY_CHANGE_SKIPPED:
+                    ++pSummary->iSkippedCount;
+                    break;
+                case XLLM_MEMORY_CHANGE_FAILED:
+                    ++pSummary->iFailedCount;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    xllm_error_free(&tError);
+    xllm_memory_change_set_reset(&tChanges);
+    return XWORK_OK;
 }

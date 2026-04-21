@@ -24,6 +24,39 @@ static const xwork_tool_def *xwork__get_builtin_tool_def(const char *sToolId)
         XWORK_APPROVAL_ALWAYS,
         false
     };
+    static const xwork_tool_def tFilesystemList = {
+        XWORK_TOOL_FILESYSTEM_LIST,
+        "Filesystem List",
+        "List workspace directory entries.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_FILESYSTEM,
+        XWORK_HOST_FILESYSTEM_LIST,
+        XWORK_SIDE_EFFECT_READ_ONLY,
+        XWORK_APPROVAL_DEFAULT,
+        false
+    };
+    static const xwork_tool_def tFilesystemStat = {
+        XWORK_TOOL_FILESYSTEM_STAT,
+        "Filesystem Stat",
+        "Read workspace file or directory metadata.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_FILESYSTEM,
+        XWORK_HOST_FILESYSTEM_STAT,
+        XWORK_SIDE_EFFECT_READ_ONLY,
+        XWORK_APPROVAL_DEFAULT,
+        false
+    };
+    static const xwork_tool_def tFilesystemGlob = {
+        XWORK_TOOL_FILESYSTEM_GLOB,
+        "Filesystem Glob",
+        "Find workspace paths matching a glob pattern.",
+        XWORK_TOOL_HOST_SERVICE,
+        XWORK_HOST_FILESYSTEM,
+        XWORK_HOST_FILESYSTEM_GLOB,
+        XWORK_SIDE_EFFECT_READ_ONLY,
+        XWORK_APPROVAL_DEFAULT,
+        false
+    };
     static const xwork_tool_def tProcessExec = {
         XWORK_TOOL_PROCESS_EXEC,
         "Process Exec",
@@ -121,6 +154,15 @@ static const xwork_tool_def *xwork__get_builtin_tool_def(const char *sToolId)
     }
     if ( strcmp(sToolId, XWORK_TOOL_FILESYSTEM_WRITE_TEXT) == 0 ) {
         return &tFilesystemWriteText;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_FILESYSTEM_LIST) == 0 ) {
+        return &tFilesystemList;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_FILESYSTEM_STAT) == 0 ) {
+        return &tFilesystemStat;
+    }
+    if ( strcmp(sToolId, XWORK_TOOL_FILESYSTEM_GLOB) == 0 ) {
+        return &tFilesystemGlob;
     }
     if ( strcmp(sToolId, XWORK_TOOL_PROCESS_EXEC) == 0 ) {
         return &tProcessExec;

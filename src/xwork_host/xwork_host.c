@@ -1,4 +1,5 @@
 #include "../xwork_core/xwork_internal.h"
+#include "../../lib/xllm-session.h"
 #include "../../lib/xrt.h"
 
 #include <ctype.h>
@@ -12,6 +13,7 @@
 #define XWORK__HOST_POPEN _popen
 #define XWORK__HOST_PCLOSE _pclose
 #else
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -562,6 +564,302 @@ static bool xwork__local_host_directory_exists(const char *sPath)
 #endif
 }
 
+static const char *xwork__local_host_path_leaf(const char *sPath)
+{
+    const char *sSlash;
+    const char *sBackslash;
+
+    if ( !sPath || !sPath[0] ) {
+        return "";
+    }
+
+    sSlash = strrchr(sPath, '/');
+    sBackslash = strrchr(sPath, '\\');
+    if ( sBackslash && (!sSlash || sBackslash > sSlash) ) {
+        sSlash = sBackslash;
+    }
+    return (sSlash && sSlash[1]) ? (sSlash + 1) : sPath;
+}
+
+static bool xwork__local_host_path_is_hidden(const char *sPath)
+{
+    const char *sLeaf = xwork__local_host_path_leaf(sPath);
+
+    return sLeaf && sLeaf[0] == '.' && sLeaf[1] != '\0';
+}
+
+static const char *xwork__local_host_path_relative(
+    const char *sRootPath,
+    const char *sPath
+)
+{
+    size_t iRootLength;
+    const char *sRelative;
+
+    if ( !sRootPath || !sRootPath[0] || !sPath || !sPath[0] ) {
+        return sPath ? sPath : "";
+    }
+
+    iRootLength = strlen(sRootPath);
+    if ( strncmp(sRootPath, sPath, iRootLength) != 0 ) {
+        return sPath;
+    }
+
+    sRelative = sPath + iRootLength;
+    if ( sRelative[0] == '/' || sRelative[0] == '\\' ) {
+        ++sRelative;
+    }
+    return sRelative;
+}
+
+static xwork_status xwork__local_host_stat_path(
+    const char *sPath,
+    const char **psType,
+    size_t *piSizeBytes,
+    long long *piMtimeUnix
+)
+{
+#ifdef _WIN32
+    struct _stat tStat;
+#else
+    struct stat tStat;
+#endif
+
+    if ( !sPath || !sPath[0] || !psType || !piSizeBytes || !piMtimeUnix ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+#ifdef _WIN32
+    if ( _stat(sPath, &tStat) != 0 ) {
+#else
+    if ( stat(sPath, &tStat) != 0 ) {
+#endif
+        return errno == ENOENT ? XWORK_ERROR_NOT_FOUND : XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+#ifdef _WIN32
+    if ( (tStat.st_mode & _S_IFDIR) != 0 ) {
+        *psType = "directory";
+    } else if ( (tStat.st_mode & _S_IFREG) != 0 ) {
+        *psType = "file";
+    } else {
+        *psType = "other";
+    }
+#else
+    if ( S_ISDIR(tStat.st_mode) ) {
+        *psType = "directory";
+    } else if ( S_ISREG(tStat.st_mode) ) {
+        *psType = "file";
+    } else {
+        *psType = "other";
+    }
+#endif
+    *piSizeBytes = (tStat.st_size > 0) ? (size_t)tStat.st_size : 0u;
+    *piMtimeUnix = (long long)tStat.st_mtime;
+    return XWORK_OK;
+}
+
+static bool xwork__local_host_glob_match(const char *sPattern, const char *sText)
+{
+    char cPattern;
+    char cText;
+
+    if ( !sPattern || !sText ) {
+        return false;
+    }
+
+    while ( *sPattern ) {
+        cPattern = *sPattern;
+        if ( cPattern == '*' ) {
+            while ( sPattern[1] == '*' ) {
+                ++sPattern;
+            }
+            if ( sPattern[1] == '\0' ) {
+                return true;
+            }
+            ++sPattern;
+            while ( *sText ) {
+                if ( xwork__local_host_glob_match(sPattern, sText) ) {
+                    return true;
+                }
+                ++sText;
+            }
+            return xwork__local_host_glob_match(sPattern, sText);
+        }
+        if ( cPattern == '?' ) {
+            if ( !*sText ) {
+                return false;
+            }
+            ++sPattern;
+            ++sText;
+            continue;
+        }
+
+        cText = *sText;
+#ifdef _WIN32
+        cPattern = (char)tolower((unsigned char)cPattern);
+        cText = (char)tolower((unsigned char)cText);
+#endif
+        if ( cPattern != cText ) {
+            return false;
+        }
+        ++sPattern;
+        ++sText;
+    }
+    return *sText == '\0';
+}
+
+typedef struct {
+    const char *sRootPath;
+    const char *sPattern;
+    bool bUsePattern;
+    bool bIncludeHidden;
+    size_t iLimit;
+    size_t iTotalCount;
+    size_t iItemCount;
+    bool bHasMore;
+    char *sEntriesJson;
+    size_t iEntriesJsonLength;
+    xwork_status iStatus;
+} xwork__local_host_scan_context;
+
+static xwork_status xwork__local_host_append_scan_entry(
+    xwork__local_host_scan_context *pContext,
+    const char *sPath,
+    const char *sType
+)
+{
+    const char *sRelativePath;
+    const char *sName;
+    const char *sEntryType;
+    char *sEscapedPath = NULL;
+    char *sEscapedResolvedPath = NULL;
+    char *sEscapedName = NULL;
+    char *sEscapedType = NULL;
+    char *sEntryJson = NULL;
+    size_t iSizeBytes = 0u;
+    long long iMtimeUnix = 0;
+    xwork_status iStatus;
+
+    if ( !pContext || !sPath ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    sRelativePath = xwork__local_host_path_relative(pContext->sRootPath, sPath);
+    sName = xwork__local_host_path_leaf(sPath);
+    if ( !pContext->bIncludeHidden && xwork__local_host_path_is_hidden(sName) ) {
+        return XWORK_OK;
+    }
+    if ( pContext->bUsePattern &&
+         !xwork__local_host_glob_match(pContext->sPattern, sRelativePath) &&
+         !xwork__local_host_glob_match(pContext->sPattern, sName) ) {
+        return XWORK_OK;
+    }
+
+    ++pContext->iTotalCount;
+    if ( pContext->iLimit > 0u && pContext->iItemCount >= pContext->iLimit ) {
+        pContext->bHasMore = true;
+        return XWORK_OK;
+    }
+
+    sEntryType = sType;
+    iStatus = xwork__local_host_stat_path(
+        sPath,
+        &sEntryType,
+        &iSizeBytes,
+        &iMtimeUnix
+    );
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    iStatus = xwork__local_host_json_escape(sRelativePath, &sEscapedPath);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(sPath, &sEscapedResolvedPath);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(sName, &sEscapedName);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(sEntryType, &sEscapedType);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+
+    sEntryJson = xwork__dup_printf(
+        "%s{\"path\":\"%s\",\"resolved_path\":\"%s\",\"name\":\"%s\","
+        "\"type\":\"%s\",\"size_bytes\":%llu,\"mtime_unix\":%lld}",
+        pContext->iItemCount > 0u ? "," : "",
+        sEscapedPath,
+        sEscapedResolvedPath,
+        sEscapedName,
+        sEscapedType,
+        (unsigned long long)iSizeBytes,
+        iMtimeUnix
+    );
+    if ( !sEntryJson ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_string_append(
+        &pContext->sEntriesJson,
+        &pContext->iEntriesJsonLength,
+        sEntryJson
+    );
+    if ( iStatus == XWORK_OK ) {
+        ++pContext->iItemCount;
+    }
+
+cleanup:
+    free(sEscapedPath);
+    free(sEscapedResolvedPath);
+    free(sEscapedName);
+    free(sEscapedType);
+    free(sEntryJson);
+    return iStatus;
+}
+
+static int xwork__local_host_scan_callback(
+    ptr pPath,
+    size_t iPathSize,
+    int bDir,
+    ptr pData,
+    ptr pParam
+)
+{
+    xwork__local_host_scan_context *pContext;
+    char *sPath;
+    xwork_status iStatus;
+    const char *sType;
+
+    (void)pData;
+    if ( !pPath || !pParam || iPathSize == 0u ) {
+        return 0;
+    }
+    if ( bDir == 2 ) {
+        return 0;
+    }
+
+    pContext = (xwork__local_host_scan_context *)pParam;
+    if ( pContext->iStatus != XWORK_OK ) {
+        return 1;
+    }
+
+    sPath = (char *)malloc(iPathSize + 1u);
+    if ( !sPath ) {
+        pContext->iStatus = XWORK_ERROR_NO_MEMORY;
+        return 1;
+    }
+    memcpy(sPath, pPath, iPathSize);
+    sPath[iPathSize] = '\0';
+
+    sType = (bDir == 1) ? "directory" : "file";
+    iStatus = xwork__local_host_append_scan_entry(pContext, sPath, sType);
+    free(sPath);
+    if ( iStatus != XWORK_OK ) {
+        pContext->iStatus = iStatus;
+        return 1;
+    }
+    return 0;
+}
+
 typedef struct {
     char *sText;
     size_t iLength;
@@ -748,6 +1046,38 @@ static size_t xwork__local_host_terminal_session_count(const xwork_local_host *p
         ++iCount;
     }
     return iCount;
+}
+
+static int xwork__local_host_compare_terminal_session_index(
+    const void *pLeft,
+    const void *pRight
+)
+{
+    const xwork__local_host_terminal_session *const *ppLeft =
+        (const xwork__local_host_terminal_session *const *)pLeft;
+    const xwork__local_host_terminal_session *const *ppRight =
+        (const xwork__local_host_terminal_session *const *)pRight;
+    const xwork__local_host_terminal_session *pSessionLeft =
+        ppLeft ? *ppLeft : NULL;
+    const xwork__local_host_terminal_session *pSessionRight =
+        ppRight ? *ppRight : NULL;
+
+    if ( pSessionLeft == pSessionRight ) {
+        return 0;
+    }
+    if ( !pSessionLeft ) {
+        return -1;
+    }
+    if ( !pSessionRight ) {
+        return 1;
+    }
+    if ( pSessionLeft->iSessionIndex < pSessionRight->iSessionIndex ) {
+        return -1;
+    }
+    if ( pSessionLeft->iSessionIndex > pSessionRight->iSessionIndex ) {
+        return 1;
+    }
+    return 0;
 }
 
 static void xwork__local_host_free_terminal_session(
@@ -1297,6 +1627,88 @@ static int xwork__local_host_process_stop_best_effort(
     return XPROC_STOP_KILL;
 }
 
+bool xwork_host_invoke_context_should_cancel(
+    const xwork_host_invoke_context *pContext,
+    const char *sPhase
+)
+{
+    if ( !pContext ) {
+        return false;
+    }
+    if ( pContext->pCancelToken &&
+         xllm_cancel_token_is_cancelled(pContext->pCancelToken) ) {
+        return true;
+    }
+    if ( pContext->pfnShouldInterrupt &&
+         pContext->pfnShouldInterrupt(
+             pContext->pRun,
+             sPhase && sPhase[0]
+                 ? sPhase
+                 : (pContext->sPhase ? pContext->sPhase : "host_invoke"),
+             pContext->pInterruptUserData
+         ) ) {
+        return true;
+    }
+    return false;
+}
+
+static int xwork__local_host_process_wait_cancellable(
+    xprocess *pProcess,
+    bool bHasTimeoutMs,
+    size_t iTimeoutMs,
+    const xwork_host_invoke_context *pContext,
+    bool *pbCancelled
+)
+{
+    const uint32 iPollMs = 50u;
+    double dStartSeconds = 0.0;
+
+    if ( pbCancelled ) {
+        *pbCancelled = false;
+    }
+    if ( !pProcess ) {
+        return XRT_WAIT_ERROR;
+    }
+
+    if ( bHasTimeoutMs ) {
+        dStartSeconds = xrtTimer();
+    }
+
+    for ( ;; ) {
+        uint32 iWaitMs = iPollMs;
+        int iWaitResult;
+
+        if ( xwork_host_invoke_context_should_cancel(pContext, "process_wait") ) {
+            if ( pbCancelled ) {
+                *pbCancelled = true;
+            }
+            return XRT_WAIT_TIMEOUT;
+        }
+
+        if ( bHasTimeoutMs ) {
+            double dElapsedMs = (xrtTimer() - dStartSeconds) * 1000.0;
+            double dRemainMs;
+
+            if ( dElapsedMs >= (double)iTimeoutMs ) {
+                return XRT_WAIT_TIMEOUT;
+            }
+            dRemainMs = (double)iTimeoutMs - dElapsedMs;
+            if ( dRemainMs < (double)iWaitMs ) {
+                iWaitMs = dRemainMs <= 1.0 ? 1u : (uint32)dRemainMs;
+            }
+        }
+
+        iWaitResult = xrtProcessWaitTimeout(pProcess, iWaitMs);
+        if ( iWaitResult != XRT_WAIT_TIMEOUT ) {
+            return iWaitResult;
+        }
+
+        if ( !bHasTimeoutMs ) {
+            continue;
+        }
+    }
+}
+
 static xwork_status xwork__local_host_write_text_file(
     const char *sPath,
     const char *sText,
@@ -1803,6 +2215,7 @@ static xwork_status xwork__local_host_set_process_result(
     size_t iStdinBytes,
     size_t iTimeoutMs,
     bool bTimedOut,
+    bool bCancelled,
     int iTimeoutStopReason,
     int iStopReason,
     bool bAllowNonZeroExit,
@@ -1871,7 +2284,8 @@ static xwork_status xwork__local_host_set_process_result(
             "\"stdout\":\"%s\",\"stderr\":\"%s\"%s,\"exit_code\":%d,"
             "\"truncated\":%s,\"stdout_truncated\":%s,\"stderr_truncated\":%s,"
             "\"env_count\":%zu,\"stdin_bytes\":%zu,"
-            "\"timeout_ms\":%zu,\"timed_out\":%s,\"timeout_stop\":\"%s\","
+            "\"timeout_ms\":%zu,\"timed_out\":%s,\"cancelled\":%s,"
+            "\"timeout_stop\":\"%s\","
             "\"stop_reason\":\"%s\",\"allow_nonzero_exit\":%s}",
             sEscapedCommand,
             sEscapedCwd,
@@ -1891,6 +2305,7 @@ static xwork_status xwork__local_host_set_process_result(
             iStdinBytes,
             iTimeoutMs,
             bTimedOut ? "true" : "false",
+            bCancelled ? "true" : "false",
             sTimeoutStopName,
             sStopReasonName,
             bAllowNonZeroExit ? "true" : "false"
@@ -1913,7 +2328,8 @@ static xwork_status xwork__local_host_set_process_result(
             "\"stdout\":\"%s\",\"stderr\":\"%s\"%s,\"exit_code\":%d,"
             "\"truncated\":%s,\"stdout_truncated\":%s,\"stderr_truncated\":%s,"
             "\"env_count\":%zu,\"stdin_bytes\":%zu,"
-            "\"timeout_ms\":%zu,\"timed_out\":%s,\"timeout_stop\":\"%s\","
+            "\"timeout_ms\":%zu,\"timed_out\":%s,\"cancelled\":%s,"
+            "\"timeout_stop\":\"%s\","
             "\"stop_reason\":\"%s\",\"allow_nonzero_exit\":%s,"
             "\"error_kind\":\"%s\",\"error\":\"%s\"}",
             sEscapedCommand,
@@ -1934,6 +2350,7 @@ static xwork_status xwork__local_host_set_process_result(
             iStdinBytes,
             iTimeoutMs,
             bTimedOut ? "true" : "false",
+            bCancelled ? "true" : "false",
             sTimeoutStopName,
             sStopReasonName,
             bAllowNonZeroExit ? "true" : "false",
@@ -2320,7 +2737,9 @@ cleanup:
 static xwork_status xwork__local_host_set_terminal_list_result(
     xwork_local_host *pHost,
     size_t iSessionCount,
+    size_t iTotalSessionCount,
     const char *sSessionsJson,
+    const char *sExtraJsonFields,
     bool bOk,
     const char *sVisibleSummary,
     const char *sErrorKind,
@@ -2339,8 +2758,10 @@ static xwork_status xwork__local_host_set_terminal_list_result(
 
     if ( bOk ) {
         sResultText = xwork__dup_printf(
-            "{\"ok\":true,\"session_count\":%zu,\"sessions\":%s}",
+            "{\"ok\":true,\"session_count\":%zu,\"total_session_count\":%zu,%s\"sessions\":%s}",
             iSessionCount,
+            iTotalSessionCount,
+            sExtraJsonFields ? sExtraJsonFields : "",
             sSessionsJson ? sSessionsJson : "[]"
         );
     } else {
@@ -2355,9 +2776,11 @@ static xwork_status xwork__local_host_set_terminal_list_result(
         );
         if ( iStatus != XWORK_OK ) goto cleanup;
         sResultText = xwork__dup_printf(
-            "{\"ok\":false,\"session_count\":%zu,\"sessions\":%s,"
+            "{\"ok\":false,\"session_count\":%zu,\"total_session_count\":%zu,%s\"sessions\":%s,"
             "\"error_kind\":\"%s\",\"error\":\"%s\"}",
             iSessionCount,
+            iTotalSessionCount,
+            sExtraJsonFields ? sExtraJsonFields : "",
             sSessionsJson ? sSessionsJson : "[]",
             sEscapedErrorKind,
             sEscapedErrorMessage
@@ -2592,6 +3015,207 @@ cleanup:
     return iStatus;
 }
 
+static xwork_status xwork__local_host_set_filesystem_stat_result(
+    xwork_local_host *pHost,
+    const char *sPath,
+    const char *sResolvedPath,
+    const char *sType,
+    size_t iSizeBytes,
+    long long iMtimeUnix,
+    bool bOk,
+    const char *sVisibleSummary,
+    const char *sErrorKind,
+    const char *sErrorMessage,
+    xwork_tool_result *pResult
+)
+{
+    char *sEscapedPath = NULL;
+    char *sEscapedResolvedPath = NULL;
+    char *sEscapedType = NULL;
+    char *sEscapedErrorKind = NULL;
+    char *sEscapedErrorMessage = NULL;
+    char *sOutputText = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    iStatus = xwork__local_host_json_escape(sPath ? sPath : "", &sEscapedPath);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(
+        sResolvedPath ? sResolvedPath : "",
+        &sEscapedResolvedPath
+    );
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(sType ? sType : "other", &sEscapedType);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+
+    if ( bOk ) {
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":true,\"path\":\"%s\",\"resolved_path\":\"%s\","
+            "\"exists\":true,\"type\":\"%s\",\"size_bytes\":%llu,"
+            "\"mtime_unix\":%lld}",
+            sEscapedPath,
+            sEscapedResolvedPath,
+            sEscapedType,
+            (unsigned long long)iSizeBytes,
+            iMtimeUnix
+        );
+    } else {
+        iStatus = xwork__local_host_json_escape(
+            sErrorKind ? sErrorKind : "external_failure",
+            &sEscapedErrorKind
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        iStatus = xwork__local_host_json_escape(
+            sErrorMessage ? sErrorMessage : "filesystem.stat failed",
+            &sEscapedErrorMessage
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":false,\"path\":\"%s\",\"resolved_path\":\"%s\","
+            "\"exists\":false,\"type\":\"%s\",\"size_bytes\":0,"
+            "\"mtime_unix\":0,\"error_kind\":\"%s\",\"error\":\"%s\"}",
+            sEscapedPath,
+            sEscapedResolvedPath,
+            sEscapedType,
+            sEscapedErrorKind,
+            sEscapedErrorMessage
+        );
+    }
+    if ( !sOutputText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_set_result(
+        pHost,
+        sOutputText,
+        sVisibleSummary ? sVisibleSummary : (bOk ? "filesystem.stat ok" : "filesystem.stat failed"),
+        pResult
+    );
+
+cleanup:
+    free(sEscapedPath);
+    free(sEscapedResolvedPath);
+    free(sEscapedType);
+    free(sEscapedErrorKind);
+    free(sEscapedErrorMessage);
+    free(sOutputText);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_set_filesystem_scan_result(
+    xwork_local_host *pHost,
+    const char *sOperationName,
+    const char *sPath,
+    const char *sResolvedPath,
+    const char *sPattern,
+    bool bRecursive,
+    bool bIncludeHidden,
+    size_t iLimit,
+    const xwork__local_host_scan_context *pScan,
+    bool bOk,
+    const char *sVisibleSummary,
+    const char *sErrorKind,
+    const char *sErrorMessage,
+    xwork_tool_result *pResult
+)
+{
+    char *sEscapedPath = NULL;
+    char *sEscapedResolvedPath = NULL;
+    char *sEscapedPattern = NULL;
+    char *sEscapedErrorKind = NULL;
+    char *sEscapedErrorMessage = NULL;
+    char *sOutputText = NULL;
+    const char *sEntriesJson;
+    xwork_status iStatus;
+
+    if ( !pHost || !sOperationName || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    (void)sOperationName;
+
+    iStatus = xwork__local_host_json_escape(sPath ? sPath : "", &sEscapedPath);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(
+        sResolvedPath ? sResolvedPath : "",
+        &sEscapedResolvedPath
+    );
+    if ( iStatus != XWORK_OK ) goto cleanup;
+    iStatus = xwork__local_host_json_escape(sPattern ? sPattern : "", &sEscapedPattern);
+    if ( iStatus != XWORK_OK ) goto cleanup;
+
+    sEntriesJson = (pScan && pScan->sEntriesJson) ? pScan->sEntriesJson : "";
+    if ( bOk ) {
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":true,\"path\":\"%s\",\"resolved_path\":\"%s\","
+            "\"pattern\":\"%s\",\"recursive\":%s,\"include_hidden\":%s,"
+            "\"limit\":%llu,\"entry_count\":%llu,\"total_count\":%llu,"
+            "\"has_more\":%s,\"entries\":[%s]}",
+            sEscapedPath,
+            sEscapedResolvedPath,
+            sEscapedPattern,
+            bRecursive ? "true" : "false",
+            bIncludeHidden ? "true" : "false",
+            (unsigned long long)iLimit,
+            (unsigned long long)(pScan ? pScan->iItemCount : 0u),
+            (unsigned long long)(pScan ? pScan->iTotalCount : 0u),
+            (pScan && pScan->bHasMore) ? "true" : "false",
+            sEntriesJson
+        );
+    } else {
+        iStatus = xwork__local_host_json_escape(
+            sErrorKind ? sErrorKind : "external_failure",
+            &sEscapedErrorKind
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        iStatus = xwork__local_host_json_escape(
+            sErrorMessage ? sErrorMessage : "filesystem scan failed",
+            &sEscapedErrorMessage
+        );
+        if ( iStatus != XWORK_OK ) goto cleanup;
+        sOutputText = xwork__dup_printf(
+            "{\"ok\":false,\"path\":\"%s\",\"resolved_path\":\"%s\","
+            "\"pattern\":\"%s\",\"recursive\":%s,\"include_hidden\":%s,"
+            "\"limit\":%llu,\"entry_count\":0,\"total_count\":0,"
+            "\"has_more\":false,\"entries\":[],\"error_kind\":\"%s\","
+            "\"error\":\"%s\"}",
+            sEscapedPath,
+            sEscapedResolvedPath,
+            sEscapedPattern,
+            bRecursive ? "true" : "false",
+            bIncludeHidden ? "true" : "false",
+            (unsigned long long)iLimit,
+            sEscapedErrorKind,
+            sEscapedErrorMessage
+        );
+    }
+    if ( !sOutputText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_set_result(
+        pHost,
+        sOutputText,
+        sVisibleSummary
+            ? sVisibleSummary
+            : (bOk ? "filesystem scan ok" : "filesystem scan failed"),
+        pResult
+    );
+
+cleanup:
+    free(sEscapedPath);
+    free(sEscapedResolvedPath);
+    free(sEscapedPattern);
+    free(sEscapedErrorKind);
+    free(sEscapedErrorMessage);
+    free(sOutputText);
+    return iStatus;
+}
+
 static xwork_status xwork__local_host_invoke_filesystem(
     xwork_local_host *pHost,
     const char *sRequestJson,
@@ -2712,6 +3336,330 @@ cleanup:
     }
     free(sResolvedPath);
     free(sText);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_scan_directory(
+    const char *sResolvedPath,
+    bool bRecursive,
+    xwork__local_host_scan_context *pScan
+)
+{
+    int iScanned;
+
+    if ( !sResolvedPath || !sResolvedPath[0] || !pScan ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    pScan->iStatus = XWORK_OK;
+    iScanned = xrtDirScan(
+        (str)sResolvedPath,
+        bRecursive ? TRUE : FALSE,
+        (ptr)xwork__local_host_scan_callback,
+        pScan
+    );
+    (void)iScanned;
+    return pScan->iStatus;
+}
+
+static xwork_status xwork__local_host_invoke_filesystem_stat(
+    xwork_local_host *pHost,
+    const char *sRequestJson,
+    xwork_tool_result *pResult
+)
+{
+    xvalue tRequest = NULL;
+    const char *sPath;
+    const char *sType = "other";
+    char *sResolvedPath = NULL;
+    size_t iSizeBytes = 0u;
+    long long iMtimeUnix = 0;
+    const char *sFailureKind = NULL;
+    const char *sFailureSummary = NULL;
+    const char *sFailureMessage = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pHost->bEnableFilesystemReadText ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+
+    iStatus = xwork__local_host_parse_request_json(sRequestJson, &tRequest);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    sPath = xwork__local_host_request_get_text(tRequest, "path");
+    if ( !sPath || !sPath[0] ) {
+        iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.stat invalid request";
+        sFailureMessage = "path is required";
+        goto cleanup;
+    }
+
+    sResolvedPath = xwork__local_host_resolve_path(pHost, sPath);
+    if ( !sResolvedPath ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_stat_path(
+        sResolvedPath,
+        &sType,
+        &iSizeBytes,
+        &iMtimeUnix
+    );
+    if ( iStatus != XWORK_OK ) {
+        if ( iStatus == XWORK_ERROR_NOT_FOUND ) {
+            sFailureKind = "not_found";
+            sFailureSummary = "filesystem.stat not found";
+            sFailureMessage = "path does not exist";
+        } else {
+            sFailureKind = "stat_failed";
+            sFailureSummary = "filesystem.stat failed";
+            sFailureMessage = "failed to stat path";
+        }
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_set_filesystem_stat_result(
+        pHost,
+        sPath,
+        sResolvedPath,
+        sType,
+        iSizeBytes,
+        iMtimeUnix,
+        true,
+        "filesystem.stat ok",
+        NULL,
+        NULL,
+        pResult
+    );
+
+cleanup:
+    if ( iStatus != XWORK_OK && sFailureKind ) {
+        (void)xwork__local_host_set_filesystem_stat_result(
+            pHost,
+            sPath ? sPath : "",
+            sResolvedPath ? sResolvedPath : sPath,
+            "other",
+            0u,
+            0,
+            false,
+            sFailureSummary,
+            sFailureKind,
+            sFailureMessage,
+            pResult
+        );
+    }
+    if ( tRequest ) {
+        xvoUnref(tRequest);
+    }
+    free(sResolvedPath);
+    return iStatus;
+}
+
+static xwork_status xwork__local_host_invoke_filesystem_scan(
+    xwork_local_host *pHost,
+    const char *sRequestJson,
+    const char *sOperationName,
+    bool bDefaultRecursive,
+    bool bRequirePattern,
+    xwork_tool_result *pResult
+)
+{
+    xvalue tRequest = NULL;
+    xwork__local_host_scan_context tScan;
+    const char *sPath = ".";
+    const char *sPattern = "*";
+    const char *sType = "other";
+    char *sResolvedPath = NULL;
+    size_t iSizeBytes = 0u;
+    long long iMtimeUnix = 0;
+    size_t iLimit = 0u;
+    bool bRecursive = bDefaultRecursive;
+    bool bIncludeHidden = false;
+    bool bHasRecursive = false;
+    bool bHasIncludeHidden = false;
+    bool bHasLimit = false;
+    const char *sFailureKind = NULL;
+    const char *sFailureSummary = NULL;
+    const char *sFailureMessage = NULL;
+    xwork_status iStatus;
+
+    if ( !pHost || !sOperationName || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pHost->bEnableFilesystemReadText ) {
+        return XWORK_ERROR_UNSUPPORTED;
+    }
+
+    memset(&tScan, 0, sizeof(tScan));
+    tScan.iStatus = XWORK_OK;
+
+    iStatus = xwork__local_host_parse_request_json(sRequestJson, &tRequest);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    if ( xwork__local_host_request_get_text(tRequest, "path") ) {
+        sPath = xwork__local_host_request_get_text(tRequest, "path");
+    }
+    if ( !sPath || !sPath[0] ) {
+        iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem scan invalid request";
+        sFailureMessage = "path must not be empty";
+        goto cleanup;
+    }
+
+    if ( xwork__local_host_request_get_text(tRequest, "pattern") ) {
+        sPattern = xwork__local_host_request_get_text(tRequest, "pattern");
+    } else if ( xwork__local_host_request_get_text(tRequest, "glob") ) {
+        sPattern = xwork__local_host_request_get_text(tRequest, "glob");
+    }
+    if ( bRequirePattern && (!sPattern || !sPattern[0]) ) {
+        iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem.glob invalid request";
+        sFailureMessage = "pattern is required";
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_request_get_bool(
+        tRequest,
+        "recursive",
+        &bHasRecursive,
+        &bRecursive
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem scan invalid request";
+        sFailureMessage = "recursive must be boolean";
+        goto cleanup;
+    }
+    iStatus = xwork__local_host_request_get_bool(
+        tRequest,
+        "include_hidden",
+        &bHasIncludeHidden,
+        &bIncludeHidden
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem scan invalid request";
+        sFailureMessage = "include_hidden must be boolean";
+        goto cleanup;
+    }
+    (void)bHasRecursive;
+    (void)bHasIncludeHidden;
+
+    iStatus = xwork__local_host_request_get_positive_size_strict(
+        tRequest,
+        "limit",
+        &bHasLimit,
+        &iLimit
+    );
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "invalid_request";
+        sFailureSummary = "filesystem scan invalid request";
+        sFailureMessage = "limit must be a positive integer";
+        goto cleanup;
+    }
+
+    sResolvedPath = xwork__local_host_resolve_path(pHost, sPath);
+    if ( !sResolvedPath ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_stat_path(
+        sResolvedPath,
+        &sType,
+        &iSizeBytes,
+        &iMtimeUnix
+    );
+    (void)iSizeBytes;
+    (void)iMtimeUnix;
+    if ( iStatus != XWORK_OK ) {
+        if ( iStatus == XWORK_ERROR_NOT_FOUND ) {
+            sFailureKind = "not_found";
+            sFailureSummary = "filesystem scan not found";
+            sFailureMessage = "path does not exist";
+        } else {
+            sFailureKind = "stat_failed";
+            sFailureSummary = "filesystem scan failed";
+            sFailureMessage = "failed to stat path";
+        }
+        goto cleanup;
+    }
+    if ( strcmp(sType, "directory") != 0 ) {
+        iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+        sFailureKind = "not_directory";
+        sFailureSummary = "filesystem scan invalid request";
+        sFailureMessage = "path must be a directory";
+        goto cleanup;
+    }
+
+    tScan.sRootPath = sResolvedPath;
+    tScan.sPattern = sPattern;
+    tScan.bUsePattern = bRequirePattern;
+    tScan.bIncludeHidden = bIncludeHidden;
+    tScan.iLimit = bHasLimit ? iLimit : 0u;
+
+    iStatus = xwork__local_host_scan_directory(sResolvedPath, bRecursive, &tScan);
+    if ( iStatus != XWORK_OK ) {
+        sFailureKind = "scan_failed";
+        sFailureSummary = "filesystem scan failed";
+        sFailureMessage = "failed to scan directory";
+        goto cleanup;
+    }
+
+    iStatus = xwork__local_host_set_filesystem_scan_result(
+        pHost,
+        sOperationName,
+        sPath,
+        sResolvedPath,
+        bRequirePattern ? sPattern : "",
+        bRecursive,
+        bIncludeHidden,
+        tScan.iLimit,
+        &tScan,
+        true,
+        strcmp(sOperationName, XWORK_HOST_FILESYSTEM_GLOB) == 0
+            ? "filesystem.glob ok"
+            : "filesystem.list ok",
+        NULL,
+        NULL,
+        pResult
+    );
+
+cleanup:
+    if ( iStatus != XWORK_OK && sFailureKind ) {
+        (void)xwork__local_host_set_filesystem_scan_result(
+            pHost,
+            sOperationName,
+            sPath ? sPath : "",
+            sResolvedPath ? sResolvedPath : sPath,
+            bRequirePattern ? sPattern : "",
+            bRecursive,
+            bIncludeHidden,
+            bHasLimit ? iLimit : 0u,
+            NULL,
+            false,
+            sFailureSummary,
+            sFailureKind,
+            sFailureMessage,
+            pResult
+        );
+    }
+    if ( tRequest ) {
+        xvoUnref(tRequest);
+    }
+    free(tScan.sEntriesJson);
+    free(sResolvedPath);
     return iStatus;
 }
 
@@ -2878,6 +3826,7 @@ cleanup:
 static xwork_status xwork__local_host_invoke_process(
     xwork_local_host *pHost,
     const char *sRequestJson,
+    const xwork_host_invoke_context *pContext,
     xwork_tool_result *pResult
 )
 {
@@ -2908,6 +3857,7 @@ static xwork_status xwork__local_host_invoke_process(
     bool bUseTerminal = false;
     bool bHasTimeoutMs = false;
     bool bTimedOut = false;
+    bool bCancelled = false;
     bool bTruncated = false;
     bool bHasMergeStderr = false;
     bool bMergeStderr = true;
@@ -3165,6 +4115,15 @@ static xwork_status xwork__local_host_invoke_process(
         }
     }
 
+    if ( xwork_host_invoke_context_should_cancel(pContext, "before_process_spawn") ) {
+        iStatus = XWORK_ERROR_CANCELLED;
+        bCancelled = true;
+        sFailureKind = "cancelled";
+        sFailureSummary = "process.exec cancelled";
+        sFailureMessage = "process execution was cancelled before start";
+        goto cleanup;
+    }
+
     xwork__local_host_process_capture_init(&tStdoutCapture, iCaptureLimit);
     xwork__local_host_process_capture_init(&tStderrCapture, iCaptureLimit);
     tCaptureSet.pStdoutCapture = &tStdoutCapture;
@@ -3230,12 +4189,23 @@ static xwork_status xwork__local_host_invoke_process(
         }
     }
 
-    if ( bHasTimeoutMs ) {
-        iWaitResult = xrtProcessWaitTimeout(pProcess, (uint32)iTimeoutMs);
-    } else {
-        iWaitResult = xrtProcessWait(pProcess) ? XRT_WAIT_OK : XRT_WAIT_ERROR;
-    }
-    if ( iWaitResult == XRT_WAIT_TIMEOUT ) {
+    iWaitResult = xwork__local_host_process_wait_cancellable(
+        pProcess,
+        bHasTimeoutMs,
+        iTimeoutMs,
+        pContext,
+        &bCancelled
+    );
+    if ( bCancelled ) {
+        iStatus = XWORK_ERROR_CANCELLED;
+        sFailureKind = "cancelled";
+        sFailureSummary = "process.exec cancelled";
+        sFailureMessage = "process execution was cancelled";
+        iObservedStopReason = xwork__local_host_process_stop_best_effort(
+            pProcess,
+            XPROC_STOP_INTERRUPT
+        );
+    } else if ( iWaitResult == XRT_WAIT_TIMEOUT ) {
         iStatus = XWORK_ERROR_EXTERNAL_FAILURE;
         bTimedOut = true;
         sFailureKind = "timeout";
@@ -3349,6 +4319,7 @@ static xwork_status xwork__local_host_invoke_process(
         iStdinBytes,
         bHasTimeoutMs ? iTimeoutMs : 0u,
         bTimedOut,
+        bCancelled,
         iTimeoutStopReason,
         iObservedStopReason,
         bHasAllowNonZeroExit && bAllowNonZeroExit,
@@ -3437,6 +4408,7 @@ cleanup:
             iStdinBytes,
             bHasTimeoutMs ? iTimeoutMs : 0u,
             bTimedOut,
+            bCancelled,
             iTimeoutStopReason,
             iObservedStopReason,
             bHasAllowNonZeroExit && bAllowNonZeroExit,
@@ -3902,8 +4874,26 @@ static xwork_status xwork__local_host_invoke_list_terminals(
 {
     xvalue tRequest = NULL;
     xwork__local_host_terminal_session *pSession;
+    xwork__local_host_terminal_session **ppMatchedSessions = NULL;
+    char *sEscapedSessionNameFilter = NULL;
+    char *sAfterSessionIndexText = NULL;
+    char *sLimitText = NULL;
+    char *sExtraJsonFields = NULL;
     char *sSessionsJson = NULL;
+    const char *sSessionNameFilter = NULL;
+    size_t iTotalSessionCount = 0u;
+    size_t iMatchedSessionCount = 0u;
     size_t iSessionCount = 0u;
+    size_t iAfterSessionIndex = 0u;
+    size_t iNextAfterSessionIndex = 0u;
+    size_t iLimit = 0u;
+    bool bHasRunningFilter = false;
+    bool bRunningFilter = false;
+    bool bHasDoneFilter = false;
+    bool bDoneFilter = false;
+    bool bHasAfterSessionIndex = false;
+    bool bHasLimit = false;
+    bool bHasMoreSessions = false;
     xwork_status iStatus = XWORK_OK;
 
     if ( !pHost || !pResult ) {
@@ -3915,6 +4905,99 @@ static xwork_status xwork__local_host_invoke_list_terminals(
             return iStatus;
         }
     }
+    if ( tRequest ) {
+        sSessionNameFilter = xwork__local_host_request_get_text(
+            tRequest,
+            "session_name"
+        );
+        if ( sSessionNameFilter && !sSessionNameFilter[0] ) {
+            iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+            goto cleanup;
+        }
+        iStatus = xwork__local_host_request_get_bool(
+            tRequest,
+            "running",
+            &bHasRunningFilter,
+            &bRunningFilter
+        );
+        if ( iStatus != XWORK_OK ) {
+            goto cleanup;
+        }
+        iStatus = xwork__local_host_request_get_bool(
+            tRequest,
+            "done",
+            &bHasDoneFilter,
+            &bDoneFilter
+        );
+        if ( iStatus != XWORK_OK ) {
+            goto cleanup;
+        }
+        iStatus = xwork__local_host_request_get_positive_size_strict(
+            tRequest,
+            "after_session_index",
+            &bHasAfterSessionIndex,
+            &iAfterSessionIndex
+        );
+        if ( iStatus != XWORK_OK ) {
+            goto cleanup;
+        }
+        iStatus = xwork__local_host_request_get_positive_size_strict(
+            tRequest,
+            "limit",
+            &bHasLimit,
+            &iLimit
+        );
+        if ( iStatus != XWORK_OK ) {
+            goto cleanup;
+        }
+        if ( bHasRunningFilter && bHasDoneFilter &&
+             bRunningFilter == bDoneFilter ) {
+            iStatus = XWORK_ERROR_INVALID_ARGUMENT;
+            goto cleanup;
+        }
+    }
+
+    iTotalSessionCount = xwork__local_host_terminal_session_count(pHost);
+    if ( sSessionNameFilter ) {
+        iStatus = xwork__local_host_json_escape(
+            sSessionNameFilter,
+            &sEscapedSessionNameFilter
+        );
+        if ( iStatus != XWORK_OK ) {
+            goto cleanup;
+        }
+    }
+    sLimitText = bHasLimit
+        ? xwork__dup_printf("%zu", iLimit)
+        : xwork__dup_cstr("null");
+    if ( !sLimitText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    sAfterSessionIndexText = bHasAfterSessionIndex
+        ? xwork__dup_printf("%zu", iAfterSessionIndex)
+        : xwork__dup_cstr("null");
+    if ( !sAfterSessionIndexText ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
+    sExtraJsonFields = xwork__dup_printf(
+        "\"filters\":{\"session_name\":%s%s%s,\"running\":%s,\"done\":%s,"
+        "\"after_session_index\":%s,\"limit\":%s},"
+        "\"sort\":\"session_index_asc\",\"has_more_sessions\":false,"
+        "\"next_after_session_index\":null,",
+        sSessionNameFilter ? "\"" : "null",
+        sSessionNameFilter ? (sEscapedSessionNameFilter ? sEscapedSessionNameFilter : "") : "",
+        sSessionNameFilter ? "\"" : "",
+        bHasRunningFilter ? (bRunningFilter ? "true" : "false") : "null",
+        bHasDoneFilter ? (bDoneFilter ? "true" : "false") : "null",
+        sAfterSessionIndexText,
+        sLimitText
+    );
+    if ( !sExtraJsonFields ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto cleanup;
+    }
 
     sSessionsJson = xwork__dup_cstr("[");
     if ( !sSessionsJson ) {
@@ -3922,18 +5005,78 @@ static xwork_status xwork__local_host_invoke_list_terminals(
         goto cleanup;
     }
 
+    if ( iTotalSessionCount > 0u ) {
+        ppMatchedSessions = (xwork__local_host_terminal_session **)calloc(
+            iTotalSessionCount,
+            sizeof(xwork__local_host_terminal_session *)
+        );
+        if ( !ppMatchedSessions ) {
+            iStatus = XWORK_ERROR_NO_MEMORY;
+            goto cleanup;
+        }
+    }
+
     for ( pSession = (xwork__local_host_terminal_session *)pHost->pTerminalSessions;
           pSession;
           pSession = pSession->pNext ) {
         xprocessexitinfo tExitInfo;
+        bool bRunning = false;
+
+        memset(&tExitInfo, 0, sizeof(tExitInfo));
+        if ( pSession->pProcess ) {
+            bRunning = xrtProcessIsRunning(pSession->pProcess);
+            (void)xrtProcessGetExitInfo(pSession->pProcess, &tExitInfo);
+        }
+        if ( sSessionNameFilter &&
+             strcmp(
+                 pSession->sSessionName ? pSession->sSessionName : "",
+                 sSessionNameFilter
+             ) != 0 ) {
+            continue;
+        }
+        if ( bHasRunningFilter && bRunning != bRunningFilter ) {
+            continue;
+        }
+        if ( bHasDoneFilter && (!bRunning) != bDoneFilter ) {
+            continue;
+        }
+        ppMatchedSessions[iMatchedSessionCount++] = pSession;
+    }
+
+    if ( iMatchedSessionCount > 1u ) {
+        qsort(
+            ppMatchedSessions,
+            iMatchedSessionCount,
+            sizeof(xwork__local_host_terminal_session *),
+            xwork__local_host_compare_terminal_session_index
+        );
+    }
+
+    for ( iMatchedSessionCount = 0u;
+          ppMatchedSessions && iMatchedSessionCount < iTotalSessionCount &&
+              ppMatchedSessions[iMatchedSessionCount];
+          ++iMatchedSessionCount ) {
         char *sEscapedSessionId = NULL;
         char *sEscapedSessionName = NULL;
         char *sEscapedCommand = NULL;
         char *sEscapedCwd = NULL;
         char *sEntryJson = NULL;
         char *sNextJson = NULL;
+        xprocessexitinfo tExitInfo;
         bool bRunning = false;
 
+        pSession = ppMatchedSessions[iMatchedSessionCount];
+        if ( !pSession ) {
+            break;
+        }
+        if ( bHasAfterSessionIndex &&
+             pSession->iSessionIndex <= iAfterSessionIndex ) {
+            continue;
+        }
+        if ( bHasLimit && iSessionCount >= iLimit ) {
+            bHasMoreSessions = true;
+            break;
+        }
         memset(&tExitInfo, 0, sizeof(tExitInfo));
         if ( pSession->pProcess ) {
             bRunning = xrtProcessIsRunning(pSession->pProcess);
@@ -4004,6 +5147,7 @@ static xwork_status xwork__local_host_invoke_list_terminals(
         free(sSessionsJson);
         sSessionsJson = sNextJson;
         sNextJson = NULL;
+        iNextAfterSessionIndex = pSession->iSessionIndex;
         ++iSessionCount;
 
 session_cleanup:
@@ -4019,6 +5163,49 @@ session_cleanup:
     }
 
     {
+        char *sUpdatedExtraJsonFields = NULL;
+
+        if ( iSessionCount > 0u ) {
+            sUpdatedExtraJsonFields = xwork__dup_printf(
+                "\"filters\":{\"session_name\":%s%s%s,\"running\":%s,\"done\":%s,"
+                "\"after_session_index\":%s,\"limit\":%s},"
+                "\"sort\":\"session_index_asc\",\"has_more_sessions\":%s,"
+                "\"next_after_session_index\":%zu,",
+                sSessionNameFilter ? "\"" : "null",
+                sSessionNameFilter ? (sEscapedSessionNameFilter ? sEscapedSessionNameFilter : "") : "",
+                sSessionNameFilter ? "\"" : "",
+                bHasRunningFilter ? (bRunningFilter ? "true" : "false") : "null",
+                bHasDoneFilter ? (bDoneFilter ? "true" : "false") : "null",
+                sAfterSessionIndexText,
+                sLimitText,
+                bHasMoreSessions ? "true" : "false",
+                iNextAfterSessionIndex
+            );
+        } else {
+            sUpdatedExtraJsonFields = xwork__dup_printf(
+                "\"filters\":{\"session_name\":%s%s%s,\"running\":%s,\"done\":%s,"
+                "\"after_session_index\":%s,\"limit\":%s},"
+                "\"sort\":\"session_index_asc\",\"has_more_sessions\":%s,"
+                "\"next_after_session_index\":null,",
+                sSessionNameFilter ? "\"" : "null",
+                sSessionNameFilter ? (sEscapedSessionNameFilter ? sEscapedSessionNameFilter : "") : "",
+                sSessionNameFilter ? "\"" : "",
+                bHasRunningFilter ? (bRunningFilter ? "true" : "false") : "null",
+                bHasDoneFilter ? (bDoneFilter ? "true" : "false") : "null",
+                sAfterSessionIndexText,
+                sLimitText,
+                bHasMoreSessions ? "true" : "false"
+            );
+        }
+        if ( !sUpdatedExtraJsonFields ) {
+            iStatus = XWORK_ERROR_NO_MEMORY;
+            goto cleanup;
+        }
+        free(sExtraJsonFields);
+        sExtraJsonFields = sUpdatedExtraJsonFields;
+    }
+
+    {
         char *sClosedJson = xwork__dup_printf("%s]", sSessionsJson);
         if ( !sClosedJson ) {
             iStatus = XWORK_ERROR_NO_MEMORY;
@@ -4031,7 +5218,9 @@ session_cleanup:
     iStatus = xwork__local_host_set_terminal_list_result(
         pHost,
         iSessionCount,
+        iTotalSessionCount,
         sSessionsJson,
+        sExtraJsonFields,
         true,
         "process.list_terminals ok",
         NULL,
@@ -4043,19 +5232,32 @@ cleanup:
     if ( iStatus != XWORK_OK ) {
         (void)xwork__local_host_set_terminal_list_result(
             pHost,
-            xwork__local_host_terminal_session_count(pHost),
+            0u,
+            iTotalSessionCount,
             "[]",
+            sExtraJsonFields,
             false,
-            "process.list_terminals failed",
-            "external_failure",
-            "failed to build terminal session list",
+            (iStatus == XWORK_ERROR_INVALID_ARGUMENT)
+                ? "process.list_terminals invalid request"
+                : "process.list_terminals failed",
+            (iStatus == XWORK_ERROR_INVALID_ARGUMENT)
+                ? "invalid_request"
+                : "external_failure",
+            (iStatus == XWORK_ERROR_INVALID_ARGUMENT)
+                ? "session_name must not be empty, running/done must be boolean, limit must be a positive integer, and running/done filters must not conflict"
+                : "failed to build terminal session list",
             pResult
         );
     }
     if ( tRequest ) {
         xvoUnref(tRequest);
     }
+    free(sEscapedSessionNameFilter);
+    free(sAfterSessionIndexText);
+    free(sLimitText);
+    free(sExtraJsonFields);
     free(sSessionsJson);
+    free(ppMatchedSessions);
     return iStatus;
 }
 
@@ -5051,12 +6253,64 @@ static xwork_status xwork__local_host_invoke_filesystem_cb(
             pResult
         );
     }
+    if ( strcmp(sOperationId, XWORK_HOST_FILESYSTEM_LIST) == 0 ) {
+        return xwork__local_host_invoke_filesystem_scan(
+            (xwork_local_host *)pUserData,
+            sRequestJson,
+            XWORK_HOST_FILESYSTEM_LIST,
+            false,
+            false,
+            pResult
+        );
+    }
+    if ( strcmp(sOperationId, XWORK_HOST_FILESYSTEM_STAT) == 0 ) {
+        return xwork__local_host_invoke_filesystem_stat(
+            (xwork_local_host *)pUserData,
+            sRequestJson,
+            pResult
+        );
+    }
+    if ( strcmp(sOperationId, XWORK_HOST_FILESYSTEM_GLOB) == 0 ) {
+        return xwork__local_host_invoke_filesystem_scan(
+            (xwork_local_host *)pUserData,
+            sRequestJson,
+            XWORK_HOST_FILESYSTEM_GLOB,
+            true,
+            true,
+            pResult
+        );
+    }
     return XWORK_ERROR_UNSUPPORTED;
 }
+
+static xwork_status xwork__local_host_invoke_process_cb_ex(
+    const char *sOperationId,
+    const char *sRequestJson,
+    const xwork_host_invoke_context *pContext,
+    xwork_tool_result *pResult,
+    void *pUserData
+);
 
 static xwork_status xwork__local_host_invoke_process_cb(
     const char *sOperationId,
     const char *sRequestJson,
+    xwork_tool_result *pResult,
+    void *pUserData
+)
+{
+    return xwork__local_host_invoke_process_cb_ex(
+        sOperationId,
+        sRequestJson,
+        NULL,
+        pResult,
+        pUserData
+    );
+}
+
+static xwork_status xwork__local_host_invoke_process_cb_ex(
+    const char *sOperationId,
+    const char *sRequestJson,
+    const xwork_host_invoke_context *pContext,
     xwork_tool_result *pResult,
     void *pUserData
 )
@@ -5070,6 +6324,7 @@ static xwork_status xwork__local_host_invoke_process_cb(
         return xwork__local_host_invoke_process(
             pHost,
             sRequestJson,
+            pContext,
             pResult
         );
     }
@@ -5223,6 +6478,7 @@ xwork_status xwork_local_host_configure_services(
     }
     if ( pHost->bEnableProcessExec ) {
         pServices->tProcess.pfnInvoke = xwork__local_host_invoke_process_cb;
+        pServices->tProcess.pfnInvokeEx = xwork__local_host_invoke_process_cb_ex;
         pServices->tProcess.pUserData = pHost;
     }
     if ( pHost->bEnableVcsStatus ) {
@@ -5241,6 +6497,25 @@ xwork_status xwork_runtime_invoke_host_service(
     xwork_tool_result *pResult
 )
 {
+    return xwork_runtime_invoke_host_service_ex(
+        pRuntime,
+        eKind,
+        sOperationId,
+        sRequestJson,
+        NULL,
+        pResult
+    );
+}
+
+xwork_status xwork_runtime_invoke_host_service_ex(
+    const xwork_runtime *pRuntime,
+    xwork_host_service_kind eKind,
+    const char *sOperationId,
+    const char *sRequestJson,
+    const xwork_host_invoke_context *pContext,
+    xwork_tool_result *pResult
+)
+{
     const xwork_host_service *pService;
 
     if ( !pRuntime || !sOperationId || !sOperationId[0] || !pResult ) {
@@ -5248,10 +6523,19 @@ xwork_status xwork_runtime_invoke_host_service(
     }
 
     pService = xwork__runtime_get_host_service_slot(pRuntime, eKind);
-    if ( !pService || !pService->pfnInvoke ) {
+    if ( !pService || (!pService->pfnInvokeEx && !pService->pfnInvoke) ) {
         return XWORK_ERROR_UNSUPPORTED;
     }
 
     xwork_tool_result_init(pResult);
+    if ( pService->pfnInvokeEx ) {
+        return pService->pfnInvokeEx(
+            sOperationId,
+            sRequestJson,
+            pContext,
+            pResult,
+            pService->pUserData
+        );
+    }
     return pService->pfnInvoke(sOperationId, sRequestJson, pResult, pService->pUserData);
 }

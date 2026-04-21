@@ -152,6 +152,33 @@ bool xwork__run_state_is_terminal(xwork_run_state eState)
            eState == XWORK_RUN_FAILED;
 }
 
+xwork_status xwork__run_begin_execution(xwork_run *pRun)
+{
+    if ( !pRun || !pRun->bExecutionLockInitialized ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    xrtMutexLock(&pRun->tExecutionLock);
+    if ( pRun->bExecuting ) {
+        xrtMutexUnlock(&pRun->tExecutionLock);
+        return XWORK_ERROR_INVALID_STATE;
+    }
+    pRun->bExecuting = true;
+    xrtMutexUnlock(&pRun->tExecutionLock);
+    return XWORK_OK;
+}
+
+void xwork__run_end_execution(xwork_run *pRun)
+{
+    if ( !pRun || !pRun->bExecutionLockInitialized ) {
+        return;
+    }
+
+    xrtMutexLock(&pRun->tExecutionLock);
+    pRun->bExecuting = false;
+    xrtMutexUnlock(&pRun->tExecutionLock);
+}
+
 static void xwork__free_tool_record(xwork_tool_record *pTool)
 {
     if ( !pTool ) {
@@ -600,6 +627,207 @@ void xwork_run_summary_list_reset(xwork_run_summary_list *pList)
     }
 
     xwork_run_summary_list_init(pList);
+}
+
+void xwork_artifact_summary_init(xwork_artifact_summary *pSummary)
+{
+    if ( pSummary ) {
+        memset(pSummary, 0, sizeof(*pSummary));
+        pSummary->eKind = XWORK_ARTIFACT_OUTPUT;
+    }
+}
+
+void xwork_artifact_summary_reset(xwork_artifact_summary *pSummary)
+{
+    if ( !pSummary ) {
+        return;
+    }
+
+    xwork__free_cstr((char **)&pSummary->sArtifactId);
+    xwork__free_cstr((char **)&pSummary->sName);
+    xwork__free_cstr((char **)&pSummary->sMimeType);
+    xwork__free_cstr((char **)&pSummary->sStorageRef);
+    xwork__free_cstr((char **)&pSummary->sSummary);
+    xwork__free_cstr((char **)&pSummary->sOutputRole);
+    xwork__free_cstr((char **)&pSummary->sReportSubjectRef);
+    xwork_artifact_summary_init(pSummary);
+}
+
+void xwork_artifact_summary_list_init(xwork_artifact_summary_list *pList)
+{
+    if ( pList ) {
+        memset(pList, 0, sizeof(*pList));
+    }
+}
+
+void xwork_artifact_summary_list_reset(xwork_artifact_summary_list *pList)
+{
+    xwork_artifact_summary *pItems;
+    size_t i;
+
+    if ( !pList ) {
+        return;
+    }
+
+    pItems = (xwork_artifact_summary *)pList->pItems;
+    if ( pItems ) {
+        for ( i = 0u; i < pList->iCount; ++i ) {
+            xwork_artifact_summary_reset(&pItems[i]);
+        }
+        free(pItems);
+    }
+
+    xwork_artifact_summary_list_init(pList);
+}
+
+void xwork_artifact_summary_query_init(xwork_artifact_summary_query *pQuery)
+{
+    if ( pQuery ) {
+        memset(pQuery, 0, sizeof(*pQuery));
+    }
+}
+
+static bool xwork__artifact_summary_has_prefix(const char *sText, const char *sPrefix)
+{
+    size_t iPrefixLen;
+
+    if ( !sPrefix || !sPrefix[0] ) {
+        return true;
+    }
+    if ( !sText ) {
+        return false;
+    }
+    iPrefixLen = strlen(sPrefix);
+    return strncmp(sText, sPrefix, iPrefixLen) == 0;
+}
+
+static bool xwork__artifact_summary_matches_query(
+    const xwork_artifact_summary *pSummary,
+    const xwork_artifact_summary_query *pQuery
+)
+{
+    if ( !pSummary || !pQuery ) {
+        return true;
+    }
+    if ( pQuery->bHasKind && pSummary->eKind != pQuery->eKind ) {
+        return false;
+    }
+    if ( pQuery->bHasOutputClass && pSummary->eOutputClass != pQuery->eOutputClass ) {
+        return false;
+    }
+    if ( pQuery->sOutputRole && pQuery->sOutputRole[0] ) {
+        if ( !pSummary->sOutputRole || strcmp(pSummary->sOutputRole, pQuery->sOutputRole) != 0 ) {
+            return false;
+        }
+    }
+    if ( !xwork__artifact_summary_has_prefix(pSummary->sOutputRole, pQuery->sOutputRolePrefix) ) {
+        return false;
+    }
+    if ( pQuery->bHasReportClass && pSummary->eReportClass != pQuery->eReportClass ) {
+        return false;
+    }
+    if ( pQuery->sReportSubjectRef && pQuery->sReportSubjectRef[0] ) {
+        if ( !pSummary->sReportSubjectRef ||
+             strcmp(pSummary->sReportSubjectRef, pQuery->sReportSubjectRef) != 0 ) {
+            return false;
+        }
+    }
+    if ( !xwork__artifact_summary_has_prefix(
+             pSummary->sReportSubjectRef,
+             pQuery->sReportSubjectRefPrefix
+         ) ) {
+        return false;
+    }
+    if ( pQuery->sArtifactName && pQuery->sArtifactName[0] ) {
+        if ( !pSummary->sName || strcmp(pSummary->sName, pQuery->sArtifactName) != 0 ) {
+            return false;
+        }
+    }
+    if ( !xwork__artifact_summary_has_prefix(pSummary->sName, pQuery->sNamePrefix) ) {
+        return false;
+    }
+    if ( pQuery->sMimeType && pQuery->sMimeType[0] ) {
+        if ( !pSummary->sMimeType || strcmp(pSummary->sMimeType, pQuery->sMimeType) != 0 ) {
+            return false;
+        }
+    }
+    if ( !xwork__artifact_summary_has_prefix(pSummary->sMimeType, pQuery->sMimeTypePrefix) ) {
+        return false;
+    }
+    if ( pQuery->sStorageRef && pQuery->sStorageRef[0] ) {
+        if ( !pSummary->sStorageRef || strcmp(pSummary->sStorageRef, pQuery->sStorageRef) != 0 ) {
+            return false;
+        }
+    }
+    if ( !xwork__artifact_summary_has_prefix(pSummary->sStorageRef, pQuery->sStorageRefPrefix) ) {
+        return false;
+    }
+    if ( pQuery->bRequireExitCode && !pSummary->bHasExitCode ) {
+        return false;
+    }
+    if ( pQuery->bHasExitCodeValue ) {
+        if ( !pSummary->bHasExitCode || pSummary->iExitCode != pQuery->iExitCode ) {
+            return false;
+        }
+    }
+    if ( pQuery->bHasAfterSequence && pSummary->iSequence <= pQuery->iAfterSequence ) {
+        return false;
+    }
+    if ( pQuery->bHasMinSequence && pSummary->iSequence < pQuery->iMinSequence ) {
+        return false;
+    }
+    if ( pQuery->bHasMaxSequence && pSummary->iSequence > pQuery->iMaxSequence ) {
+        return false;
+    }
+    return true;
+}
+
+static xwork_status xwork__artifact_summary_copy(
+    xwork_artifact_summary *pDst,
+    const xwork_artifact_summary *pSrc
+)
+{
+    xwork_status iStatus;
+
+    if ( !pDst || !pSrc ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    xwork_artifact_summary_reset(pDst);
+    iStatus = xwork__replace_cstr((char **)&pDst->sArtifactId, pSrc->sArtifactId);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__replace_cstr((char **)&pDst->sName, pSrc->sName);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__replace_cstr((char **)&pDst->sMimeType, pSrc->sMimeType);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__replace_cstr((char **)&pDst->sStorageRef, pSrc->sStorageRef);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__replace_cstr((char **)&pDst->sSummary, pSrc->sSummary);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__replace_cstr((char **)&pDst->sOutputRole, pSrc->sOutputRole);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__replace_cstr((char **)&pDst->sReportSubjectRef, pSrc->sReportSubjectRef);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    pDst->eKind = pSrc->eKind;
+    pDst->eOutputClass = pSrc->eOutputClass;
+    pDst->eReportClass = pSrc->eReportClass;
+    pDst->bHasContentStats = pSrc->bHasContentStats;
+    pDst->iContentByteCount = pSrc->iContentByteCount;
+    pDst->iContentLineCount = pSrc->iContentLineCount;
+    pDst->bHasPatchStats = pSrc->bHasPatchStats;
+    pDst->iPatchFileCount = pSrc->iPatchFileCount;
+    pDst->iPatchHunkCount = pSrc->iPatchHunkCount;
+    pDst->iPatchAddedLineCount = pSrc->iPatchAddedLineCount;
+    pDst->iPatchDeletedLineCount = pSrc->iPatchDeletedLineCount;
+    pDst->bHasCommandIoStats = pSrc->bHasCommandIoStats;
+    pDst->iStdoutByteCount = pSrc->iStdoutByteCount;
+    pDst->iStderrByteCount = pSrc->iStderrByteCount;
+    pDst->bStdoutTruncated = pSrc->bStdoutTruncated;
+    pDst->bStderrTruncated = pSrc->bStderrTruncated;
+    pDst->bHasExitCode = pSrc->bHasExitCode;
+    pDst->iExitCode = pSrc->iExitCode;
+    pDst->iSequence = pSrc->iSequence;
+    return XWORK_OK;
 }
 
 void xwork_run_index_entry_init(xwork_run_index_entry *pEntry)
@@ -1415,6 +1643,7 @@ void xwork_orchestrator_options_init(xwork_orchestrator_options *pOptions)
 {
     if ( pOptions ) {
         memset(pOptions, 0, sizeof(*pOptions));
+        pOptions->eModelStreamMode = XWORK_MODEL_STREAM_AUTO;
         pOptions->iMaxTurns = 4u;
         pOptions->bAutoApprove = true;
     }
@@ -1561,6 +1790,188 @@ xwork_status xwork_runtime_list_persisted_artifacts(
     return xwork__runtime_list_artifacts(pRuntime, sRunId, pList);
 }
 
+xwork_status xwork_runtime_list_persisted_artifact_summaries(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_artifact_summary_list *pList
+)
+{
+    xwork_string_list tArtifactIds;
+    xwork_artifact_summary *pItems = NULL;
+    xwork_artifact tArtifact;
+    xwork_status iStatus = XWORK_OK;
+    size_t i;
+
+    if ( !pRuntime || !sRunId || !sRunId[0] || !pList ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    xwork_artifact_summary_list_reset(pList);
+    xwork_string_list_init(&tArtifactIds);
+    xwork_artifact_init(&tArtifact);
+
+    iStatus = xwork__runtime_list_artifacts(pRuntime, sRunId, &tArtifactIds);
+    if ( iStatus != XWORK_OK ) {
+        goto done;
+    }
+    if ( tArtifactIds.iCount == 0u ) {
+        goto done;
+    }
+
+    pItems = (xwork_artifact_summary *)calloc(tArtifactIds.iCount, sizeof(*pItems));
+    if ( !pItems ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto done;
+    }
+
+    pList->pItems = pItems;
+    pList->iCount = tArtifactIds.iCount;
+    for ( i = 0u; i < pList->iCount; ++i ) {
+        xwork_artifact_summary_init(&pItems[i]);
+        iStatus = xwork__runtime_load_artifact(
+            pRuntime,
+            sRunId,
+            tArtifactIds.psItems[i],
+            &tArtifact
+        );
+        if ( iStatus != XWORK_OK ) {
+            goto done;
+        }
+
+        iStatus = xwork__replace_cstr((char **)&pItems[i].sArtifactId, tArtifact.sArtifactId);
+        if ( iStatus != XWORK_OK ) goto done;
+        iStatus = xwork__replace_cstr((char **)&pItems[i].sName, tArtifact.sName);
+        if ( iStatus != XWORK_OK ) goto done;
+        iStatus = xwork__replace_cstr((char **)&pItems[i].sMimeType, tArtifact.sMimeType);
+        if ( iStatus != XWORK_OK ) goto done;
+        iStatus = xwork__replace_cstr((char **)&pItems[i].sStorageRef, tArtifact.sStorageRef);
+        if ( iStatus != XWORK_OK ) goto done;
+        iStatus = xwork__replace_cstr((char **)&pItems[i].sSummary, tArtifact.sSummary);
+        if ( iStatus != XWORK_OK ) goto done;
+        iStatus = xwork__replace_cstr((char **)&pItems[i].sOutputRole, tArtifact.sOutputRole);
+        if ( iStatus != XWORK_OK ) goto done;
+        iStatus = xwork__replace_cstr((char **)&pItems[i].sReportSubjectRef, tArtifact.sReportSubjectRef);
+        if ( iStatus != XWORK_OK ) goto done;
+        pItems[i].eKind = tArtifact.eKind;
+        pItems[i].eOutputClass = tArtifact.eOutputClass;
+        pItems[i].eReportClass = tArtifact.eReportClass;
+        pItems[i].bHasContentStats = tArtifact.bHasContentStats;
+        pItems[i].iContentByteCount = tArtifact.iContentByteCount;
+        pItems[i].iContentLineCount = tArtifact.iContentLineCount;
+        pItems[i].bHasPatchStats = tArtifact.bHasPatchStats;
+        pItems[i].iPatchFileCount = tArtifact.iPatchFileCount;
+        pItems[i].iPatchHunkCount = tArtifact.iPatchHunkCount;
+        pItems[i].iPatchAddedLineCount = tArtifact.iPatchAddedLineCount;
+        pItems[i].iPatchDeletedLineCount = tArtifact.iPatchDeletedLineCount;
+        pItems[i].bHasCommandIoStats = tArtifact.bHasCommandIoStats;
+        pItems[i].iStdoutByteCount = tArtifact.iStdoutByteCount;
+        pItems[i].iStderrByteCount = tArtifact.iStderrByteCount;
+        pItems[i].bStdoutTruncated = tArtifact.bStdoutTruncated;
+        pItems[i].bStderrTruncated = tArtifact.bStderrTruncated;
+        pItems[i].bHasExitCode = tArtifact.bHasExitCode;
+        pItems[i].iExitCode = tArtifact.iExitCode;
+        pItems[i].iSequence = tArtifact.iSequence;
+        xwork_artifact_reset(&tArtifact);
+    }
+
+done:
+    xwork_artifact_reset(&tArtifact);
+    xwork_string_list_reset(&tArtifactIds);
+    if ( iStatus != XWORK_OK ) {
+        xwork_artifact_summary_list_reset(pList);
+    }
+    return iStatus;
+}
+
+xwork_status xwork_runtime_query_persisted_artifact_summaries(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const xwork_artifact_summary_query *pQuery,
+    xwork_artifact_summary_list *pList
+)
+{
+    xwork_artifact_summary_list tAllSummaries;
+    xwork_artifact_summary *pItems = NULL;
+    xwork_status iStatus = XWORK_OK;
+    size_t iMatchCount = 0u;
+    size_t iReturnedCount = 0u;
+    size_t iWriteIndex = 0u;
+    size_t i;
+
+    if ( !pRuntime || !sRunId || !sRunId[0] || !pList ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pQuery ) {
+        return xwork_runtime_list_persisted_artifact_summaries(pRuntime, sRunId, pList);
+    }
+
+    xwork_artifact_summary_list_init(&tAllSummaries);
+    xwork_artifact_summary_list_reset(pList);
+
+    iStatus = xwork_runtime_list_persisted_artifact_summaries(
+        pRuntime,
+        sRunId,
+        &tAllSummaries
+    );
+    if ( iStatus != XWORK_OK ) {
+        goto done;
+    }
+
+    for ( i = 0u; i < tAllSummaries.iCount; ++i ) {
+        if ( xwork__artifact_summary_matches_query(&tAllSummaries.pItems[i], pQuery) ) {
+            iMatchCount++;
+        }
+    }
+    if ( iMatchCount == 0u ) {
+        goto done;
+    }
+
+    iReturnedCount = iMatchCount;
+    if ( pQuery->iLimit > 0u && iReturnedCount > pQuery->iLimit ) {
+        iReturnedCount = pQuery->iLimit;
+        pList->bHasMore = true;
+    }
+
+    pItems = (xwork_artifact_summary *)calloc(iReturnedCount, sizeof(*pItems));
+    if ( !pItems ) {
+        iStatus = XWORK_ERROR_NO_MEMORY;
+        goto done;
+    }
+
+    pList->pItems = pItems;
+    pList->iCount = iReturnedCount;
+    for ( i = 0u; i < pList->iCount; ++i ) {
+        xwork_artifact_summary_init(&pItems[i]);
+    }
+
+    for ( i = 0u; i < tAllSummaries.iCount; ++i ) {
+        if ( !xwork__artifact_summary_matches_query(&tAllSummaries.pItems[i], pQuery) ) {
+            continue;
+        }
+        iStatus = xwork__artifact_summary_copy(
+            &pItems[iWriteIndex],
+            &tAllSummaries.pItems[i]
+        );
+        if ( iStatus != XWORK_OK ) {
+            goto done;
+        }
+        iWriteIndex++;
+        if ( iWriteIndex >= iReturnedCount ) {
+            break;
+        }
+    }
+    if ( pList->iCount > 0u ) {
+        pList->iNextAfterSequence = pItems[pList->iCount - 1u].iSequence;
+    }
+
+done:
+    xwork_artifact_summary_list_reset(&tAllSummaries);
+    if ( iStatus != XWORK_OK ) {
+        xwork_artifact_summary_list_reset(pList);
+    }
+    return iStatus;
+}
+
 xwork_status xwork_runtime_list_persisted_run_summaries(
     const xwork_runtime *pRuntime,
     xwork_run_summary_list *pList
@@ -1671,6 +2082,21 @@ xwork_status xwork_runtime_load_persisted_artifact(
     );
 }
 
+xwork_status xwork_runtime_find_persisted_artifact_by_name(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sArtifactName,
+    xwork_artifact *pArtifact
+)
+{
+    return xwork__runtime_find_artifact_by_name(
+        pRuntime,
+        sRunId,
+        sArtifactName,
+        pArtifact
+    );
+}
+
 xwork_status xwork_runtime_get_policy_options(
     const xwork_runtime *pRuntime,
     xwork_policy_options *pOptions
@@ -1777,6 +2203,8 @@ xwork_status xwork_runtime_recover_run(
         return XWORK_ERROR_NO_MEMORY;
     }
 
+    xrtMutexInit(&pRun->tExecutionLock);
+    pRun->bExecutionLockInitialized = true;
     pRun->pRuntime = pRuntime;
     pRun->sRunId = xwork__dup_cstr(pSnapshot->sRunId);
     if ( !pRun->sRunId ) {
@@ -2284,6 +2712,8 @@ xwork_status xwork_run_create(
         return XWORK_ERROR_NO_MEMORY;
     }
 
+    xrtMutexInit(&pRun->tExecutionLock);
+    pRun->bExecutionLockInitialized = true;
     pRun->pRuntime = pRuntime;
     pRun->sRunId = xwork__dup_cstr(pOptions->sRunId);
     pRun->sParentRunId = xwork__dup_cstr(pOptions->sParentRunId);
@@ -2352,6 +2782,9 @@ void xwork_run_destroy(xwork_run *pRun)
     xwork__run_reset_observability(pRun);
     xwork__run_reset_persistence(pRun);
     xwork__run_reset_artifacts(pRun);
+    if ( pRun->bExecutionLockInitialized ) {
+        xrtMutexUnit(&pRun->tExecutionLock);
+    }
     free(pRun);
 }
 

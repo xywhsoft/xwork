@@ -30,6 +30,9 @@ extern "C" {
 #define XWORK_XLLM_ADAPTER_OLLAMA_NATIVE "ollama_native"
 #define XWORK_TOOL_FILESYSTEM_READ_TEXT "filesystem.read_text"
 #define XWORK_TOOL_FILESYSTEM_WRITE_TEXT "filesystem.write_text"
+#define XWORK_TOOL_FILESYSTEM_LIST "filesystem.list"
+#define XWORK_TOOL_FILESYSTEM_STAT "filesystem.stat"
+#define XWORK_TOOL_FILESYSTEM_GLOB "filesystem.glob"
 #define XWORK_TOOL_PROCESS_EXEC "process.exec"
 #define XWORK_TOOL_PROCESS_START_TERMINAL "process.start_terminal"
 #define XWORK_TOOL_PROCESS_LIST_TERMINALS "process.list_terminals"
@@ -40,6 +43,9 @@ extern "C" {
 #define XWORK_TOOL_VCS_STATUS "vcs.status"
 #define XWORK_HOST_FILESYSTEM_READ_TEXT "read_text"
 #define XWORK_HOST_FILESYSTEM_WRITE_TEXT "write_text"
+#define XWORK_HOST_FILESYSTEM_LIST "list"
+#define XWORK_HOST_FILESYSTEM_STAT "stat"
+#define XWORK_HOST_FILESYSTEM_GLOB "glob"
 #define XWORK_HOST_PROCESS_EXEC "exec"
 #define XWORK_HOST_PROCESS_START_TERMINAL "start_terminal"
 #define XWORK_HOST_PROCESS_LIST_TERMINALS "list_terminals"
@@ -52,10 +58,12 @@ extern "C" {
 typedef struct xllm_runtime xllm_runtime;
 typedef struct xllm_session xllm_session;
 typedef struct xllm_memory xllm_memory;
+typedef struct xllm_cancel_token xllm_cancel_token;
 
 typedef struct xwork_runtime xwork_runtime;
 typedef struct xwork_workspace xwork_workspace;
 typedef struct xwork_run xwork_run;
+typedef struct xwork_run_async xwork_run_async;
 typedef struct xwork_event xwork_event;
 typedef struct xwork_approval_request xwork_approval_request;
 typedef struct xwork_checkpoint xwork_checkpoint;
@@ -68,16 +76,104 @@ typedef struct xwork_run_index_query xwork_run_index_query;
 typedef struct xwork_xllm_profile_options xwork_xllm_profile_options;
 typedef struct xwork_xllm_bootstrap_options xwork_xllm_bootstrap_options;
 typedef struct xwork_xllm_transport_options xwork_xllm_transport_options;
+typedef struct xwork_host_invoke_context xwork_host_invoke_context;
+typedef struct xwork_tool_exec_context xwork_tool_exec_context;
 
+/*
+ * Public API contract
+ *
+ * Object ownership:
+ * - xwork_runtime_create() returns an owned runtime. Destroy it with
+ *   xwork_runtime_destroy(). Destroying a runtime also destroys workspaces,
+ *   registered tools, and runs that are still attached to that runtime.
+ * - If xwork_runtime_options::pLlmBootstrap is used, xwork owns the created
+ *   xllm_runtime and destroys it with the xwork_runtime. If pLlmRuntime is
+ *   used instead, it is borrowed and must outlive the xwork_runtime.
+ * - xwork_runtime_add_workspace() returns an owned workspace attached to the
+ *   runtime. xwork copies workspace id/root strings but borrows pMemory.
+ *   pMemory must outlive the workspace.
+ * - xwork_run_create() and xwork_runtime_recover_run() return owned runs
+ *   attached to the runtime. They copy public run strings and workspace ids.
+ *   Destroy runs with xwork_run_destroy(), or let xwork_runtime_destroy()
+ *   destroy still-attached runs.
+ * - xwork_run_execute_async() returns an owned async handle. Destroy it with
+ *   xwork_run_async_destroy(). The handle may own an internal cancel token;
+ *   caller-provided cancel tokens are borrowed.
+ * - xwork_file_persistence_configure_backend() and
+ *   xwork_local_host_configure_services() initialize caller-owned helper
+ *   structs. Reset them with xwork_file_persistence_reset() and
+ *   xwork_local_host_reset().
+ *
+ * Borrowed callback state:
+ * - Host service callbacks, persistence backend callbacks, callback user data,
+ *   pUserData fields, caller-owned xllm objects, and strings explicitly noted
+ *   as borrowed must remain valid for the lifetime of the runtime, workspace,
+ *   run, async handle, or callback invocation that references them.
+ * - xwork_runtime_register_tool() deep-copies sToolId/sDisplayName/sDescription
+ *   but borrows other pointer fields such as sOperationId.
+ *
+ * Output structs:
+ * - *_init() zeroes caller-owned structs.
+ * - Functions that fill result structs deep-copy string/list/object contents
+ *   unless the function explicitly returns a borrowed pointer. Release filled
+ *   results with the matching *_reset() function.
+ * - Getter functions returning const char * or const xwork_tool_def * return
+ *   borrowed pointers valid until the owning object is mutated or destroyed.
+ *
+ * Thread-safety:
+ * - xwork objects are not generally thread-safe for concurrent mutation.
+ *   Serialize access to a runtime/workspace/run unless an API explicitly says
+ *   otherwise.
+ * - xwork_run_async_* APIs synchronize access to the async handle status. They
+ *   do not make arbitrary concurrent xwork_run mutation safe.
+ * - While a run is executing synchronously or through an async handle, callers
+ *   must not execute, destroy, or directly mutate the same run concurrently.
+ *   A second execute entry on the same run returns XWORK_ERROR_INVALID_STATE.
+ */
+
+/*
+ * Return status rules:
+ * - XWORK_OK means the requested operation completed. For wait-with-timeout
+ *   APIs, inspect their completion output parameter as documented.
+ * - XWORK_ERROR_INVALID_ARGUMENT is used for bad caller input and invalid
+ *   option combinations before the operation starts.
+ * - XWORK_ERROR_INVALID_STATE is used when the input object is valid but its
+ *   lifecycle state cannot accept the operation.
+ * - XWORK_ERROR_NOT_FOUND and XWORK_ERROR_ALREADY_EXISTS are used for stable
+ *   object identity or persistence identity lookups.
+ * - XWORK_ERROR_UNSUPPORTED is used for disabled or unavailable capabilities.
+ * - XWORK_ERROR_EXTERNAL_FAILURE preserves failures from xrt/xllm, host
+ *   services, providers, filesystem/process/persistence, and callback errors
+ *   that are not cancellation.
+ * - XWORK_ERROR_CANCELLED means the operation observed cooperative
+ *   cancellation and the run should be treated as cancelled, not failed.
+ */
 typedef enum {
     XWORK_OK = 0,
+
+    /* A required pointer, id, enum value, or option combination is invalid. */
     XWORK_ERROR_INVALID_ARGUMENT,
+
+    /* Allocation failed before the requested operation could complete. */
     XWORK_ERROR_NO_MEMORY,
+
+    /* A uniquely identified runtime object already exists. */
     XWORK_ERROR_ALREADY_EXISTS,
+
+    /* The requested object or persisted record does not exist. */
     XWORK_ERROR_NOT_FOUND,
+
+    /* The object exists, but its current lifecycle state rejects the action. */
     XWORK_ERROR_INVALID_STATE,
+
+    /* An external dependency failed: model provider, host service, file I/O, persistence, or xrt/xllm operation. */
     XWORK_ERROR_EXTERNAL_FAILURE,
-    XWORK_ERROR_UNSUPPORTED
+
+    /* The requested capability is valid but not implemented or not enabled. */
+    XWORK_ERROR_UNSUPPORTED,
+
+    /* Execution was cancelled by a cancel token, interrupt check, timeout stop, or async cancellation. */
+    XWORK_ERROR_CANCELLED
 } xwork_status;
 
 typedef enum {
@@ -150,6 +246,27 @@ typedef enum {
 } xwork_artifact_kind;
 
 typedef enum {
+    XWORK_ARTIFACT_OUTPUT_UNSPECIFIED = 0,
+    XWORK_ARTIFACT_OUTPUT_TEXT,
+    XWORK_ARTIFACT_OUTPUT_JSON,
+    XWORK_ARTIFACT_OUTPUT_FILE_CONTENT,
+    XWORK_ARTIFACT_OUTPUT_FILE_CHANGE,
+    XWORK_ARTIFACT_OUTPUT_TERMINAL_STATE,
+    XWORK_ARTIFACT_OUTPUT_TERMINAL_INVENTORY
+} xwork_artifact_output_class;
+
+typedef enum {
+    XWORK_ARTIFACT_REPORT_UNSPECIFIED = 0,
+    XWORK_ARTIFACT_REPORT_DOCUMENT,
+    XWORK_ARTIFACT_REPORT_SUMMARY,
+    XWORK_ARTIFACT_REPORT_PLAN,
+    XWORK_ARTIFACT_REPORT_REVIEW,
+    XWORK_ARTIFACT_REPORT_DIAGNOSTICS,
+    XWORK_ARTIFACT_REPORT_PROGRESS,
+    XWORK_ARTIFACT_REPORT_FINAL
+} xwork_artifact_report_class;
+
+typedef enum {
     XWORK_EVENT_NONE = 0,
     XWORK_EVENT_RUN_CREATED,
     XWORK_EVENT_RUN_STARTED,
@@ -192,6 +309,27 @@ typedef enum {
     XWORK_HOST_EDITOR
 } xwork_host_service_kind;
 
+typedef bool (*xwork_interrupt_check_fn)(
+    const xwork_run *pRun,
+    const char *sPhase,
+    void *pUserData
+);
+
+struct xwork_host_invoke_context {
+    const xwork_run *pRun;
+    xllm_cancel_token *pCancelToken;
+    xwork_interrupt_check_fn pfnShouldInterrupt;
+    void *pInterruptUserData;
+    const char *sPhase;
+};
+
+struct xwork_tool_exec_context {
+    xllm_cancel_token *pCancelToken;
+    xwork_interrupt_check_fn pfnShouldInterrupt;
+    void *pInterruptUserData;
+    const char *sPhase;
+};
+
 typedef xwork_status (*xwork_host_invoke_fn)(
     const char *sOperationId,
     const char *sRequestJson,
@@ -199,8 +337,17 @@ typedef xwork_status (*xwork_host_invoke_fn)(
     void *pUserData
 );
 
+typedef xwork_status (*xwork_host_invoke_ex_fn)(
+    const char *sOperationId,
+    const char *sRequestJson,
+    const xwork_host_invoke_context *pContext,
+    xwork_tool_result *pResult,
+    void *pUserData
+);
+
 typedef struct {
     xwork_host_invoke_fn pfnInvoke;
+    xwork_host_invoke_ex_fn pfnInvokeEx;
     void *pUserData;
 } xwork_host_service;
 
@@ -319,6 +466,14 @@ struct xwork_profile {
 };
 
 typedef struct {
+    /*
+     * pLlmRuntime is borrowed. pLlmBootstrap is consumed during create and
+     * cannot be combined with pLlmRuntime.
+     *
+     * pHostServices and pPersistenceBackend are copied by value; their
+     * callback pointers and pUserData remain borrowed and must outlive the
+     * runtime.
+     */
     xllm_runtime *pLlmRuntime;
     const xwork_xllm_bootstrap_options *pLlmBootstrap;
     const xwork_host_services *pHostServices;
@@ -334,13 +489,52 @@ typedef xwork_status (*xwork_tool_exec_fn)(
     void *pUserData
 );
 
+typedef xwork_status (*xwork_tool_exec_ex_fn)(
+    xwork_run *pRun,
+    const xwork_tool_call *pCall,
+    const xwork_tool_exec_context *pContext,
+    xwork_tool_result *pResult,
+    void *pUserData
+);
+
 typedef xwork_status (*xwork_memory_resolve_fn)(
     const xwork_run *pRun,
     xwork_memory_context *pContext,
     void *pUserData
 );
 
+typedef enum {
+    XWORK_MODEL_STREAM_AUTO = 0,
+    XWORK_MODEL_STREAM_OFF,
+    XWORK_MODEL_STREAM_PREFER,
+    XWORK_MODEL_STREAM_REQUIRE
+} xwork_model_stream_mode;
+
 typedef struct {
+    int eType;
+    bool bSynthetic;
+    size_t iOutputIndex;
+    const char *sText;
+    const char *sFormat;
+    const char *sResponseId;
+    const char *sModel;
+    const char *sToolCallId;
+    const char *sToolId;
+    const char *sToolName;
+    const char *sArgumentsDelta;
+    const char *sArtifactId;
+    const void *pArtifactData;
+    size_t iArtifactSize;
+} xwork_model_event;
+
+typedef bool (*xwork_model_event_fn)(
+    xwork_run *pRun,
+    const xwork_model_event *pEvent,
+    void *pUserData
+);
+
+typedef struct {
+    /* sWorkspaceId and sRootPath are copied. pMemory is borrowed. */
     const char *sWorkspaceId;
     const char *sRootPath;
     bool bEnableMemory;
@@ -348,6 +542,31 @@ typedef struct {
 } xwork_workspace_options;
 
 typedef struct {
+    size_t iVisitedFileCount;
+    size_t iIngestedFileCount;
+    size_t iCreatedRecordCount;
+    size_t iUpdatedRecordCount;
+    size_t iSkippedFileCount;
+    size_t iFailedFileCount;
+    size_t iExaminedRecordCount;
+    size_t iRemovedRecordCount;
+} xwork_workspace_memory_sync_summary;
+
+typedef struct {
+    size_t iChangeCount;
+    size_t iCreatedCount;
+    size_t iUpdatedCount;
+    size_t iRemovedCount;
+    size_t iSkippedCount;
+    size_t iFailedCount;
+} xwork_workspace_memory_file_sync_summary;
+
+typedef struct {
+    /*
+     * xwork_runtime_register_tool() copies sToolId/sDisplayName/sDescription.
+     * sOperationId is borrowed and must remain valid while the tool is
+     * registered. Builtin tool definitions use static storage.
+     */
     const char *sToolId;
     const char *sDisplayName;
     const char *sDescription;
@@ -360,6 +579,11 @@ typedef struct {
 } xwork_tool_def;
 
 typedef struct {
+    /*
+     * xwork_run_create() copies run ids, instruction, profile ids, and each
+     * workspace id. Referenced workspaces must already be registered on the
+     * runtime and remain alive for the run lifetime.
+     */
     const char *sRunId;
     const char *sParentRunId;
     const char *sInstruction;
@@ -374,12 +598,29 @@ typedef struct {
 typedef struct {
     const char *sArtifactId;
     xwork_artifact_kind eKind;
+    xwork_artifact_output_class eOutputClass;
+    const char *sOutputRole;
+    xwork_artifact_report_class eReportClass;
+    const char *sReportSubjectRef;
     const char *sName;
     const char *sMimeType;
     const char *sStorageRef;
     const char *sSummary;
     const char *sContentText;
+    bool bHasContentStats;
+    size_t iContentByteCount;
+    size_t iContentLineCount;
+    bool bHasPatchStats;
+    size_t iPatchFileCount;
+    size_t iPatchHunkCount;
+    size_t iPatchAddedLineCount;
+    size_t iPatchDeletedLineCount;
     const char *sCommandText;
+    bool bHasCommandIoStats;
+    size_t iStdoutByteCount;
+    size_t iStderrByteCount;
+    bool bStdoutTruncated;
+    bool bStderrTruncated;
     bool bHasExitCode;
     int iExitCode;
 } xwork_artifact_options;
@@ -398,6 +639,10 @@ typedef struct {
     const char *sMimeType;
     const char *sStorageRef;
     const char *sSummary;
+    xwork_artifact_output_class eOutputClass;
+    const char *sOutputRole;
+    xwork_artifact_report_class eReportClass;
+    const char *sReportSubjectRef;
     const char *sReportText;
 } xwork_report_artifact_options;
 
@@ -407,6 +652,8 @@ typedef struct {
     const char *sMimeType;
     const char *sStorageRef;
     const char *sSummary;
+    xwork_artifact_output_class eOutputClass;
+    const char *sOutputRole;
     const char *sOutputText;
 } xwork_output_artifact_options;
 
@@ -418,6 +665,11 @@ typedef struct {
     const char *sSummary;
     const char *sCommandText;
     const char *sOutputText;
+    bool bHasCommandIoStats;
+    size_t iStdoutByteCount;
+    size_t iStderrByteCount;
+    bool bStdoutTruncated;
+    bool bStderrTruncated;
     bool bHasExitCode;
     int iExitCode;
 } xwork_command_artifact_options;
@@ -435,6 +687,71 @@ typedef struct {
     const xwork_run_summary *pItems;
     size_t iCount;
 } xwork_run_summary_list;
+
+typedef struct {
+    const char *sArtifactId;
+    xwork_artifact_kind eKind;
+    xwork_artifact_output_class eOutputClass;
+    const char *sOutputRole;
+    xwork_artifact_report_class eReportClass;
+    const char *sReportSubjectRef;
+    const char *sName;
+    const char *sMimeType;
+    const char *sStorageRef;
+    const char *sSummary;
+    bool bHasContentStats;
+    size_t iContentByteCount;
+    size_t iContentLineCount;
+    bool bHasPatchStats;
+    size_t iPatchFileCount;
+    size_t iPatchHunkCount;
+    size_t iPatchAddedLineCount;
+    size_t iPatchDeletedLineCount;
+    bool bHasCommandIoStats;
+    size_t iStdoutByteCount;
+    size_t iStderrByteCount;
+    bool bStdoutTruncated;
+    bool bStderrTruncated;
+    bool bHasExitCode;
+    int iExitCode;
+    size_t iSequence;
+} xwork_artifact_summary;
+
+typedef struct {
+    const xwork_artifact_summary *pItems;
+    size_t iCount;
+    bool bHasMore;
+    size_t iNextAfterSequence;
+} xwork_artifact_summary_list;
+
+typedef struct {
+    bool bHasKind;
+    xwork_artifact_kind eKind;
+    bool bHasOutputClass;
+    xwork_artifact_output_class eOutputClass;
+    const char *sOutputRole;
+    const char *sOutputRolePrefix;
+    bool bHasReportClass;
+    xwork_artifact_report_class eReportClass;
+    const char *sReportSubjectRef;
+    const char *sReportSubjectRefPrefix;
+    const char *sArtifactName;
+    const char *sNamePrefix;
+    const char *sMimeType;
+    const char *sMimeTypePrefix;
+    const char *sStorageRef;
+    const char *sStorageRefPrefix;
+    bool bRequireExitCode;
+    bool bHasExitCodeValue;
+    int iExitCode;
+    bool bHasAfterSequence;
+    size_t iAfterSequence;
+    bool bHasMinSequence;
+    size_t iMinSequence;
+    bool bHasMaxSequence;
+    size_t iMaxSequence;
+    size_t iLimit;
+} xwork_artifact_summary_query;
 
 struct xwork_run_snapshot {
     const char *sRunId;
@@ -686,12 +1003,29 @@ struct xwork_artifact {
     const char *sArtifactId;
     const char *sRunId;
     xwork_artifact_kind eKind;
+    xwork_artifact_output_class eOutputClass;
+    const char *sOutputRole;
+    xwork_artifact_report_class eReportClass;
+    const char *sReportSubjectRef;
     const char *sName;
     const char *sMimeType;
     const char *sStorageRef;
     const char *sSummary;
     const char *sContentText;
+    bool bHasContentStats;
+    size_t iContentByteCount;
+    size_t iContentLineCount;
+    bool bHasPatchStats;
+    size_t iPatchFileCount;
+    size_t iPatchHunkCount;
+    size_t iPatchAddedLineCount;
+    size_t iPatchDeletedLineCount;
     const char *sCommandText;
+    bool bHasCommandIoStats;
+    size_t iStdoutByteCount;
+    size_t iStderrByteCount;
+    bool bStdoutTruncated;
+    bool bStderrTruncated;
     bool bHasExitCode;
     int iExitCode;
     size_t iSequence;
@@ -766,10 +1100,22 @@ struct xwork_run_index_query {
 };
 
 typedef struct {
+    /*
+     * Callbacks and user data are borrowed for the duration of
+     * xwork_run_execute(). For xwork_run_execute_async(), they must remain
+     * valid until the async handle completes or is destroyed.
+     */
     xwork_tool_exec_fn pfnToolExec;
+    xwork_tool_exec_ex_fn pfnToolExecEx;
     void *pUserData;
     xwork_memory_resolve_fn pfnResolveMemoryContext;
     void *pMemoryUserData;
+    xwork_model_stream_mode eModelStreamMode;
+    xllm_cancel_token *pCancelToken;
+    xwork_model_event_fn pfnModelEvent;
+    void *pModelEventUserData;
+    xwork_interrupt_check_fn pfnShouldInterrupt;
+    void *pInterruptUserData;
     bool bIngestToolResultsToMemory;
     bool bIngestArtifactsToMemory;
     size_t iMaxTurns;
@@ -778,12 +1124,23 @@ typedef struct {
 
 XWORK_API void xwork_runtime_options_init(xwork_runtime_options *pOptions);
 XWORK_API void xwork_workspace_options_init(xwork_workspace_options *pOptions);
+XWORK_API void xwork_workspace_memory_sync_summary_init(
+    xwork_workspace_memory_sync_summary *pSummary
+);
+XWORK_API void xwork_workspace_memory_file_sync_summary_init(
+    xwork_workspace_memory_file_sync_summary *pSummary
+);
 XWORK_API void xwork_tool_def_init(xwork_tool_def *pDef);
 XWORK_API void xwork_run_options_init(xwork_run_options *pOptions);
 XWORK_API void xwork_run_summary_init(xwork_run_summary *pSummary);
 XWORK_API void xwork_run_summary_reset(xwork_run_summary *pSummary);
 XWORK_API void xwork_run_summary_list_init(xwork_run_summary_list *pList);
 XWORK_API void xwork_run_summary_list_reset(xwork_run_summary_list *pList);
+XWORK_API void xwork_artifact_summary_init(xwork_artifact_summary *pSummary);
+XWORK_API void xwork_artifact_summary_reset(xwork_artifact_summary *pSummary);
+XWORK_API void xwork_artifact_summary_list_init(xwork_artifact_summary_list *pList);
+XWORK_API void xwork_artifact_summary_list_reset(xwork_artifact_summary_list *pList);
+XWORK_API void xwork_artifact_summary_query_init(xwork_artifact_summary_query *pQuery);
 XWORK_API void xwork_run_index_entry_init(xwork_run_index_entry *pEntry);
 XWORK_API void xwork_run_index_entry_reset(xwork_run_index_entry *pEntry);
 XWORK_API void xwork_run_index_list_init(xwork_run_index_list *pList);
@@ -900,6 +1257,17 @@ XWORK_API xwork_status xwork_file_persistence_list_artifacts(
     const char *sRunId,
     xwork_string_list *pList
 );
+XWORK_API xwork_status xwork_file_persistence_list_artifact_summaries(
+    const xwork_file_persistence *pStore,
+    const char *sRunId,
+    xwork_artifact_summary_list *pList
+);
+XWORK_API xwork_status xwork_file_persistence_query_artifact_summaries(
+    const xwork_file_persistence *pStore,
+    const char *sRunId,
+    const xwork_artifact_summary_query *pQuery,
+    xwork_artifact_summary_list *pList
+);
 XWORK_API xwork_status xwork_file_persistence_load_event(
     const xwork_file_persistence *pStore,
     const char *sRunId,
@@ -954,6 +1322,12 @@ XWORK_API xwork_status xwork_file_persistence_load_last_artifact(
     const char *sRunId,
     xwork_artifact *pArtifact
 );
+XWORK_API xwork_status xwork_file_persistence_find_artifact_by_name(
+    const xwork_file_persistence *pStore,
+    const char *sRunId,
+    const char *sArtifactName,
+    xwork_artifact *pArtifact
+);
 
 XWORK_API xwork_status xwork_runtime_create(
     const xwork_runtime_options *pOptions,
@@ -984,6 +1358,17 @@ XWORK_API xwork_status xwork_runtime_list_persisted_artifacts(
     const xwork_runtime *pRuntime,
     const char *sRunId,
     xwork_string_list *pList
+);
+XWORK_API xwork_status xwork_runtime_list_persisted_artifact_summaries(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    xwork_artifact_summary_list *pList
+);
+XWORK_API xwork_status xwork_runtime_query_persisted_artifact_summaries(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const xwork_artifact_summary_query *pQuery,
+    xwork_artifact_summary_list *pList
 );
 XWORK_API xwork_status xwork_runtime_list_persisted_run_summaries(
     const xwork_runtime *pRuntime,
@@ -1041,6 +1426,12 @@ XWORK_API xwork_status xwork_runtime_load_persisted_artifact(
     const char *sArtifactId,
     xwork_artifact *pArtifact
 );
+XWORK_API xwork_status xwork_runtime_find_persisted_artifact_by_name(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sArtifactName,
+    xwork_artifact *pArtifact
+);
 XWORK_API xwork_status xwork_runtime_get_policy_options(
     const xwork_runtime *pRuntime,
     xwork_policy_options *pOptions
@@ -1054,6 +1445,23 @@ XWORK_API xwork_status xwork_runtime_invoke_host_service(
     const char *sOperationId,
     const char *sRequestJson,
     xwork_tool_result *pResult
+);
+XWORK_API xwork_status xwork_runtime_invoke_host_service_ex(
+    const xwork_runtime *pRuntime,
+    xwork_host_service_kind eKind,
+    const char *sOperationId,
+    const char *sRequestJson,
+    const xwork_host_invoke_context *pContext,
+    xwork_tool_result *pResult
+);
+XWORK_API bool xwork_host_invoke_context_should_cancel(
+    const xwork_host_invoke_context *pContext,
+    const char *sPhase
+);
+XWORK_API bool xwork_tool_exec_context_should_cancel(
+    const xwork_run *pRun,
+    const xwork_tool_exec_context *pContext,
+    const char *sPhase
 );
 
 XWORK_API xwork_status xwork_runtime_add_workspace(
@@ -1070,6 +1478,15 @@ XWORK_API const char *xwork_workspace_get_id(const xwork_workspace *pWorkspace);
 XWORK_API const char *xwork_workspace_get_root_path(const xwork_workspace *pWorkspace);
 XWORK_API bool xwork_workspace_is_memory_enabled(const xwork_workspace *pWorkspace);
 XWORK_API xllm_memory *xwork_workspace_get_memory(const xwork_workspace *pWorkspace);
+XWORK_API xwork_status xwork_workspace_sync_memory(
+    xwork_workspace *pWorkspace,
+    xwork_workspace_memory_sync_summary *pSummary
+);
+XWORK_API xwork_status xwork_workspace_sync_memory_file(
+    xwork_workspace *pWorkspace,
+    const char *sPath,
+    xwork_workspace_memory_file_sync_summary *pSummary
+);
 
 XWORK_API xwork_status xwork_runtime_register_tool(
     xwork_runtime *pRuntime,
@@ -1196,6 +1613,56 @@ XWORK_API xwork_status xwork_run_execute(
     xwork_run *pRun,
     const xwork_orchestrator_options *pOptions
 );
+
+/*
+ * Starts xwork_run_execute() on a background worker.
+ *
+ * The async handle shallow-copies pOptions. Any callback pointers, callback
+ * user data, profile strings, and caller-owned cancel token referenced by
+ * pOptions must remain valid until the handle completes or is destroyed.
+ *
+ * pRun and the runtime objects it references must also outlive the async
+ * handle. While the async handle is active, callers should observe progress
+ * through xwork_run_async_* and must not concurrently execute, mutate, or
+ * destroy pRun directly. A second xwork_run_execute() entry for the same run
+ * while one execution is already active returns XWORK_ERROR_INVALID_STATE.
+ *
+ * If pOptions does not provide pCancelToken, the async handle creates and owns
+ * one. xwork_run_async_destroy() cancels and waits for unfinished work before
+ * releasing the handle.
+ */
+XWORK_API xwork_status xwork_run_execute_async(
+    xwork_run *pRun,
+    const xwork_orchestrator_options *pOptions,
+    xwork_run_async **ppAsync
+);
+XWORK_API xwork_status xwork_run_async_wait(xwork_run_async *pAsync);
+
+/*
+ * Waits up to iTimeoutMs. On timeout, returns XWORK_OK and sets
+ * *pbCompleted=false. If the worker has completed, returns the final run
+ * status and sets *pbCompleted=true.
+ */
+XWORK_API xwork_status xwork_run_async_wait_timeout(
+    xwork_run_async *pAsync,
+    size_t iTimeoutMs,
+    bool *pbCompleted
+);
+
+/*
+ * Reads the async handle status under its handle lock. pStatus is final only
+ * when *pbCompleted is true.
+ */
+XWORK_API xwork_status xwork_run_async_get_status(
+    const xwork_run_async *pAsync,
+    xwork_status *pStatus,
+    bool *pbCompleted
+);
+XWORK_API xwork_status xwork_run_async_cancel(
+    xwork_run_async *pAsync,
+    const char *sReason
+);
+XWORK_API void xwork_run_async_destroy(xwork_run_async *pAsync);
 
 #ifdef __cplusplus
 }

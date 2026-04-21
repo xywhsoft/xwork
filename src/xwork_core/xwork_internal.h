@@ -2,6 +2,7 @@
 #define XWORK_INTERNAL_H
 
 #include "../../xwork.h"
+#include "../../lib/xrt.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -54,12 +55,29 @@ struct xwork_checkpoint_record {
 struct xwork_artifact_record {
     xwork_artifact tArtifact;
     char *sArtifactId;
+    char *sOutputRole;
+    char *sReportSubjectRef;
     char *sName;
     char *sMimeType;
     char *sStorageRef;
     char *sSummary;
     char *sContentText;
     char *sCommandText;
+    xwork_artifact_output_class eOutputClass;
+    xwork_artifact_report_class eReportClass;
+    bool bHasContentStats;
+    size_t iContentByteCount;
+    size_t iContentLineCount;
+    bool bHasPatchStats;
+    size_t iPatchFileCount;
+    size_t iPatchHunkCount;
+    size_t iPatchAddedLineCount;
+    size_t iPatchDeletedLineCount;
+    bool bHasCommandIoStats;
+    size_t iStdoutByteCount;
+    size_t iStderrByteCount;
+    bool bStdoutTruncated;
+    bool bStderrTruncated;
     bool bHasExitCode;
     int iExitCode;
 };
@@ -107,6 +125,9 @@ struct xwork_run {
     xwork_autonomy_mode eAutonomy;
     xwork_session_policy tSessionPolicy;
     xwork_run_state eState;
+    xmutex_struct tExecutionLock;
+    bool bExecutionLockInitialized;
+    bool bExecuting;
     char *sLastOutputText;
     bool bHasLastMemoryContext;
     char *sLastMemoryContextText;
@@ -169,6 +190,8 @@ void xwork__free_str_array(char ***ppsItems, size_t *piItemCount);
 void xwork__run_reset_observability(xwork_run *pRun);
 bool xwork__runtime_has_workspace(const xwork_runtime *pRuntime, const char *sWorkspaceId);
 bool xwork__run_state_is_terminal(xwork_run_state eState);
+xwork_status xwork__run_begin_execution(xwork_run *pRun);
+void xwork__run_end_execution(xwork_run *pRun);
 xwork_status xwork__replace_cstr(char **psTarget, const char *sText);
 xwork_status xwork__run_set_last_memory_context(
     xwork_run *pRun,
@@ -313,6 +336,12 @@ xwork_status xwork__runtime_load_artifact(
     const xwork_runtime *pRuntime,
     const char *sRunId,
     const char *sArtifactId,
+    xwork_artifact *pArtifact
+);
+xwork_status xwork__runtime_find_artifact_by_name(
+    const xwork_runtime *pRuntime,
+    const char *sRunId,
+    const char *sArtifactName,
     xwork_artifact *pArtifact
 );
 xwork_status xwork__run_restore_checkpoint_snapshot(

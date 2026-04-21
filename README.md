@@ -43,11 +43,19 @@ What exists now:
 
 - design baseline: [DESIGN.md](/D:/git/xwork/DESIGN.md)
 - development plan: [DEVELOPMENT_SPEC.md](/D:/git/xwork/DEVELOPMENT_SPEC.md)
+- agent runtime progress tracking: [AGENT_RUNTIME_TRACKING_SPEC.md](/D:/git/xwork/AGENT_RUNTIME_TRACKING_SPEC.md)
 - public API draft: [xwork.h](/D:/git/xwork/xwork.h)
 - aggregate implementation entry: [xwork.c](/D:/git/xwork/xwork.c)
 - runtime / workspace / tool registry / run lifecycle
 - event / approval request / checkpoint / artifact object model
 - `xllm`-backed orchestrator loop with tool execution and approval pause/resume
+- model turn execution can now pass stream preference, forward normalized model events, honor xllm cancel tokens, and cooperatively interrupt before/after major run phases
+- host service invocation now has a per-call context for run/cancel/interrupt metadata, and local `process.exec` can cooperatively cancel before spawn or while polling a running subprocess
+- custom tool executors can now opt into `pfnToolExecEx` with a cancellation context and `xwork_tool_exec_context_should_cancel()` helper
+- runs can now execute through a minimal async handle (`xwork_run_execute_async` / `xwork_run_async_*`) with wait, timed wait, status, cancel, and destroy APIs; async cancel feeds the same cooperative cancel token path and is covered against mock tools, unfinished-handle destroy, and local `process.exec`
+- async run API docs now state the shallow-copy/lifetime contract for run/options/callback user data and the wait-timeout status semantics
+- run execution now has a per-run execution guard, so concurrent `xwork_run_execute` entries on the same run fail with `XWORK_ERROR_INVALID_STATE`
+- provider smoke now exercises the async run handle on its main provider execution path while keeping local stub coverage for request/response normalization and an offline model-call failure path
 - minimal local host helper for filesystem/process/vcs host services
 - built-in host tool defs for `filesystem.read_text` / `filesystem.write_text` / `process.exec` / `process.start_terminal` / `process.terminal_read` / `process.terminal_write` / `process.terminal_resize` / `process.terminal_stop` / `vcs.status`
 - builtin host tool execution now auto-synthesizes output/command artifacts for read/write/process/vcs flows
@@ -77,13 +85,32 @@ What exists now:
 - local terminal session state results now return explicit `output_text` / `output_bytes`, plus `event_end_seq` / `has_more_events` / `event_stream_done` alongside ordered events
 - local `process.terminal_write` now supports `include_state:true` with optional `after_seq` / `max_events`, and also `write_eof:true` to close terminal stdin explicitly; a write can return the post-write incremental terminal state in one round trip
 - local terminal session state results now also carry stable metadata `session_index` / `stdin_closed`, so callers can track session lifetime without inferring it from write responses
-- local host now supports `process.list_terminals`, and terminal sessions can carry a stable `session_name`, so callers can rediscover and manage active interactive sessions without caching everything out-of-band
+- local host now supports `process.list_terminals` with request-level `session_name` / `running` / `done` / `after_session_index` / `limit` filters, plus `session_index_asc` pagination metadata (`has_more_sessions` / `next_after_session_index`), and terminal sessions can carry a stable `session_name`, so callers can rediscover and page through active interactive sessions without caching everything out-of-band
+- builtin `process.list_terminals` now also emits a JSON output artifact (`terminal-sessions://active`) from orchestrator runs, so terminal inventory can be persisted alongside other run artifacts
+- builtin `process.terminal_resize` now also emits a JSON output artifact, so negotiated terminal geometry changes can be persisted alongside the rest of a terminal session
+- builtin `process.terminal_write` now also emits a JSON output artifact when terminal state is returned, so post-write terminal state windows persist alongside the write command itself
+- builtin `process.terminal_read` now also emits a JSON output artifact, so incremental terminal state windows can enter the same run artifact/persistence pipeline as terminal session transcripts
+- builtin `process.terminal_stop` now also emits a JSON output artifact, so final terminal session stop state persists alongside the transcript/output artifact
+- when interactive terminal support is available, file persistence smoke also verifies that terminal session JSON artifacts (`resize/write/read/stop`) can be listed and loaded back, and can now be found directly by artifact name from both file persistence and runtime persistence APIs
+- persisted artifacts now also have a lightweight summary-list surface (`id/kind/output_class/output_role/name/mime/storage_ref/summary/sequence`, plus content and patch stats when present), so callers can inspect terminal JSON artifact chains before loading full artifact bodies
+- persisted artifact summaries now also support a minimal metadata query surface (`kind` / `output_class` / `output_role` / `name_prefix` / `mime` / `storage_ref` / `exit_code` / `sequence`), so callers can filter terminal JSON chains without loading full artifacts
+- artifact summary query also supports exact `artifact_name`, so callers can resolve a single persisted terminal JSON artifact without falling back to full artifact loads
+- persisted artifact summary query now also supports `after_sequence + limit`, and summary lists return `has_more/next_after_sequence`, so terminal artifact chains can be paged without ad hoc callers-side cursors
+- artifact summary query also supports `mime_prefix` / `storage_ref_prefix`, so callers can slice a shared terminal session artifact chain by transport metadata without full artifact loads
+- output/report artifacts now carry typed output metadata (`output_class` plus `output_role`) through runtime objects, summaries, snapshots, persistence, and workspace memory ingest; builtin filesystem and terminal artifact synthesis fills file-content/file-change/terminal-state/terminal-inventory classes
+- report artifacts now also carry report-specific typed metadata (`report_class` plus `report_subject_ref`) through runtime objects, summaries, snapshots, persistence, query filters, and workspace memory ingest
+- artifact summary query smoke now also covers `exit_code` and min/max `sequence` filters against a persisted command artifact
 - builtin `process.exec` artifact synthesis now preserves stderr instead of dropping it from command artifacts
-- local `process.exec` failure paths now preserve structured result payloads for invalid request / timeout / non-zero exit cases, including requested stop policy and observed stop reason
+- command artifacts can now carry structured command I/O stats (`stdout_byte_count` / `stderr_byte_count` / stdout/stderr truncation flags) through runtime objects, summaries, snapshots, persistence, and workspace memory ingest
+- local `process.exec` failure paths now preserve structured result payloads for invalid request / timeout / cancelled / non-zero exit cases, including requested stop policy and observed stop reason
 - local `process.exec` stdin_text is bounded by configured `iMaxProcessInputBytes`
 - local `process.exec` env list is bounded by configured `iMaxProcessEnvEntries`
 - typed artifact emit helpers for patch / report / command / output
+- artifacts with `content_text` now carry computed content stats (`content_byte_count` / `content_line_count`) through runtime objects, summaries, snapshots, persistence, and workspace memory ingest
+- patch artifacts now carry computed patch stats (`file_count` / `hunk_count` / `added_line_count` / `deleted_line_count`) through runtime objects, summaries, snapshots, persistence, and workspace memory ingest
 - workspace memory attach and tool/artifact memory ingest hooks
+- workspace memory can now be synced directly from a workspace root through `xllm_memory_sync_workspace`, with a small `xwork_workspace_memory_sync_summary` result surface
+- workspace memory can also sync one changed file through `xllm_memory_sync_file`, with a compact change-kind summary for incremental update paths
 - in-memory and file-backed checkpoint / snapshot persistence
 - persisted run / event / checkpoint / artifact query surface
 - built-in `xcode` / `xclaw` profiles
@@ -198,8 +225,8 @@ int main(void)
 1. Expand the built-in host tool surface and harden request/response contracts.
 2. Tighten persistence format/versioning and durable query coverage.
 3. Expand real-provider `xllm` smoke coverage beyond the offline stub baseline.
-4. Add richer artifact semantics around patch/report/command outputs.
-5. Add streaming/interruption-aware orchestration paths on top of the current loop.
+4. Harden async run execution semantics around handle lifetime, concurrent observation, and cancellation coverage.
+5. Expand real-provider `xllm` smoke coverage and provider error-path matrix beyond the offline HTTP failure baseline.
 
 ## Smoke Tests
 
