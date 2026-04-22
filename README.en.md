@@ -70,6 +70,19 @@ Run from the repository root:
 gcc -std=c11 -Wall -Wextra -pedantic -c xwork.c
 ```
 
+## Single Header
+
+Generate the single-header distribution:
+
+```powershell
+.\build_single_head.bat
+```
+
+The generated file is `singlehead/xwork.h`. Define `XWORK_IMPLEMENTATION`
+in exactly one translation unit before including it. The single header embeds
+only xwork itself; provide `xrt`, `xllm`, and `sqlite` according to your build
+layout.
+
 Example build and run commands are documented in [examples/README.md](examples/README.md).
 
 ## Dependencies

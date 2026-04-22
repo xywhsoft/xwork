@@ -12,6 +12,30 @@ Minimal compile check:
 gcc -std=c11 -Wall -Wextra -pedantic -c xwork.c
 ```
 
+Single-header package:
+
+```powershell
+.\build_single_head.bat
+```
+
+This writes `singlehead/xwork.h`. The file contains the public API plus the
+xwork implementation when `XWORK_IMPLEMENTATION` is defined. It intentionally
+does not embed external dependencies; keep `xrt.h`, `xllm.h`,
+`xllm-session.h`, `xllm-memory.h`, and sqlite available to the consumer build.
+
+Minimal single-header smoke:
+
+```c
+#define XRT_IMPLEMENTATION
+#include "xrt.h"
+#define XLLM_SESSION_IMPLEMENTATION
+#include "xllm-session.h"
+#define XLLM_MEMORY_IMPLEMENTATION
+#include "xllm-memory.h"
+#define XWORK_IMPLEMENTATION
+#include "xwork.h"
+```
+
 ## Dependencies
 
 | Dependency | Role |
