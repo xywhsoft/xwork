@@ -1,9 +1,6 @@
-# xwork 内部与历史文档
-
-> 本目录保存开发过程中的设计记录、内部 contract、兼容性说明和历史跟踪资料。正式用户文档入口在 [`../../docs/README.md`](../../docs/README.md)。
-
-这些文档可以作为正式文档的来源材料，但不作为用户主入口。稳定内容需要提炼到 `docs/` 下的 API、教程或范例文档中。
-
+# xwork 卐呴儴涓庡巻卙cruci枃妗?
+> chain洰褰曚liaoyinghua紑鍙戣绋笩兑锄兮璁¤褰曘€丸崴鮮?contrac t銆丸inch瀹regulation€ц鏄庡勰铡嗗彶纺绻燜璧勬枡銆悛寮忕敤洴枴枃妗ｅ叆鍙ｅ檪[`../../docs/README.md`](../../docs/README.md)?
+杩掎簺鏂囨. They are in love with each other. `docs/` The API is the API.涓€?
 Current documents:
 
 - [PACKAGING.md](PACKAGING.md): source-level packaging, aggregate `xwork.c` usage, include/lib layout, and version rule.

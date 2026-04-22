@@ -5,6 +5,17 @@ on:
   pull_request:
 
 jobs:
+  docs:
+    name: docs-check
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check docs
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File tools/check_docs.ps1
+
   windows-msys2:
     name: ${{ matrix.target }}
     runs-on: windows-latest
@@ -127,6 +138,7 @@ jobs:
       - name: Build examples
         if: matrix.target == 'examples'
         run: |
+          gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib/sqlite examples/first_xwork_program.c examples/xwork_example_runtime.c lib/sqlite/sqlite3.c -o examples/first_xwork_program.exe -lws2_32 -liphlpapi
           gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib/sqlite examples/ai_ide_agent.c examples/xwork_example_runtime.c lib/sqlite/sqlite3.c -o examples/ai_ide_agent.exe -lws2_32 -liphlpapi
           gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib/sqlite examples/claw_autonomous_agent.c examples/xwork_example_runtime.c lib/sqlite/sqlite3.c -o examples/claw_autonomous_agent.exe -lws2_32 -liphlpapi
           gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib/sqlite examples/multi_agent_claw.c examples/xwork_example_runtime.c lib/sqlite/sqlite3.c -o examples/multi_agent_claw.exe -lws2_32 -liphlpapi
@@ -136,6 +148,7 @@ jobs:
       - name: Run examples
         if: matrix.target == 'examples'
         run: |
+          ./examples/first_xwork_program.exe
           ./examples/ai_ide_agent.exe
           ./examples/claw_autonomous_agent.exe
           ./examples/multi_agent_claw.exe
