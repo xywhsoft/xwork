@@ -30,6 +30,8 @@ const char *xwork_status_cstr(xwork_status eStatus)
             return "XWORK_ERROR_UNSUPPORTED";
         case XWORK_ERROR_CANCELLED:
             return "XWORK_ERROR_CANCELLED";
+        case XWORK_ERROR_PAUSED:
+            return "XWORK_ERROR_PAUSED";
         default:
             return "XWORK_STATUS_UNKNOWN";
     }
@@ -629,6 +631,8 @@ void xwork_run_summary_reset(xwork_run_summary *pSummary)
 
     xwork__free_cstr((char **)&pSummary->sRunId);
     xwork__free_cstr((char **)&pSummary->sParentRunId);
+    xwork__free_cstr((char **)&pSummary->sAgentId);
+    xwork__free_cstr((char **)&pSummary->sTaskId);
     xwork__free_cstr((char **)&pSummary->sInstruction);
     xwork_run_summary_init(pSummary);
 }
@@ -1659,6 +1663,25 @@ static xwork_run_step_kind xwork__run_step_kind_from_event(xwork_event_kind eKin
             return XWORK_RUN_STEP_ARTIFACT;
         case XWORK_EVENT_RETRY_SCHEDULED:
             return XWORK_RUN_STEP_RETRY;
+        case XWORK_EVENT_AGENT_SPAWNED:
+        case XWORK_EVENT_AGENT_STARTED:
+        case XWORK_EVENT_AGENT_PAUSED:
+        case XWORK_EVENT_AGENT_COMPLETED:
+        case XWORK_EVENT_AGENT_FAILED:
+        case XWORK_EVENT_AGENT_CANCELLED:
+        case XWORK_EVENT_TASK_SCHEDULED:
+        case XWORK_EVENT_TASK_STARTED:
+        case XWORK_EVENT_TASK_JOINED:
+        case XWORK_EVENT_TASK_BLOCKED:
+        case XWORK_EVENT_TASK_UNBLOCKED:
+        case XWORK_EVENT_TASK_COMPLETED:
+        case XWORK_EVENT_TASK_FAILED:
+        case XWORK_EVENT_TASK_CANCELLED:
+        case XWORK_EVENT_HANDOFF_REQUESTED:
+        case XWORK_EVENT_HANDOFF_ACCEPTED:
+        case XWORK_EVENT_HANDOFF_REJECTED:
+        case XWORK_EVENT_HANDOFF_COMPLETED:
+            return XWORK_RUN_STEP_RUN_STATE;
         case XWORK_EVENT_CHECKPOINT_SAVED:
         case XWORK_EVENT_CHECKPOINT_LOADED:
             return XWORK_RUN_STEP_CHECKPOINT;
@@ -1837,6 +1860,10 @@ static xwork_status xwork__run_summary_copy(
     if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__replace_cstr((char **)&pTarget->sParentRunId, pSource->sParentRunId);
     if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__replace_cstr((char **)&pTarget->sAgentId, pSource->sAgentId);
+    if ( iStatus != XWORK_OK ) return iStatus;
+    iStatus = xwork__replace_cstr((char **)&pTarget->sTaskId, pSource->sTaskId);
+    if ( iStatus != XWORK_OK ) return iStatus;
     iStatus = xwork__replace_cstr((char **)&pTarget->sInstruction, pSource->sInstruction);
     if ( iStatus != XWORK_OK ) return iStatus;
 
@@ -1912,6 +1939,8 @@ void xwork_run_snapshot_reset(xwork_run_snapshot *pSnapshot)
     xwork__run_snapshot_reset_artifacts(pSnapshot);
     xwork__run_snapshot_free_cstr(&pSnapshot->sRunId);
     xwork__run_snapshot_free_cstr(&pSnapshot->sParentRunId);
+    xwork__run_snapshot_free_cstr(&pSnapshot->sAgentId);
+    xwork__run_snapshot_free_cstr(&pSnapshot->sTaskId);
     xwork__run_snapshot_free_cstr(&pSnapshot->sInstruction);
     xwork__run_snapshot_free_cstr(&pSnapshot->sLlmProfileId);
     xwork__run_snapshot_free_cstr(&pSnapshot->sSessionProfileId);
@@ -2015,6 +2044,7 @@ xwork_status xwork_runtime_create(
         } else {
             pRuntime->pLlmRuntime = pOptions->pLlmRuntime;
         }
+        pRuntime->pReplayEngine = pOptions->pReplayEngine;
         if ( pOptions->pHostServices ) {
             pRuntime->tHostServices = *pOptions->pHostServices;
         }
@@ -2062,6 +2092,8 @@ void xwork_runtime_destroy(xwork_runtime *pRuntime)
         pRuntime->pLlmRuntime = NULL;
     }
 
+    free(pRuntime->sLastReplayHostOutputText);
+    free(pRuntime->sLastReplayHostVisibleSummary);
     free(pRuntime);
 }
 
@@ -2764,6 +2796,14 @@ static xwork_status xwork__run_snapshot_fill_from_run(
     if ( iStatus != XWORK_OK ) {
         goto fail;
     }
+    iStatus = xwork__run_snapshot_replace_cstr(&pSnapshot->sAgentId, pRun->sAgentId);
+    if ( iStatus != XWORK_OK ) {
+        goto fail;
+    }
+    iStatus = xwork__run_snapshot_replace_cstr(&pSnapshot->sTaskId, pRun->sTaskId);
+    if ( iStatus != XWORK_OK ) {
+        goto fail;
+    }
     iStatus = xwork__run_snapshot_replace_cstr(&pSnapshot->sInstruction, pRun->sInstruction);
     if ( iStatus != XWORK_OK ) {
         goto fail;
@@ -2957,6 +2997,14 @@ static xwork_status xwork__run_apply_snapshot(
     if ( iStatus != XWORK_OK ) {
         return iStatus;
     }
+    iStatus = xwork__replace_cstr(&pRun->sAgentId, pSnapshot->sAgentId);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+    iStatus = xwork__replace_cstr(&pRun->sTaskId, pSnapshot->sTaskId);
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
     iStatus = xwork__replace_cstr(&pRun->sInstruction, pSnapshot->sInstruction);
     if ( iStatus != XWORK_OK ) {
         return iStatus;
@@ -3141,6 +3189,8 @@ xwork_status xwork_run_create(
     pRun->pRuntime = pRuntime;
     pRun->sRunId = xwork__dup_cstr(pOptions->sRunId);
     pRun->sParentRunId = xwork__dup_cstr(pOptions->sParentRunId);
+    pRun->sAgentId = xwork__dup_cstr(pOptions->sAgentId);
+    pRun->sTaskId = xwork__dup_cstr(pOptions->sTaskId);
     pRun->sInstruction = xwork__dup_cstr(pOptions->sInstruction);
     pRun->sLlmProfileId = xwork__dup_cstr(pOptions->sLlmProfileId);
     pRun->sSessionProfileId = xwork__dup_cstr(pOptions->sSessionProfileId);
@@ -3148,7 +3198,13 @@ xwork_status xwork_run_create(
     pRun->tSessionPolicy = pOptions->tSessionPolicy;
     pRun->eState = XWORK_RUN_CREATED;
 
-    if ( !pRun->sRunId || !pRun->sInstruction ) {
+    if ( !pRun->sRunId ||
+         !pRun->sInstruction ||
+         (pOptions->sParentRunId && !pRun->sParentRunId) ||
+         (pOptions->sAgentId && !pRun->sAgentId) ||
+         (pOptions->sTaskId && !pRun->sTaskId) ||
+         (pOptions->sLlmProfileId && !pRun->sLlmProfileId) ||
+         (pOptions->sSessionProfileId && !pRun->sSessionProfileId) ) {
         xwork_run_destroy(pRun);
         return XWORK_ERROR_NO_MEMORY;
     }
@@ -3199,6 +3255,8 @@ void xwork_run_destroy(xwork_run *pRun)
 
     xwork__free_cstr(&pRun->sRunId);
     xwork__free_cstr(&pRun->sParentRunId);
+    xwork__free_cstr(&pRun->sAgentId);
+    xwork__free_cstr(&pRun->sTaskId);
     xwork__free_cstr(&pRun->sInstruction);
     xwork__free_cstr(&pRun->sLlmProfileId);
     xwork__free_cstr(&pRun->sSessionProfileId);
@@ -3603,6 +3661,8 @@ xwork_status xwork_run_get_summary(const xwork_run *pRun, xwork_run_summary *pSu
     xwork_run_summary_init(&tSummary);
     tSummary.sRunId = pRun->sRunId;
     tSummary.sParentRunId = pRun->sParentRunId;
+    tSummary.sAgentId = pRun->sAgentId;
+    tSummary.sTaskId = pRun->sTaskId;
     tSummary.sInstruction = pRun->sInstruction;
     tSummary.eAutonomy = pRun->eAutonomy;
     tSummary.eState = pRun->eState;

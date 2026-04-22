@@ -20,6 +20,9 @@ jobs:
           - profile-smoke
           - provider-offline-smoke
           - stress-smoke
+          - multi-agent-smoke
+          - remote-worker-smoke
+          - replay-smoke
           - examples
 
     defaults:
@@ -97,17 +100,47 @@ jobs:
         if: matrix.target == 'stress-smoke'
         run: ./tests/xwork_stress_smoke.exe
 
+      - name: Build multi-agent smoke
+        if: matrix.target == 'multi-agent-smoke'
+        run: gcc -std=c11 -Wall -Wextra -pedantic -Ilib/sqlite tests/xwork_multi_agent_smoke.c lib/sqlite/sqlite3.c -o tests/xwork_multi_agent_smoke.exe -lws2_32 -liphlpapi
+
+      - name: Run multi-agent smoke
+        if: matrix.target == 'multi-agent-smoke'
+        run: ./tests/xwork_multi_agent_smoke.exe
+
+      - name: Build remote worker smoke
+        if: matrix.target == 'remote-worker-smoke'
+        run: gcc -std=c11 -Wall -Wextra -pedantic -Ilib/sqlite tests/xwork_remote_worker_smoke.c lib/sqlite/sqlite3.c -o tests/xwork_remote_worker_smoke.exe -lws2_32 -liphlpapi
+
+      - name: Run remote worker smoke
+        if: matrix.target == 'remote-worker-smoke'
+        run: ./tests/xwork_remote_worker_smoke.exe
+
+      - name: Build replay smoke
+        if: matrix.target == 'replay-smoke'
+        run: gcc -std=c11 -Wall -Wextra -pedantic -Ilib/sqlite tests/xwork_replay_smoke.c lib/sqlite/sqlite3.c -o tests/xwork_replay_smoke.exe -lws2_32 -liphlpapi
+
+      - name: Run replay smoke
+        if: matrix.target == 'replay-smoke'
+        run: ./tests/xwork_replay_smoke.exe
+
       - name: Build examples
         if: matrix.target == 'examples'
         run: |
           gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib/sqlite examples/ai_ide_agent.c examples/xwork_example_runtime.c lib/sqlite/sqlite3.c -o examples/ai_ide_agent.exe -lws2_32 -liphlpapi
           gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib/sqlite examples/claw_autonomous_agent.c examples/xwork_example_runtime.c lib/sqlite/sqlite3.c -o examples/claw_autonomous_agent.exe -lws2_32 -liphlpapi
+          gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib/sqlite examples/multi_agent_claw.c examples/xwork_example_runtime.c lib/sqlite/sqlite3.c -o examples/multi_agent_claw.exe -lws2_32 -liphlpapi
+          gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib/sqlite examples/remote_worker_agent.c examples/xwork_example_runtime.c lib/sqlite/sqlite3.c -o examples/remote_worker_agent.exe -lws2_32 -liphlpapi
+          gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib/sqlite examples/replay_agent_run.c examples/xwork_example_runtime.c lib/sqlite/sqlite3.c -o examples/replay_agent_run.exe -lws2_32 -liphlpapi
 
       - name: Run examples
         if: matrix.target == 'examples'
         run: |
           ./examples/ai_ide_agent.exe
           ./examples/claw_autonomous_agent.exe
+          ./examples/multi_agent_claw.exe
+          ./examples/remote_worker_agent.exe
+          ./examples/replay_agent_run.exe
 
   provider-real-smoke:
     name: provider-real-smoke

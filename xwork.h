@@ -15,7 +15,8 @@ extern "C" {
 #define XWORK_VERSION_MAJOR 0
 #define XWORK_VERSION_MINOR 1
 #define XWORK_VERSION_PATCH 0
-#define XWORK_PERSISTENCE_FORMAT_VERSION 3
+#define XWORK_PERSISTENCE_FORMAT_VERSION 14
+#define XWORK_REMOTE_PROTOCOL_VERSION_CURRENT 1
 
 #define XWORK_PROFILE_XCODE "xcode"
 #define XWORK_PROFILE_XCLAW "xclaw"
@@ -74,6 +75,7 @@ extern "C" {
 #define XWORK_HOST_DIAGNOSTICS_FROM_PROCESS "from_process_output"
 #define XWORK_HOST_EDITOR_OPEN_BUFFER "open_buffer"
 #define XWORK_HOST_EDITOR_APPLY_EDIT "apply_edit"
+#define XWORK_REPLAY_FILESYSTEM_SNAPSHOT_REF "filesystem.snapshot_ref"
 #define XWORK_REPORT_SCHEMA_V1 "xwork.report.v1"
 #define XWORK_DIAGNOSTICS_SCHEMA_V1 "xwork.diagnostics.v1"
 #define XWORK_PATCH_APPLY_RESULT_SCHEMA_V1 "xwork.patch_apply_result.v1"
@@ -90,6 +92,12 @@ typedef struct xwork_runtime xwork_runtime;
 typedef struct xwork_workspace xwork_workspace;
 typedef struct xwork_run xwork_run;
 typedef struct xwork_run_async xwork_run_async;
+typedef struct xwork_agent xwork_agent;
+typedef struct xwork_agent_pool xwork_agent_pool;
+typedef struct xwork_task_graph xwork_task_graph;
+typedef struct xwork_control_plane xwork_control_plane;
+typedef struct xwork_worker xwork_worker;
+typedef struct xwork_replay_engine xwork_replay_engine;
 typedef struct xwork_event xwork_event;
 typedef struct xwork_run_step xwork_run_step;
 typedef struct xwork_run_step_list xwork_run_step_list;
@@ -97,6 +105,7 @@ typedef struct xwork_run_step_query xwork_run_step_query;
 typedef struct xwork_approval_request xwork_approval_request;
 typedef struct xwork_checkpoint xwork_checkpoint;
 typedef struct xwork_artifact xwork_artifact;
+typedef struct xwork_artifact_summary xwork_artifact_summary;
 typedef struct xwork_profile xwork_profile;
 typedef struct xwork_run_snapshot xwork_run_snapshot;
 typedef struct xwork_persistence_backend xwork_persistence_backend;
@@ -118,6 +127,8 @@ typedef struct xwork_tool_exec_context xwork_tool_exec_context;
  * - If xwork_runtime_options::pLlmBootstrap is used, xwork owns the created
  *   xllm_runtime and destroys it with the xwork_runtime. If pLlmRuntime is
  *   used instead, it is borrowed and must outlive the xwork_runtime.
+ *   xwork_runtime_options::pReplayEngine is also borrowed and must outlive
+ *   any runtime host-service call that records or replays through it.
  * - xwork_runtime_add_workspace() returns an owned workspace attached to the
  *   runtime. xwork copies workspace id/root strings but borrows pMemory.
  *   pMemory must outlive the workspace.
@@ -128,6 +139,12 @@ typedef struct xwork_tool_exec_context xwork_tool_exec_context;
  * - xwork_run_execute_async() returns an owned async handle. Destroy it with
  *   xwork_run_async_destroy(). The handle may own an internal cancel token;
  *   caller-provided cancel tokens are borrowed.
+ * - xwork_agent_pool_create() returns an owned in-process agent pool. Destroy
+ *   it with xwork_agent_pool_destroy(). Agents returned from
+ *   xwork_agent_pool_add_agent() are owned by the pool and borrowed by callers.
+ * - xwork_task_graph_create() returns an owned task graph. Destroy it with
+ *   xwork_task_graph_destroy(). A graph borrows its agent pool, copies task
+ *   strings/workspace ids, and maps each executing task to a child xwork_run.
  * - xwork_file_persistence_configure_backend() and
  *   xwork_local_host_configure_services() initialize caller-owned helper
  *   structs. Reset them with xwork_file_persistence_reset() and
@@ -187,6 +204,8 @@ typedef struct xwork_tool_exec_context xwork_tool_exec_context;
  *   that are not cancellation.
  * - XWORK_ERROR_CANCELLED means the operation observed cooperative
  *   cancellation and the run should be treated as cancelled, not failed.
+ * - XWORK_ERROR_PAUSED means cooperative execution stopped at a resumable
+ *   scheduler boundary and can continue after an explicit resume call.
  */
 typedef enum {
     XWORK_OK = 0,
@@ -213,7 +232,10 @@ typedef enum {
     XWORK_ERROR_UNSUPPORTED,
 
     /* Execution was cancelled by a cancel token, interrupt check, timeout stop, or async cancellation. */
-    XWORK_ERROR_CANCELLED
+    XWORK_ERROR_CANCELLED,
+
+    /* Execution paused cooperatively and can be resumed by the caller. */
+    XWORK_ERROR_PAUSED
 } xwork_status;
 
 /*
@@ -228,6 +250,109 @@ typedef enum {
     XWORK_AUTONOMY_SEMI_AUTO,
     XWORK_AUTONOMY_AUTO
 } xwork_autonomy_mode;
+
+typedef enum {
+    XWORK_AGENT_ROLE_CUSTOM = 0,
+    XWORK_AGENT_ROLE_PLANNER,
+    XWORK_AGENT_ROLE_CODER,
+    XWORK_AGENT_ROLE_REVIEWER,
+    XWORK_AGENT_ROLE_TESTER,
+    XWORK_AGENT_ROLE_RESEARCHER
+} xwork_agent_role;
+
+typedef enum {
+    XWORK_TASK_PENDING = 0,
+    XWORK_TASK_READY,
+    XWORK_TASK_RUNNING,
+    XWORK_TASK_BLOCKED,
+    XWORK_TASK_COMPLETED,
+    XWORK_TASK_FAILED,
+    XWORK_TASK_CANCELLED,
+    XWORK_TASK_SKIPPED
+} xwork_task_state;
+
+typedef enum {
+    XWORK_TASK_FAILURE_FAIL_FAST = 0,
+    XWORK_TASK_FAILURE_BEST_EFFORT,
+    XWORK_TASK_FAILURE_REQUIRE_ALL
+} xwork_task_failure_policy;
+
+typedef enum {
+    XWORK_HANDOFF_PENDING = 0,
+    XWORK_HANDOFF_ACCEPTED,
+    XWORK_HANDOFF_REJECTED,
+    XWORK_HANDOFF_COMPLETED
+} xwork_handoff_state;
+
+typedef enum {
+    XWORK_WORKER_REGISTERED = 0,
+    XWORK_WORKER_ONLINE,
+    XWORK_WORKER_STALE,
+    XWORK_WORKER_OFFLINE,
+    XWORK_WORKER_UNREGISTERED
+} xwork_worker_state;
+
+typedef enum {
+    XWORK_REMOTE_TASK_QUEUED = 0,
+    XWORK_REMOTE_TASK_ASSIGNED,
+    XWORK_REMOTE_TASK_RUNNING,
+    XWORK_REMOTE_TASK_COMPLETED,
+    XWORK_REMOTE_TASK_FAILED,
+    XWORK_REMOTE_TASK_CANCELLED,
+    XWORK_REMOTE_TASK_ORPHANED
+} xwork_remote_task_state;
+
+typedef enum {
+    XWORK_REMOTE_TRANSPORT_IN_PROCESS = 0,
+    XWORK_REMOTE_TRANSPORT_HTTP_BOUNDARY
+} xwork_remote_transport_kind;
+
+typedef enum {
+    XWORK_REMOTE_TASK_HOST_TOOL = 0,
+    XWORK_REMOTE_TASK_PROCESS_EXEC
+} xwork_remote_task_kind;
+
+typedef enum {
+    XWORK_REMOTE_OUTPUT_STDOUT = 0,
+    XWORK_REMOTE_OUTPUT_STDERR
+} xwork_remote_output_stream;
+
+typedef enum {
+    XWORK_REPLAY_MODE_RECORD = 0,
+    XWORK_REPLAY_MODE_STRICT,
+    XWORK_REPLAY_MODE_AUDIT
+} xwork_replay_mode;
+
+typedef enum {
+    XWORK_REPLAY_ENTRY_MODEL = 0,
+    XWORK_REPLAY_ENTRY_TOOL,
+    XWORK_REPLAY_ENTRY_HOST_TOOL,
+    XWORK_REPLAY_ENTRY_FILESYSTEM,
+    XWORK_REPLAY_ENTRY_PROCESS,
+    XWORK_REPLAY_ENTRY_TERMINAL,
+    XWORK_REPLAY_ENTRY_ARTIFACT,
+    XWORK_REPLAY_ENTRY_CHECKPOINT
+} xwork_replay_entry_kind;
+
+typedef enum {
+    XWORK_REPLAY_DIVERGENCE_NONE = 0,
+    XWORK_REPLAY_DIVERGENCE_MISSING_ENTRY,
+    XWORK_REPLAY_DIVERGENCE_UNEXPECTED_ENTRY,
+    XWORK_REPLAY_DIVERGENCE_KIND_MISMATCH,
+    XWORK_REPLAY_DIVERGENCE_KEY_MISMATCH,
+    XWORK_REPLAY_DIVERGENCE_REQUEST_MISMATCH,
+    XWORK_REPLAY_DIVERGENCE_RESPONSE_MISMATCH,
+    XWORK_REPLAY_DIVERGENCE_STATUS_MISMATCH,
+    XWORK_REPLAY_DIVERGENCE_CONTENT_MISMATCH
+} xwork_replay_divergence_kind;
+
+typedef enum {
+    XWORK_REPLAY_EVENT_GENERIC = 0,
+    XWORK_REPLAY_EVENT_MODEL_STREAM,
+    XWORK_REPLAY_EVENT_RUN_EVENT,
+    XWORK_REPLAY_EVENT_TOOL_EVENT,
+    XWORK_REPLAY_EVENT_TERMINAL_INTERACTION
+} xwork_replay_event_kind;
 
 typedef enum {
     XWORK_RUN_CREATED = 0,
@@ -283,6 +408,7 @@ typedef enum {
     XWORK_CHECKPOINT_SESSION_COMPACTED,
     XWORK_CHECKPOINT_BEFORE_TOOL,
     XWORK_CHECKPOINT_AFTER_TOOL,
+    XWORK_CHECKPOINT_TASK_GRAPH,
     XWORK_CHECKPOINT_COMPLETION
 } xwork_checkpoint_kind;
 
@@ -354,6 +480,24 @@ typedef enum {
     XWORK_EVENT_CHECKPOINT_SAVED,
     XWORK_EVENT_CHECKPOINT_LOADED,
     XWORK_EVENT_RETRY_SCHEDULED,
+    XWORK_EVENT_AGENT_SPAWNED,
+    XWORK_EVENT_AGENT_STARTED,
+    XWORK_EVENT_AGENT_PAUSED,
+    XWORK_EVENT_AGENT_COMPLETED,
+    XWORK_EVENT_AGENT_FAILED,
+    XWORK_EVENT_AGENT_CANCELLED,
+    XWORK_EVENT_TASK_SCHEDULED,
+    XWORK_EVENT_TASK_STARTED,
+    XWORK_EVENT_TASK_JOINED,
+    XWORK_EVENT_TASK_BLOCKED,
+    XWORK_EVENT_TASK_UNBLOCKED,
+    XWORK_EVENT_TASK_COMPLETED,
+    XWORK_EVENT_TASK_FAILED,
+    XWORK_EVENT_TASK_CANCELLED,
+    XWORK_EVENT_HANDOFF_REQUESTED,
+    XWORK_EVENT_HANDOFF_ACCEPTED,
+    XWORK_EVENT_HANDOFF_REJECTED,
+    XWORK_EVENT_HANDOFF_COMPLETED,
     XWORK_EVENT_RUN_PAUSED,
     XWORK_EVENT_RUN_COMPLETED,
     XWORK_EVENT_RUN_CANCELLED,
@@ -589,12 +733,17 @@ typedef struct {
      * pLlmRuntime is borrowed. pLlmBootstrap is consumed during create and
      * cannot be combined with pLlmRuntime.
      *
+     * pReplayEngine is borrowed. When present, xwork_runtime_invoke_host_service*()
+     * records host service results in record mode and serves them from the
+     * cassette in strict/audit replay modes.
+     *
      * pHostServices and pPersistenceBackend are copied by value; their
      * callback pointers and pUserData remain borrowed and must outlive the
      * runtime.
      */
     xllm_runtime *pLlmRuntime;
     const xwork_xllm_bootstrap_options *pLlmBootstrap;
+    xwork_replay_engine *pReplayEngine;
     const xwork_host_services *pHostServices;
     const xwork_persistence_backend *pPersistenceBackend;
     xwork_policy_options tPolicy;
@@ -744,6 +893,8 @@ typedef struct {
      */
     const char *sRunId;
     const char *sParentRunId;
+    const char *sAgentId;
+    const char *sTaskId;
     const char *sInstruction;
     const char *sLlmProfileId;
     const char *sSessionProfileId;
@@ -752,6 +903,593 @@ typedef struct {
     xwork_autonomy_mode eAutonomy;
     xwork_session_policy tSessionPolicy;
 } xwork_run_options;
+
+typedef struct {
+    const char *sPoolId;
+    xwork_runtime *pRuntime;
+} xwork_agent_pool_options;
+
+typedef struct {
+    const char *sAgentId;
+    const char *sDisplayName;
+    const char *sDescription;
+    xwork_agent_role eRole;
+    const char *sLlmProfileId;
+    const char *sSessionProfileId;
+    xwork_autonomy_mode eAutonomy;
+    size_t iMaxTurns;
+    size_t iTimeoutMs;
+    size_t iMaxRetries;
+} xwork_agent_options;
+
+typedef struct {
+    const char *sAgentId;
+    const char *sDisplayName;
+    const char *sDescription;
+    xwork_agent_role eRole;
+    const char *sLlmProfileId;
+    const char *sSessionProfileId;
+    xwork_autonomy_mode eAutonomy;
+    size_t iMaxTurns;
+    size_t iTimeoutMs;
+    size_t iMaxRetries;
+} xwork_agent_snapshot;
+
+typedef struct {
+    xwork_agent_snapshot *pItems;
+    size_t iCount;
+} xwork_agent_snapshot_list;
+
+typedef struct {
+    const char *sPoolId;
+    xwork_agent_snapshot_list tAgents;
+} xwork_agent_pool_snapshot;
+
+typedef struct {
+    const char *sTaskId;
+    const char *sAgentId;
+    const char *sRunId;
+    const char *sParentRunId;
+    const char *sInstruction;
+    const char *sLlmProfileId;
+    const char *sSessionProfileId;
+    const char **psWorkspaceIds;
+    size_t iWorkspaceCount;
+    xwork_autonomy_mode eAutonomy;
+    xwork_session_policy tSessionPolicy;
+    void *pUserData;
+} xwork_task_node_options;
+
+typedef struct {
+    const char *sTaskId;
+    const char *sAgentId;
+    const char *sRunId;
+    const char *sParentRunId;
+    const char *sInstruction;
+    xwork_task_state eState;
+    xwork_status iStatus;
+    size_t iDependencyCount;
+    size_t iAttemptCount;
+    size_t iMaxTurns;
+    size_t iTimeoutMs;
+    size_t iMaxRetries;
+    void *pUserData;
+} xwork_task_node_summary;
+
+typedef struct {
+    xwork_task_node_summary *pItems;
+    size_t iCount;
+} xwork_task_node_summary_list;
+
+typedef struct {
+    const char *sTaskId;
+    const char *sAgentId;
+    const char *sRunId;
+    const char *sParentRunId;
+    const char *sInstruction;
+    const char *sLlmProfileId;
+    const char *sSessionProfileId;
+    const char **psWorkspaceIds;
+    size_t iWorkspaceCount;
+    const char **psDependencyTaskIds;
+    size_t iDependencyCount;
+    xwork_autonomy_mode eAutonomy;
+    xwork_session_policy tSessionPolicy;
+    xwork_task_state eState;
+    xwork_status iStatus;
+    size_t iAttemptCount;
+    size_t iMaxTurns;
+    size_t iTimeoutMs;
+    size_t iMaxRetries;
+} xwork_task_node_snapshot;
+
+typedef struct {
+    xwork_task_node_snapshot *pItems;
+    size_t iCount;
+} xwork_task_node_snapshot_list;
+
+typedef xwork_status (*xwork_task_execute_fn)(
+    xwork_run *pRun,
+    const xwork_task_node_summary *pNode,
+    void *pUserData
+);
+
+typedef struct {
+    const char *sGraphId;
+    xwork_agent_pool *pAgentPool;
+    size_t iMaxConcurrency;
+    xwork_task_failure_policy eFailurePolicy;
+    xllm_cancel_token *pCancelToken;
+    xwork_task_execute_fn pfnExecute;
+    void *pUserData;
+} xwork_task_graph_options;
+
+typedef struct {
+    xwork_status iStatus;
+    size_t iTotalCount;
+    size_t iCompletedCount;
+    size_t iFailedCount;
+    size_t iCancelledCount;
+    size_t iSkippedCount;
+} xwork_task_graph_result;
+
+typedef struct {
+    const char *sHandoffId;
+    const char *sFromTaskId;
+    const char *sToTaskId;
+    const char *sReason;
+    const char **psArtifactRefs;
+    size_t iArtifactRefCount;
+    const char **psMemoryContextRefs;
+    size_t iMemoryContextRefCount;
+    const char **psSharedWorkspaceIds;
+    size_t iSharedWorkspaceCount;
+    bool bReadOnlySharedContext;
+    bool bWritableWorkspace;
+} xwork_handoff_request_options;
+
+typedef struct {
+    const char *sHandoffId;
+    xwork_handoff_state eState;
+    xwork_status iStatus;
+    const char *sMessage;
+} xwork_handoff_result_options;
+
+typedef struct {
+    const char *sHandoffId;
+    const char *sFromTaskId;
+    const char *sToTaskId;
+    const char *sReason;
+    xwork_handoff_state eState;
+    xwork_status iStatus;
+    const char *sMessage;
+    const char **psArtifactRefs;
+    size_t iArtifactRefCount;
+    const char **psMemoryContextRefs;
+    size_t iMemoryContextRefCount;
+    const char **psSharedWorkspaceIds;
+    size_t iSharedWorkspaceCount;
+    bool bReadOnlySharedContext;
+    bool bWritableWorkspace;
+} xwork_handoff_summary;
+
+typedef struct {
+    xwork_handoff_summary *pItems;
+    size_t iCount;
+} xwork_handoff_summary_list;
+
+typedef struct {
+    const char *sGraphId;
+    size_t iMaxConcurrency;
+    xwork_task_failure_policy eFailurePolicy;
+    bool bCancelRequested;
+    const char *sCancelReason;
+    bool bPauseRequested;
+    const char *sPauseReason;
+    xwork_task_graph_result tResult;
+    xwork_task_node_snapshot_list tNodes;
+    xwork_handoff_summary_list tHandoffs;
+} xwork_task_graph_snapshot;
+
+/*
+ * Remote worker/control-plane contract:
+ * - xwork_control_plane_create() and create_from_snapshot() return an owned
+ *   plane. Destroy it with xwork_control_plane_destroy().
+ * - Registered workers are owned by the control plane. A returned
+ *   xwork_worker* is borrowed and becomes invalid after unregister/destroy.
+ * - Option/input structs are copied during the API call except borrowed
+ *   xwork_runtime* pointers, which must outlive the plane/worker using them.
+ * - Summary/list/snapshot outputs own their copied strings and nested arrays;
+ *   release them with the matching *_reset() function before reuse.
+ * - Control planes and workers are not safe for concurrent mutation. Serialize
+ *   start/stop/register/heartbeat/enqueue/claim/complete/fail/cancel/upload
+ *   calls and serialize queries against mutation when a coherent view matters.
+ * - stop() stops scheduling state only. It does not kill OS processes or live
+ *   terminal sessions owned by borrowed worker runtimes. Snapshot recovery
+ *   never rehydrates live process/terminal handles; assigned/running work is
+ *   recovered as orphaned durable state.
+ * - XWORK_REMOTE_TRANSPORT_IN_PROCESS uses shared memory. HTTP transport uses
+ *   the same decoded control-plane APIs after the caller authenticates,
+ *   decodes, and validates the wire JSON envelope.
+ */
+typedef struct {
+    const char *sPlaneId;
+    xwork_runtime *pRuntime;
+    xwork_remote_transport_kind eTransport;
+    size_t iProtocolVersion;
+    size_t iDefaultLeaseTimeoutMs;
+    size_t iNowMs;
+    const char **psAllowedCapabilities;
+    size_t iAllowedCapabilityCount;
+    bool bEnforceCapabilityAllowlist;
+    xwork_autonomy_mode eAutonomy;
+    xwork_approval_mode eApprovalMode;
+    bool bAutoApproveTasks;
+    bool bEnforceTaskPolicy;
+    bool bEnforceNetworkPolicy;
+    bool bRedactTaskSecrets;
+} xwork_control_plane_options;
+
+typedef struct {
+    const char *sWorkerId;
+    const char *sDisplayName;
+    const char *sEndpoint;
+    size_t iProtocolVersion;
+    const char **psCapabilities;
+    size_t iCapabilityCount;
+    const char **psLabels;
+    size_t iLabelCount;
+    size_t iLeaseTimeoutMs;
+    xwork_runtime *pRuntime;
+} xwork_worker_options;
+
+typedef struct {
+    const char *sWorkerId;
+    const char *sDisplayName;
+    const char *sEndpoint;
+    xwork_worker_state eState;
+    size_t iProtocolVersion;
+    size_t iCapabilityCount;
+    size_t iLabelCount;
+    size_t iLastHeartbeatMs;
+    size_t iLeaseExpiresMs;
+    size_t iClaimedCount;
+    size_t iCompletedCount;
+    size_t iFailedCount;
+} xwork_worker_summary;
+
+typedef struct {
+    xwork_worker_summary *pItems;
+    size_t iCount;
+} xwork_worker_summary_list;
+
+typedef struct {
+    const char *sWorkerId;
+    const char *sDisplayName;
+    const char *sEndpoint;
+    size_t iProtocolVersion;
+    const char **psCapabilities;
+    size_t iCapabilityCount;
+    const char **psLabels;
+    size_t iLabelCount;
+    size_t iLeaseTimeoutMs;
+    size_t iLastHeartbeatMs;
+    size_t iLeaseExpiresMs;
+    size_t iClaimedCount;
+    size_t iCompletedCount;
+    size_t iFailedCount;
+    xwork_worker_state eState;
+} xwork_worker_snapshot;
+
+typedef struct {
+    xwork_worker_snapshot *pItems;
+    size_t iCount;
+} xwork_worker_snapshot_list;
+
+typedef struct {
+    const char *sTaskId;
+    xwork_remote_task_kind eKind;
+    xwork_host_service_kind eHostService;
+    const char *sOperationId;
+    const char *sRequestJson;
+    const char *sRequiredCapability;
+    bool bRetryable;
+    size_t iTimeoutMs;
+    void *pUserData;
+} xwork_remote_task_options;
+
+typedef struct {
+    xwork_remote_output_stream eStream;
+    size_t iChunkIndex;
+    size_t iOffsetBytes;
+    size_t iByteCount;
+    bool bFinalChunk;
+    const char *sContentHash;
+    const char *sText;
+} xwork_remote_output_chunk_summary;
+
+typedef struct {
+    xwork_remote_output_chunk_summary *pItems;
+    size_t iCount;
+} xwork_remote_output_chunk_summary_list;
+
+typedef struct {
+    const char *sTaskId;
+    const char *sAssignmentId;
+    const char *sWorkerId;
+    const char *sArtifactId;
+    const char *sBlobRef;
+    const char *sContentHash;
+    size_t iChunkIndex;
+    size_t iChunkCount;
+    size_t iOffsetBytes;
+    const void *pChunkData;
+    size_t iChunkSize;
+    bool bFinalChunk;
+} xwork_remote_blob_chunk_summary;
+
+typedef struct {
+    xwork_remote_blob_chunk_summary *pItems;
+    size_t iCount;
+} xwork_remote_blob_chunk_summary_list;
+
+typedef struct {
+    const char *sTaskId;
+    const char *sAssignmentId;
+    const char *sWorkerId;
+    xwork_remote_task_kind eKind;
+    xwork_remote_task_state eState;
+    xwork_host_service_kind eHostService;
+    const char *sOperationId;
+    const char *sRequestJson;
+    const char *sRequiredCapability;
+    size_t iAttemptCount;
+    size_t iAssignedAtMs;
+    size_t iCompletedAtMs;
+    xwork_status iStatus;
+    bool bRetryable;
+    const char *sOutputText;
+    const char *sVisibleSummary;
+    const char *sErrorKind;
+    const char *sErrorMessage;
+    size_t iProtocolVersion;
+    xwork_artifact_summary *pArtifacts;
+    size_t iArtifactCount;
+    xwork_remote_output_chunk_summary *pOutputChunks;
+    size_t iOutputChunkCount;
+} xwork_remote_task_summary;
+
+typedef struct {
+    xwork_remote_task_summary *pItems;
+    size_t iCount;
+} xwork_remote_task_summary_list;
+
+typedef struct {
+    const char *sTaskId;
+    const char *sAssignmentId;
+    const char *sWorkerId;
+    xwork_remote_task_kind eKind;
+    xwork_remote_task_state eState;
+    xwork_host_service_kind eHostService;
+    const char *sOperationId;
+    const char *sRequestJson;
+    const char *sRequiredCapability;
+    size_t iAttemptCount;
+    size_t iAssignedAtMs;
+    size_t iCompletedAtMs;
+    size_t iTimeoutMs;
+    xwork_status iStatus;
+    bool bRetryable;
+    const char *sOutputText;
+    const char *sVisibleSummary;
+    const char *sErrorKind;
+    const char *sErrorMessage;
+    size_t iProtocolVersion;
+    xwork_artifact_summary *pArtifacts;
+    size_t iArtifactCount;
+    xwork_remote_output_chunk_summary *pOutputChunks;
+    size_t iOutputChunkCount;
+} xwork_remote_task_snapshot;
+
+typedef struct {
+    xwork_remote_task_snapshot *pItems;
+    size_t iCount;
+} xwork_remote_task_snapshot_list;
+
+typedef struct {
+    const char *sTaskId;
+    const char *sAssignmentId;
+    const char *sWorkerId;
+    xwork_remote_task_kind eKind;
+    xwork_host_service_kind eHostService;
+    const char *sOperationId;
+    const char *sRequestJson;
+    const char *sRequiredCapability;
+    size_t iProtocolVersion;
+    size_t iAttemptCount;
+    bool bRetryable;
+} xwork_remote_task_assignment;
+
+typedef struct {
+    xwork_status iStatus;
+    const char *sOutputText;
+    const char *sVisibleSummary;
+    const char *sErrorKind;
+    const char *sErrorMessage;
+    size_t iProtocolVersion;
+    bool bRetryable;
+    const xwork_artifact_summary *pArtifacts;
+    size_t iArtifactCount;
+} xwork_remote_task_result;
+
+typedef struct {
+    const char *sTaskId;
+    const char *sAssignmentId;
+    const char *sWorkerId;
+    size_t iProtocolVersion;
+    xwork_remote_output_stream eStream;
+    size_t iChunkIndex;
+    size_t iOffsetBytes;
+    const char *sText;
+    size_t iByteCount;
+    const char *sContentHash;
+    bool bFinalChunk;
+} xwork_remote_output_chunk;
+
+typedef struct {
+    const char *sTaskId;
+    const char *sAssignmentId;
+    const char *sWorkerId;
+    size_t iProtocolVersion;
+    const xwork_artifact_summary *pArtifact;
+    const char *sBlobRef;
+    const char *sContentHash;
+    size_t iChunkIndex;
+    size_t iChunkCount;
+    size_t iOffsetBytes;
+    const void *pChunkData;
+    size_t iChunkSize;
+    bool bFinalChunk;
+} xwork_remote_artifact_upload;
+
+typedef struct {
+    const char *sPlaneId;
+    xwork_remote_transport_kind eTransport;
+    size_t iProtocolVersion;
+    size_t iDefaultLeaseTimeoutMs;
+    size_t iNowMs;
+    bool bStarted;
+    size_t iNextAssignmentSequence;
+    xwork_worker_snapshot_list tWorkers;
+    xwork_remote_task_snapshot_list tTasks;
+    xwork_remote_blob_chunk_summary_list tBlobChunks;
+} xwork_control_plane_snapshot;
+
+typedef struct {
+    const char *sReplayId;
+    xwork_replay_mode eMode;
+    bool bReadonlyFilesystem;
+    bool bBlockSideEffects;
+    size_t iMaxDivergences;
+} xwork_replay_options;
+
+typedef struct {
+    const char *sManifestId;
+    const char *sReplayId;
+    const char *sSourceRunId;
+    const char *sCreatedAtText;
+    const char *sContentHashAlgorithm;
+    size_t iEntryCount;
+} xwork_replay_manifest;
+
+typedef struct {
+    xwork_replay_entry_kind eKind;
+    const char *sKey;
+    const char *sOperationId;
+    const char *sRequestJson;
+    const char *sResponseJson;
+    const char *sArgumentsJson;
+    const char *sResultJson;
+    const char *sRequestHash;
+    const char *sResponseHash;
+    const char *sArgumentsHash;
+    const char *sResultHash;
+    const char *sContentHash;
+    xwork_status iStatus;
+} xwork_replay_entry_options;
+
+typedef struct {
+    size_t iSequence;
+    xwork_replay_entry_kind eKind;
+    const char *sKey;
+    const char *sOperationId;
+    const char *sRequestJson;
+    const char *sResponseJson;
+    const char *sArgumentsJson;
+    const char *sResultJson;
+    const char *sRequestHash;
+    const char *sResponseHash;
+    const char *sArgumentsHash;
+    const char *sResultHash;
+    const char *sContentHash;
+    xwork_status iStatus;
+} xwork_replay_entry_summary;
+
+typedef struct {
+    xwork_replay_entry_summary *pItems;
+    size_t iCount;
+} xwork_replay_entry_summary_list;
+
+typedef struct {
+    const char *sRefId;
+    const char *sPath;
+    const char *sMetadataJson;
+    const char *sContentHash;
+    xwork_status iStatus;
+} xwork_replay_filesystem_ref_options;
+
+typedef struct {
+    size_t iSequence;
+    const char *sRefId;
+    const char *sPath;
+    const char *sMetadataJson;
+    const char *sContentHash;
+    xwork_status iStatus;
+} xwork_replay_filesystem_ref_summary;
+
+typedef struct {
+    xwork_replay_filesystem_ref_summary *pItems;
+    size_t iCount;
+} xwork_replay_filesystem_ref_summary_list;
+
+typedef struct {
+    xwork_replay_event_kind eKind;
+    const char *sKey;
+    const char *sName;
+    int iType;
+    const char *sPayloadJson;
+    const char *sContentText;
+    const char *sPayloadHash;
+    const char *sContentHash;
+    xwork_status iStatus;
+} xwork_replay_event_options;
+
+typedef struct {
+    size_t iSequence;
+    xwork_replay_event_kind eKind;
+    const char *sKey;
+    const char *sName;
+    int iType;
+    const char *sPayloadHash;
+    const char *sContentHash;
+    xwork_status iStatus;
+} xwork_replay_event_summary;
+
+typedef struct {
+    xwork_replay_event_summary *pItems;
+    size_t iCount;
+} xwork_replay_event_summary_list;
+
+typedef struct {
+    xwork_replay_divergence_kind eKind;
+    size_t iSequence;
+    const char *sExpectedKey;
+    const char *sActualKey;
+    xwork_replay_entry_kind eExpectedEntryKind;
+    xwork_replay_entry_kind eActualEntryKind;
+    const char *sExpectedHash;
+    const char *sActualHash;
+    const char *sMessage;
+} xwork_replay_divergence;
+
+typedef struct {
+    xwork_status iStatus;
+    size_t iRecordedCount;
+    size_t iReplayedCount;
+    size_t iDivergenceCount;
+    bool bDiverged;
+    xwork_replay_divergence tFirstDivergence;
+} xwork_replay_result;
 
 typedef struct {
     const char *sArtifactId;
@@ -839,6 +1577,8 @@ typedef struct {
 typedef struct {
     const char *sRunId;
     const char *sParentRunId;
+    const char *sAgentId;
+    const char *sTaskId;
     const char *sInstruction;
     xwork_autonomy_mode eAutonomy;
     xwork_run_state eState;
@@ -850,7 +1590,7 @@ typedef struct {
     size_t iCount;
 } xwork_run_summary_list;
 
-typedef struct {
+struct xwork_artifact_summary {
     const char *sArtifactId;
     xwork_artifact_kind eKind;
     xwork_artifact_output_class eOutputClass;
@@ -879,7 +1619,7 @@ typedef struct {
     bool bHasExitCode;
     int iExitCode;
     size_t iSequence;
-} xwork_artifact_summary;
+};
 
 typedef struct {
     const xwork_artifact_summary *pItems;
@@ -920,6 +1660,8 @@ typedef struct {
 struct xwork_run_snapshot {
     const char *sRunId;
     const char *sParentRunId;
+    const char *sAgentId;
+    const char *sTaskId;
     const char *sInstruction;
     const char *sLlmProfileId;
     const char *sSessionProfileId;
@@ -1308,6 +2050,11 @@ struct xwork_run_index_query {
     xwork_run_state eState;
     bool bFilterAutonomy;
     xwork_autonomy_mode eAutonomy;
+    bool bRequireParentRunId;
+    const char *sParentRunId;
+    const char *sParentRunIdPrefix;
+    const char *sAgentId;
+    const char *sTaskId;
     bool bFilterLastApprovalState;
     xwork_approval_state eLastApprovalState;
     bool bRequireLastEvent;
@@ -1428,6 +2175,123 @@ XWORK_API void xwork_workspace_memory_file_sync_summary_init(
 );
 XWORK_API void xwork_tool_def_init(xwork_tool_def *pDef);
 XWORK_API void xwork_run_options_init(xwork_run_options *pOptions);
+XWORK_API void xwork_agent_pool_options_init(xwork_agent_pool_options *pOptions);
+XWORK_API void xwork_agent_options_init(xwork_agent_options *pOptions);
+XWORK_API void xwork_agent_snapshot_init(xwork_agent_snapshot *pSnapshot);
+XWORK_API void xwork_agent_snapshot_reset(xwork_agent_snapshot *pSnapshot);
+XWORK_API void xwork_agent_snapshot_list_init(xwork_agent_snapshot_list *pList);
+XWORK_API void xwork_agent_snapshot_list_reset(xwork_agent_snapshot_list *pList);
+XWORK_API void xwork_agent_pool_snapshot_init(xwork_agent_pool_snapshot *pSnapshot);
+XWORK_API void xwork_agent_pool_snapshot_reset(xwork_agent_pool_snapshot *pSnapshot);
+XWORK_API void xwork_task_node_options_init(xwork_task_node_options *pOptions);
+XWORK_API void xwork_task_graph_options_init(xwork_task_graph_options *pOptions);
+XWORK_API void xwork_task_node_summary_init(xwork_task_node_summary *pSummary);
+XWORK_API void xwork_task_node_summary_reset(xwork_task_node_summary *pSummary);
+XWORK_API void xwork_task_node_summary_list_init(xwork_task_node_summary_list *pList);
+XWORK_API void xwork_task_node_summary_list_reset(xwork_task_node_summary_list *pList);
+XWORK_API void xwork_task_node_snapshot_init(xwork_task_node_snapshot *pSnapshot);
+XWORK_API void xwork_task_node_snapshot_reset(xwork_task_node_snapshot *pSnapshot);
+XWORK_API void xwork_task_node_snapshot_list_init(xwork_task_node_snapshot_list *pList);
+XWORK_API void xwork_task_node_snapshot_list_reset(xwork_task_node_snapshot_list *pList);
+XWORK_API void xwork_task_graph_result_init(xwork_task_graph_result *pResult);
+XWORK_API void xwork_task_graph_snapshot_init(xwork_task_graph_snapshot *pSnapshot);
+XWORK_API void xwork_task_graph_snapshot_reset(xwork_task_graph_snapshot *pSnapshot);
+XWORK_API void xwork_handoff_request_options_init(
+    xwork_handoff_request_options *pOptions
+);
+XWORK_API void xwork_handoff_result_options_init(
+    xwork_handoff_result_options *pOptions
+);
+XWORK_API void xwork_handoff_summary_init(xwork_handoff_summary *pSummary);
+XWORK_API void xwork_handoff_summary_reset(xwork_handoff_summary *pSummary);
+XWORK_API void xwork_handoff_summary_list_init(xwork_handoff_summary_list *pList);
+XWORK_API void xwork_handoff_summary_list_reset(xwork_handoff_summary_list *pList);
+XWORK_API void xwork_control_plane_options_init(xwork_control_plane_options *pOptions);
+XWORK_API void xwork_worker_options_init(xwork_worker_options *pOptions);
+XWORK_API void xwork_worker_summary_init(xwork_worker_summary *pSummary);
+XWORK_API void xwork_worker_summary_reset(xwork_worker_summary *pSummary);
+XWORK_API void xwork_worker_summary_list_init(xwork_worker_summary_list *pList);
+XWORK_API void xwork_worker_summary_list_reset(xwork_worker_summary_list *pList);
+XWORK_API void xwork_worker_snapshot_init(xwork_worker_snapshot *pSnapshot);
+XWORK_API void xwork_worker_snapshot_reset(xwork_worker_snapshot *pSnapshot);
+XWORK_API void xwork_worker_snapshot_list_init(xwork_worker_snapshot_list *pList);
+XWORK_API void xwork_worker_snapshot_list_reset(xwork_worker_snapshot_list *pList);
+XWORK_API void xwork_remote_task_options_init(xwork_remote_task_options *pOptions);
+XWORK_API void xwork_remote_task_summary_init(xwork_remote_task_summary *pSummary);
+XWORK_API void xwork_remote_task_summary_reset(xwork_remote_task_summary *pSummary);
+XWORK_API void xwork_remote_task_summary_list_init(xwork_remote_task_summary_list *pList);
+XWORK_API void xwork_remote_task_summary_list_reset(xwork_remote_task_summary_list *pList);
+XWORK_API void xwork_remote_task_snapshot_init(xwork_remote_task_snapshot *pSnapshot);
+XWORK_API void xwork_remote_task_snapshot_reset(xwork_remote_task_snapshot *pSnapshot);
+XWORK_API void xwork_remote_task_snapshot_list_init(xwork_remote_task_snapshot_list *pList);
+XWORK_API void xwork_remote_task_snapshot_list_reset(xwork_remote_task_snapshot_list *pList);
+XWORK_API void xwork_remote_task_assignment_init(xwork_remote_task_assignment *pAssignment);
+XWORK_API void xwork_remote_task_assignment_reset(xwork_remote_task_assignment *pAssignment);
+XWORK_API void xwork_remote_task_result_init(xwork_remote_task_result *pResult);
+XWORK_API void xwork_remote_output_chunk_init(xwork_remote_output_chunk *pChunk);
+XWORK_API void xwork_remote_output_chunk_summary_init(
+    xwork_remote_output_chunk_summary *pSummary
+);
+XWORK_API void xwork_remote_output_chunk_summary_reset(
+    xwork_remote_output_chunk_summary *pSummary
+);
+XWORK_API void xwork_remote_output_chunk_summary_list_init(
+    xwork_remote_output_chunk_summary_list *pList
+);
+XWORK_API void xwork_remote_output_chunk_summary_list_reset(
+    xwork_remote_output_chunk_summary_list *pList
+);
+XWORK_API void xwork_remote_blob_chunk_summary_init(
+    xwork_remote_blob_chunk_summary *pSummary
+);
+XWORK_API void xwork_remote_blob_chunk_summary_reset(
+    xwork_remote_blob_chunk_summary *pSummary
+);
+XWORK_API void xwork_remote_blob_chunk_summary_list_init(
+    xwork_remote_blob_chunk_summary_list *pList
+);
+XWORK_API void xwork_remote_blob_chunk_summary_list_reset(
+    xwork_remote_blob_chunk_summary_list *pList
+);
+XWORK_API void xwork_remote_artifact_upload_init(xwork_remote_artifact_upload *pUpload);
+XWORK_API void xwork_control_plane_snapshot_init(xwork_control_plane_snapshot *pSnapshot);
+XWORK_API void xwork_control_plane_snapshot_reset(xwork_control_plane_snapshot *pSnapshot);
+XWORK_API void xwork_replay_options_init(xwork_replay_options *pOptions);
+XWORK_API void xwork_replay_manifest_init(xwork_replay_manifest *pManifest);
+XWORK_API void xwork_replay_manifest_reset(xwork_replay_manifest *pManifest);
+XWORK_API void xwork_replay_entry_options_init(xwork_replay_entry_options *pOptions);
+XWORK_API void xwork_replay_entry_summary_init(xwork_replay_entry_summary *pSummary);
+XWORK_API void xwork_replay_entry_summary_reset(xwork_replay_entry_summary *pSummary);
+XWORK_API void xwork_replay_entry_summary_list_init(xwork_replay_entry_summary_list *pList);
+XWORK_API void xwork_replay_entry_summary_list_reset(xwork_replay_entry_summary_list *pList);
+XWORK_API void xwork_replay_filesystem_ref_options_init(
+    xwork_replay_filesystem_ref_options *pOptions
+);
+XWORK_API void xwork_replay_filesystem_ref_summary_init(
+    xwork_replay_filesystem_ref_summary *pSummary
+);
+XWORK_API void xwork_replay_filesystem_ref_summary_reset(
+    xwork_replay_filesystem_ref_summary *pSummary
+);
+XWORK_API void xwork_replay_filesystem_ref_summary_list_init(
+    xwork_replay_filesystem_ref_summary_list *pList
+);
+XWORK_API void xwork_replay_filesystem_ref_summary_list_reset(
+    xwork_replay_filesystem_ref_summary_list *pList
+);
+XWORK_API void xwork_replay_event_options_init(xwork_replay_event_options *pOptions);
+XWORK_API void xwork_replay_event_options_from_model_event(
+    const xwork_model_event *pEvent,
+    xwork_replay_event_options *pOptions
+);
+XWORK_API void xwork_replay_event_summary_init(xwork_replay_event_summary *pSummary);
+XWORK_API void xwork_replay_event_summary_reset(xwork_replay_event_summary *pSummary);
+XWORK_API void xwork_replay_event_summary_list_init(xwork_replay_event_summary_list *pList);
+XWORK_API void xwork_replay_event_summary_list_reset(xwork_replay_event_summary_list *pList);
+XWORK_API void xwork_replay_divergence_init(xwork_replay_divergence *pDivergence);
+XWORK_API void xwork_replay_divergence_reset(xwork_replay_divergence *pDivergence);
+XWORK_API void xwork_replay_result_init(xwork_replay_result *pResult);
+XWORK_API void xwork_replay_result_reset(xwork_replay_result *pResult);
 XWORK_API void xwork_run_summary_init(xwork_run_summary *pSummary);
 XWORK_API void xwork_run_summary_reset(xwork_run_summary *pSummary);
 XWORK_API void xwork_run_summary_list_init(xwork_run_summary_list *pList);
@@ -1602,6 +2466,78 @@ XWORK_API xwork_status xwork_file_persistence_load_checkpoint_snapshot(
     const char *sRunId,
     const char *sCheckpointId,
     xwork_run_snapshot *pSnapshot
+);
+XWORK_API xwork_status xwork_file_persistence_store_task_graph_snapshot(
+    const xwork_file_persistence *pStore,
+    const xwork_task_graph_snapshot *pSnapshot
+);
+XWORK_API xwork_status xwork_file_persistence_load_task_graph_snapshot(
+    const xwork_file_persistence *pStore,
+    const char *sGraphId,
+    xwork_task_graph_snapshot *pSnapshot
+);
+XWORK_API xwork_status xwork_file_persistence_store_agent_pool_snapshot(
+    const xwork_file_persistence *pStore,
+    const xwork_agent_pool_snapshot *pSnapshot
+);
+XWORK_API xwork_status xwork_file_persistence_load_agent_pool_snapshot(
+    const xwork_file_persistence *pStore,
+    const char *sPoolId,
+    xwork_agent_pool_snapshot *pSnapshot
+);
+XWORK_API xwork_status xwork_file_persistence_store_control_plane_snapshot(
+    const xwork_file_persistence *pStore,
+    const xwork_control_plane_snapshot *pSnapshot
+);
+XWORK_API xwork_status xwork_file_persistence_load_control_plane_snapshot(
+    const xwork_file_persistence *pStore,
+    const char *sPlaneId,
+    xwork_control_plane_snapshot *pSnapshot
+);
+XWORK_API xwork_status xwork_file_persistence_store_replay(
+    const xwork_file_persistence *pStore,
+    const xwork_replay_engine *pEngine
+);
+XWORK_API xwork_status xwork_file_persistence_list_replays(
+    const xwork_file_persistence *pStore,
+    xwork_string_list *pList
+);
+XWORK_API xwork_status xwork_file_persistence_load_replay_manifest(
+    const xwork_file_persistence *pStore,
+    const char *sReplayId,
+    xwork_replay_manifest *pManifest
+);
+XWORK_API xwork_status xwork_file_persistence_load_replay_entries(
+    const xwork_file_persistence *pStore,
+    const char *sReplayId,
+    xwork_replay_entry_summary_list *pList
+);
+XWORK_API xwork_status xwork_file_persistence_load_replay_result(
+    const xwork_file_persistence *pStore,
+    const char *sReplayId,
+    xwork_replay_result *pResult
+);
+XWORK_API xwork_status xwork_file_persistence_load_replay_engine(
+    const xwork_file_persistence *pStore,
+    const char *sReplayId,
+    const xwork_replay_options *pOptions,
+    xwork_replay_engine **ppEngine
+);
+XWORK_API xwork_status xwork_file_persistence_recover_task_graph(
+    const xwork_file_persistence *pStore,
+    xwork_runtime *pRuntime,
+    const char *sPoolId,
+    const char *sGraphId,
+    const xwork_task_graph_options *pExecutionOptions,
+    xwork_agent_pool **ppPool,
+    xwork_task_graph **ppGraph
+);
+XWORK_API xwork_status xwork_file_persistence_recover_control_plane(
+    const xwork_file_persistence *pStore,
+    xwork_runtime *pRuntime,
+    const char *sPlaneId,
+    const xwork_control_plane_options *pOptions,
+    xwork_control_plane **ppPlane
 );
 XWORK_API xwork_status xwork_file_persistence_load_last_approval_request(
     const xwork_file_persistence *pStore,
@@ -1829,6 +2765,314 @@ XWORK_API xwork_status xwork_runtime_recover_run_from_persistence(
     xwork_runtime *pRuntime,
     const char *sRunId,
     xwork_run **ppRun
+);
+
+XWORK_API xwork_status xwork_agent_pool_create(
+    const xwork_agent_pool_options *pOptions,
+    xwork_agent_pool **ppPool
+);
+XWORK_API xwork_status xwork_agent_pool_create_from_snapshot(
+    xwork_runtime *pRuntime,
+    const xwork_agent_pool_snapshot *pSnapshot,
+    xwork_agent_pool **ppPool
+);
+XWORK_API void xwork_agent_pool_destroy(xwork_agent_pool *pPool);
+XWORK_API xwork_status xwork_agent_pool_add_agent(
+    xwork_agent_pool *pPool,
+    const xwork_agent_options *pOptions,
+    xwork_agent **ppAgent
+);
+XWORK_API size_t xwork_agent_pool_get_agent_count(const xwork_agent_pool *pPool);
+XWORK_API xwork_agent *xwork_agent_pool_find_agent(
+    const xwork_agent_pool *pPool,
+    const char *sAgentId
+);
+XWORK_API xwork_status xwork_agent_pool_get_snapshot(
+    const xwork_agent_pool *pPool,
+    xwork_agent_pool_snapshot *pSnapshot
+);
+XWORK_API const char *xwork_agent_get_id(const xwork_agent *pAgent);
+XWORK_API xwork_agent_role xwork_agent_get_role(const xwork_agent *pAgent);
+
+XWORK_API xwork_status xwork_task_graph_create(
+    const xwork_task_graph_options *pOptions,
+    xwork_task_graph **ppGraph
+);
+XWORK_API xwork_status xwork_task_graph_create_from_snapshot(
+    const xwork_task_graph_options *pOptions,
+    const xwork_task_graph_snapshot *pSnapshot,
+    xwork_task_graph **ppGraph
+);
+XWORK_API void xwork_task_graph_destroy(xwork_task_graph *pGraph);
+XWORK_API xwork_status xwork_task_graph_add_node(
+    xwork_task_graph *pGraph,
+    const xwork_task_node_options *pOptions
+);
+XWORK_API xwork_status xwork_task_graph_add_dependency(
+    xwork_task_graph *pGraph,
+    const char *sBeforeTaskId,
+    const char *sAfterTaskId
+);
+XWORK_API size_t xwork_task_graph_get_node_count(const xwork_task_graph *pGraph);
+XWORK_API xwork_status xwork_task_graph_get_node_summary(
+    const xwork_task_graph *pGraph,
+    const char *sTaskId,
+    xwork_task_node_summary *pSummary
+);
+XWORK_API xwork_status xwork_task_graph_list_node_summaries(
+    const xwork_task_graph *pGraph,
+    xwork_task_node_summary_list *pList
+);
+XWORK_API xwork_run *xwork_task_graph_get_node_run(
+    const xwork_task_graph *pGraph,
+    const char *sTaskId
+);
+XWORK_API xwork_status xwork_task_graph_get_snapshot(
+    const xwork_task_graph *pGraph,
+    xwork_task_graph_snapshot *pSnapshot
+);
+XWORK_API xwork_status xwork_task_graph_request_handoff(
+    xwork_task_graph *pGraph,
+    const xwork_handoff_request_options *pOptions,
+    xwork_handoff_summary *pSummary
+);
+XWORK_API xwork_status xwork_task_graph_resolve_handoff(
+    xwork_task_graph *pGraph,
+    const xwork_handoff_result_options *pOptions,
+    xwork_handoff_summary *pSummary
+);
+XWORK_API xwork_status xwork_task_graph_list_handoffs(
+    const xwork_task_graph *pGraph,
+    xwork_handoff_summary_list *pList
+);
+XWORK_API xwork_status xwork_task_graph_emit_agent_result_report(
+    const xwork_task_graph *pGraph,
+    const char *sTaskId,
+    const char *sArtifactId,
+    xwork_artifact *pArtifact
+);
+XWORK_API xwork_status xwork_task_graph_emit_aggregate_report(
+    const xwork_task_graph *pGraph,
+    xwork_run *pRun,
+    const char *sArtifactId,
+    xwork_artifact *pArtifact
+);
+XWORK_API xwork_status xwork_task_graph_execute(
+    xwork_task_graph *pGraph,
+    xwork_task_graph_result *pResult
+);
+XWORK_API xwork_status xwork_task_graph_cancel(
+    xwork_task_graph *pGraph,
+    const char *sReason
+);
+XWORK_API bool xwork_task_graph_is_cancelled(const xwork_task_graph *pGraph);
+XWORK_API xwork_status xwork_task_graph_pause(
+    xwork_task_graph *pGraph,
+    const char *sReason
+);
+XWORK_API xwork_status xwork_task_graph_resume(xwork_task_graph *pGraph);
+XWORK_API bool xwork_task_graph_is_paused(const xwork_task_graph *pGraph);
+
+XWORK_API xwork_status xwork_control_plane_create(
+    const xwork_control_plane_options *pOptions,
+    xwork_control_plane **ppPlane
+);
+XWORK_API xwork_status xwork_control_plane_create_from_snapshot(
+    const xwork_control_plane_options *pOptions,
+    const xwork_control_plane_snapshot *pSnapshot,
+    xwork_control_plane **ppPlane
+);
+XWORK_API void xwork_control_plane_destroy(xwork_control_plane *pPlane);
+XWORK_API xwork_status xwork_control_plane_start(xwork_control_plane *pPlane);
+XWORK_API xwork_status xwork_control_plane_stop(xwork_control_plane *pPlane);
+XWORK_API xwork_status xwork_control_plane_set_time(
+    xwork_control_plane *pPlane,
+    size_t iNowMs
+);
+XWORK_API xwork_status xwork_control_plane_register_worker(
+    xwork_control_plane *pPlane,
+    const xwork_worker_options *pOptions,
+    xwork_worker **ppWorker
+);
+XWORK_API xwork_status xwork_control_plane_unregister_worker(
+    xwork_control_plane *pPlane,
+    const char *sWorkerId
+);
+XWORK_API xwork_status xwork_control_plane_worker_heartbeat(
+    xwork_control_plane *pPlane,
+    const char *sWorkerId,
+    size_t iNowMs
+);
+XWORK_API xwork_status xwork_control_plane_sweep_stale(
+    xwork_control_plane *pPlane,
+    size_t iNowMs,
+    size_t *piOrphanedCount
+);
+XWORK_API xwork_status xwork_control_plane_list_workers(
+    const xwork_control_plane *pPlane,
+    xwork_worker_summary_list *pList
+);
+XWORK_API xwork_status xwork_control_plane_enqueue_task(
+    xwork_control_plane *pPlane,
+    const xwork_remote_task_options *pOptions
+);
+XWORK_API xwork_status xwork_control_plane_claim_task(
+    xwork_control_plane *pPlane,
+    const char *sWorkerId,
+    xwork_remote_task_assignment *pAssignment
+);
+XWORK_API xwork_status xwork_control_plane_complete_task(
+    xwork_control_plane *pPlane,
+    const char *sAssignmentId,
+    const xwork_remote_task_result *pResult
+);
+XWORK_API xwork_status xwork_control_plane_upload_artifact(
+    xwork_control_plane *pPlane,
+    const xwork_remote_artifact_upload *pUpload
+);
+XWORK_API xwork_status xwork_control_plane_upload_output_chunk(
+    xwork_control_plane *pPlane,
+    const xwork_remote_output_chunk *pChunk
+);
+XWORK_API xwork_status xwork_control_plane_list_artifact_blobs(
+    const xwork_control_plane *pPlane,
+    const char *sTaskId,
+    const char *sArtifactId,
+    xwork_remote_blob_chunk_summary_list *pList
+);
+XWORK_API xwork_status xwork_control_plane_fail_task(
+    xwork_control_plane *pPlane,
+    const char *sAssignmentId,
+    const char *sErrorText,
+    bool bRetryable
+);
+XWORK_API xwork_status xwork_control_plane_cancel_task(
+    xwork_control_plane *pPlane,
+    const char *sTaskId,
+    const char *sReason
+);
+XWORK_API xwork_status xwork_control_plane_execute_next_local(
+    xwork_control_plane *pPlane,
+    const char *sWorkerId,
+    xwork_remote_task_assignment *pAssignment
+);
+XWORK_API xwork_status xwork_control_plane_get_task_summary(
+    const xwork_control_plane *pPlane,
+    const char *sTaskId,
+    xwork_remote_task_summary *pSummary
+);
+XWORK_API xwork_status xwork_control_plane_list_tasks(
+    const xwork_control_plane *pPlane,
+    xwork_remote_task_summary_list *pList
+);
+XWORK_API xwork_status xwork_control_plane_get_snapshot(
+    const xwork_control_plane *pPlane,
+    xwork_control_plane_snapshot *pSnapshot
+);
+
+XWORK_API xwork_status xwork_replay_engine_create(
+    const xwork_replay_options *pOptions,
+    xwork_replay_engine **ppEngine
+);
+XWORK_API void xwork_replay_engine_destroy(xwork_replay_engine *pEngine);
+XWORK_API xwork_replay_mode xwork_replay_engine_get_mode(
+    const xwork_replay_engine *pEngine
+);
+XWORK_API bool xwork_replay_engine_blocks_side_effects(
+    const xwork_replay_engine *pEngine
+);
+XWORK_API xwork_status xwork_replay_engine_record_entry(
+    xwork_replay_engine *pEngine,
+    const xwork_replay_entry_options *pEntry
+);
+XWORK_API xwork_status xwork_replay_engine_load_entry(
+    xwork_replay_engine *pEngine,
+    const xwork_replay_entry_options *pEntry
+);
+XWORK_API xwork_status xwork_replay_engine_replay_entry(
+    xwork_replay_engine *pEngine,
+    const xwork_replay_entry_options *pExpected,
+    xwork_replay_entry_summary *pActual
+);
+XWORK_API xwork_status xwork_replay_engine_record_filesystem_ref(
+    xwork_replay_engine *pEngine,
+    const xwork_replay_filesystem_ref_options *pRef
+);
+XWORK_API xwork_status xwork_replay_engine_load_filesystem_ref(
+    xwork_replay_engine *pEngine,
+    const xwork_replay_filesystem_ref_options *pRef
+);
+XWORK_API xwork_status xwork_replay_engine_replay_filesystem_ref(
+    xwork_replay_engine *pEngine,
+    const xwork_replay_filesystem_ref_options *pExpected,
+    xwork_replay_filesystem_ref_summary *pActual
+);
+XWORK_API xwork_status xwork_replay_engine_list_filesystem_refs(
+    const xwork_replay_engine *pEngine,
+    xwork_replay_filesystem_ref_summary_list *pList
+);
+XWORK_API xwork_status xwork_replay_engine_record_event(
+    xwork_replay_engine *pEngine,
+    const xwork_replay_event_options *pEvent
+);
+XWORK_API xwork_status xwork_replay_engine_load_event(
+    xwork_replay_engine *pEngine,
+    const xwork_replay_event_options *pEvent
+);
+XWORK_API xwork_status xwork_replay_engine_replay_event(
+    xwork_replay_engine *pEngine,
+    const xwork_replay_event_options *pExpected,
+    xwork_replay_event_summary *pActual
+);
+XWORK_API xwork_status xwork_replay_engine_seek_checkpoint(
+    xwork_replay_engine *pEngine,
+    const char *sCheckpointId
+);
+XWORK_API xwork_status xwork_replay_engine_emit_report_artifact(
+    const xwork_replay_engine *pEngine,
+    xwork_run *pRun,
+    const char *sArtifactId,
+    xwork_artifact *pArtifact
+);
+XWORK_API xwork_status xwork_replay_engine_cancel(
+    xwork_replay_engine *pEngine,
+    const char *sReason
+);
+XWORK_API xwork_status xwork_replay_engine_get_manifest(
+    const xwork_replay_engine *pEngine,
+    xwork_replay_manifest *pManifest
+);
+XWORK_API xwork_status xwork_replay_engine_get_result(
+    const xwork_replay_engine *pEngine,
+    xwork_replay_result *pResult
+);
+XWORK_API xwork_status xwork_replay_engine_get_first_divergence(
+    const xwork_replay_engine *pEngine,
+    xwork_replay_divergence *pDivergence
+);
+XWORK_API xwork_status xwork_replay_engine_list_entries(
+    const xwork_replay_engine *pEngine,
+    xwork_replay_entry_summary_list *pList
+);
+XWORK_API xwork_status xwork_replay_engine_list_events(
+    const xwork_replay_engine *pEngine,
+    xwork_replay_event_summary_list *pList
+);
+XWORK_API xwork_status xwork_replay_hash_text(
+    const char *sText,
+    char *sBuffer,
+    size_t iBufferSize
+);
+/*
+ * Hash a JSON payload after normalization. Object keys are sorted and
+ * insignificant whitespace is ignored. Invalid JSON returns
+ * XWORK_ERROR_INVALID_ARGUMENT. Replay entry JSON fields use this hash when
+ * the payload parses as JSON and fall back to text hashing for non-JSON text.
+ */
+XWORK_API xwork_status xwork_replay_hash_json(
+    const char *sJson,
+    char *sBuffer,
+    size_t iBufferSize
 );
 
 XWORK_API xwork_status xwork_run_create(

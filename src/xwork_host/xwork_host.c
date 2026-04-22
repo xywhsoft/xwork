@@ -70,6 +70,64 @@ static const xwork_host_service *xwork__runtime_get_host_service_slot(
     }
 }
 
+static xwork_replay_entry_kind xwork__host_replay_entry_kind(
+    xwork_host_service_kind eKind
+)
+{
+    switch ( eKind ) {
+        case XWORK_HOST_FILESYSTEM:
+            return XWORK_REPLAY_ENTRY_FILESYSTEM;
+        case XWORK_HOST_PROCESS:
+            return XWORK_REPLAY_ENTRY_PROCESS;
+        case XWORK_HOST_VCS:
+        case XWORK_HOST_NETWORK:
+        case XWORK_HOST_DIAGNOSTICS:
+        case XWORK_HOST_EDITOR:
+            return XWORK_REPLAY_ENTRY_HOST_TOOL;
+        default:
+            return XWORK_REPLAY_ENTRY_HOST_TOOL;
+    }
+}
+
+static xwork_status xwork__runtime_replay_host_result(
+    const xwork_runtime *pRuntime,
+    const xwork_replay_entry_summary *pActual,
+    xwork_tool_result *pResult
+)
+{
+    xwork_runtime *pMutableRuntime;
+    xwork_status iStatus;
+
+    if ( !pRuntime || !pActual || !pResult ) {
+        return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+    if ( !pActual->sResultJson ) {
+        return XWORK_ERROR_EXTERNAL_FAILURE;
+    }
+
+    pMutableRuntime = (xwork_runtime *)pRuntime;
+    iStatus = xwork__replace_cstr(
+        &pMutableRuntime->sLastReplayHostOutputText,
+        pActual->sResultJson
+    );
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+    iStatus = xwork__replace_cstr(
+        &pMutableRuntime->sLastReplayHostVisibleSummary,
+        "replayed host service result"
+    );
+    if ( iStatus != XWORK_OK ) {
+        return iStatus;
+    }
+
+    xwork_tool_result_init(pResult);
+    pResult->sOutputText = pMutableRuntime->sLastReplayHostOutputText;
+    pResult->sVisibleSummary = pMutableRuntime->sLastReplayHostVisibleSummary;
+    pResult->bRetryable = false;
+    return pActual->iStatus;
+}
+
 static bool xwork__local_host_is_absolute_path(const char *sPath)
 {
     if ( !sPath || !sPath[0] ) {
@@ -9379,9 +9437,46 @@ xwork_status xwork_runtime_invoke_host_service_ex(
 )
 {
     const xwork_host_service *pService;
+    xwork_replay_engine *pReplayEngine;
+    xwork_replay_mode eReplayMode;
+    xwork_replay_entry_kind eReplayEntryKind;
+    xwork_replay_entry_options tReplayEntry;
+    xwork_replay_entry_summary tReplayActual;
+    xwork_status iStatus;
 
     if ( !pRuntime || !sOperationId || !sOperationId[0] || !pResult ) {
         return XWORK_ERROR_INVALID_ARGUMENT;
+    }
+
+    pReplayEngine = pRuntime->pReplayEngine;
+    eReplayEntryKind = xwork__host_replay_entry_kind(eKind);
+    if ( pReplayEngine ) {
+        eReplayMode = xwork_replay_engine_get_mode(pReplayEngine);
+        if ( eReplayMode != XWORK_REPLAY_MODE_RECORD ) {
+            xwork_replay_entry_options_init(&tReplayEntry);
+            xwork_replay_entry_summary_init(&tReplayActual);
+            tReplayEntry.eKind = eReplayEntryKind;
+            tReplayEntry.sKey = sOperationId;
+            tReplayEntry.sOperationId = sOperationId;
+            tReplayEntry.sArgumentsJson = sRequestJson;
+            iStatus = xwork_replay_engine_replay_entry(
+                pReplayEngine,
+                &tReplayEntry,
+                &tReplayActual
+            );
+            if ( iStatus == XWORK_OK ) {
+                iStatus = xwork__runtime_replay_host_result(
+                    pRuntime,
+                    &tReplayActual,
+                    pResult
+                );
+            }
+            xwork_replay_entry_summary_reset(&tReplayActual);
+            return iStatus;
+        }
+        if ( xwork_replay_engine_blocks_side_effects(pReplayEngine) ) {
+            return XWORK_ERROR_PAUSED;
+        }
     }
 
     pService = xwork__runtime_get_host_service_slot(pRuntime, eKind);
@@ -9391,13 +9486,39 @@ xwork_status xwork_runtime_invoke_host_service_ex(
 
     xwork_tool_result_init(pResult);
     if ( pService->pfnInvokeEx ) {
-        return pService->pfnInvokeEx(
+        iStatus = pService->pfnInvokeEx(
             sOperationId,
             sRequestJson,
             pContext,
             pResult,
             pService->pUserData
         );
+    } else {
+        iStatus = pService->pfnInvoke(
+            sOperationId,
+            sRequestJson,
+            pResult,
+            pService->pUserData
+        );
     }
-    return pService->pfnInvoke(sOperationId, sRequestJson, pResult, pService->pUserData);
+
+    if ( pReplayEngine ) {
+        xwork_replay_entry_options_init(&tReplayEntry);
+        tReplayEntry.eKind = eReplayEntryKind;
+        tReplayEntry.sKey = sOperationId;
+        tReplayEntry.sOperationId = sOperationId;
+        tReplayEntry.sArgumentsJson = sRequestJson;
+        tReplayEntry.sResultJson = pResult->sOutputText;
+        tReplayEntry.iStatus = iStatus;
+        {
+            xwork_status iRecordStatus = xwork_replay_engine_record_entry(
+                pReplayEngine,
+                &tReplayEntry
+            );
+            if ( iRecordStatus != XWORK_OK ) {
+                return iRecordStatus;
+            }
+        }
+    }
+    return iStatus;
 }

@@ -87,6 +87,9 @@ struct xwork_artifact_record {
 struct xwork_runtime {
     xllm_runtime *pLlmRuntime;
     bool bOwnLlmRuntime;
+    xwork_replay_engine *pReplayEngine;
+    char *sLastReplayHostOutputText;
+    char *sLastReplayHostVisibleSummary;
     xwork_host_services tHostServices;
     xwork_persistence_backend tPersistenceBackend;
     xwork_policy_options tPolicy;
@@ -123,6 +126,8 @@ struct xwork_run {
     xwork_runtime *pRuntime;
     char *sRunId;
     char *sParentRunId;
+    char *sAgentId;
+    char *sTaskId;
     char *sInstruction;
     char *sLlmProfileId;
     char *sSessionProfileId;

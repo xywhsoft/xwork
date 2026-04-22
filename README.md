@@ -56,6 +56,9 @@ What exists now:
 - runs can now execute through a minimal async handle (`xwork_run_execute_async` / `xwork_run_async_*`) with wait, timed wait, status, cancel, and destroy APIs; async cancel feeds the same cooperative cancel token path and is covered against mock tools, unfinished-handle destroy, and local `process.exec`
 - async run API docs now state the shallow-copy/lifetime contract for run/options/callback user data and the wait-timeout status semantics
 - run execution now has a per-run execution guard, so concurrent `xwork_run_execute` entries on the same run fail with `XWORK_ERROR_INVALID_STATE`
+- in-process multi-agent task graph baseline: `xwork_agent_pool`, agent roles, task nodes/dependencies, child-run mapping, max-concurrency fan-out/fan-in scheduling, failure propagation policies, cooperative cancel, scheduler pause/resume, per-agent retry, handoff request/result tracking with artifact refs, memory context refs, shared workspace refs, read-only/shared-writable policy flags, handoff audit events, handoff snapshot persistence/recovery, agent result and aggregate report artifacts using `xwork.report.v1`, child-run event audit entries, parent/agent/task run index filters, file-persisted agent pool and graph snapshots, snapshot-to-graph import, and persistence recovery for pending/completed graph state
+- remote worker/control plane baseline: `xwork_control_plane`, worker registry/heartbeat/lease state, assignment queue, claim/complete/fail/cancel APIs, HTTP decoded-message transport marker, task policy/approval and network policy gates, secret redaction, capability matching plus control-plane capability allowlists, local worker `process.exec`, remote terminal start/list/stop, and filesystem host-tool execution with workspace-root and destructive-command policy enforcement, defined in-process worker-auth and single-tenant/project boundaries, result-attached artifact/diagnostics summary refs, artifact upload messages with blob refs/content hashes/chunk metadata/payload bytes, plane-owned blob chunk query/recovery, stdout/stderr output chunk upload/query/recovery, stale lease detection, orphaned assignment marking, worker/task query APIs, file-persisted control plane snapshots, and recovery that orphans in-flight assignments while keeping queued work resumable
+- deterministic replay cassette baseline: `xwork_replay_engine`, record/load/replay entry APIs, typed filesystem snapshot/ref API, runtime host-service record/replay integration, replay event log schema for model stream/terminal/event sequence comparison, checkpoint seek, manifest/result/divergence summaries, strict and audit modes, side-effect blocking, cancel, first-divergence query, divergence report artifact emission, stable `fnv1a64` text hash, and file-persisted replay manifest/entry/result/raw-payload query and recovery
 - provider smoke now exercises the async run handle on its main provider execution path while keeping local stub coverage for request/response normalization and an offline model-call failure path
 - minimal local host helper for filesystem/process/vcs host services
 - built-in host tool defs for `filesystem.read_text` / `filesystem.write_text` / `filesystem.list` / `filesystem.stat` / `filesystem.glob` / `filesystem.mkdir` / `filesystem.move` / `filesystem.delete` / `filesystem.apply_patch` / `process.exec` / `process.start_terminal` / `process.terminal_read` / `process.terminal_write` / `process.terminal_resize` / `process.terminal_stop` / `vcs.status` / `vcs.diff` / `vcs.log` / `vcs.branch`
@@ -258,18 +261,27 @@ int main(void)
 
 ## Runnable Examples
 
-Two product-oriented examples are available under [examples](/D:/git/xwork/examples):
+Product-oriented examples are available under [examples](/D:/git/xwork/examples):
 
 - [examples/ai_ide_agent.c](/D:/git/xwork/examples/ai_ide_agent.c) uses the `xcode` profile, local filesystem host service, a mock `xllm` model turn, dry-run patch/report artifacts, and approval pause/resume.
 - [examples/claw_autonomous_agent.c](/D:/git/xwork/examples/claw_autonomous_agent.c) uses the `xclaw` profile, `process.exec`, command/report artifacts, file persistence, and run recovery.
+- [examples/multi_agent_claw.c](/D:/git/xwork/examples/multi_agent_claw.c) uses the `xclaw` profile with the P3 in-process multi-agent scheduler, child run report artifacts, agent/task graph persistence, recovery, and parent/agent/task run-index query.
+- [examples/remote_worker_agent.c](/D:/git/xwork/examples/remote_worker_agent.c) uses the P3 remote worker/control plane, local `process.exec` worker execution, HTTP decoded-message transport marker, control-plane snapshot persistence, recovery orphaning, remote result/artifact summaries, artifact blob chunk recovery, and queued task continuation.
+- [examples/replay_agent_run.c](/D:/git/xwork/examples/replay_agent_run.c) uses the P3 deterministic replay cassette, filesystem snapshot/ref records, checkpoint seek, strict replay, audit divergence, and replay report artifact emission.
 
 Typical build/run commands:
 
 ```powershell
 gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib\sqlite examples\ai_ide_agent.c examples\xwork_example_runtime.c lib\sqlite\sqlite3.c -o examples\ai_ide_agent.exe -lws2_32 -liphlpapi
 gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib\sqlite examples\claw_autonomous_agent.c examples\xwork_example_runtime.c lib\sqlite\sqlite3.c -o examples\claw_autonomous_agent.exe -lws2_32 -liphlpapi
+gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib\sqlite examples\multi_agent_claw.c examples\xwork_example_runtime.c lib\sqlite\sqlite3.c -o examples\multi_agent_claw.exe -lws2_32 -liphlpapi
+gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib\sqlite examples\remote_worker_agent.c examples\xwork_example_runtime.c lib\sqlite\sqlite3.c -o examples\remote_worker_agent.exe -lws2_32 -liphlpapi
+gcc -std=c11 -Wall -Wextra -pedantic -I. -Ilib\sqlite examples\replay_agent_run.c examples\xwork_example_runtime.c lib\sqlite\sqlite3.c -o examples\replay_agent_run.exe -lws2_32 -liphlpapi
 examples\ai_ide_agent.exe
 examples\claw_autonomous_agent.exe
+examples\multi_agent_claw.exe
+examples\remote_worker_agent.exe
+examples\replay_agent_run.exe
 ```
 
 ## Near-Term Milestones
@@ -291,6 +303,9 @@ Primary smoke coverage currently lives in:
 - [tests/xwork_profile_smoke.c](/D:/git/xwork/tests/xwork_profile_smoke.c)
 - [tests/xwork_orchestrator_provider_smoke.c](/D:/git/xwork/tests/xwork_orchestrator_provider_smoke.c)
 - [tests/xwork_stress_smoke.c](/D:/git/xwork/tests/xwork_stress_smoke.c)
+- [tests/xwork_multi_agent_smoke.c](/D:/git/xwork/tests/xwork_multi_agent_smoke.c)
+- [tests/xwork_remote_worker_smoke.c](/D:/git/xwork/tests/xwork_remote_worker_smoke.c)
+- [tests/xwork_replay_smoke.c](/D:/git/xwork/tests/xwork_replay_smoke.c)
 
 See [tests/README.md](/D:/git/xwork/tests/README.md) for the test groups,
 optional real-provider environment variables, and the CI target mapping.
@@ -302,6 +317,13 @@ Packaging and compatibility notes are tracked in
 Builtin host tool contracts and examples are tracked in
 [docs/HOST_TOOL_CONTRACTS.md](/D:/git/xwork/docs/HOST_TOOL_CONTRACTS.md) and
 [docs/HOST_TOOL_EXAMPLES.md](/D:/git/xwork/docs/HOST_TOOL_EXAMPLES.md).
+P3 full-capability tracking is recorded in
+[P3_FUTURE_BOUNDARY_TRACKING_SPEC.md](/D:/git/xwork/P3_FUTURE_BOUNDARY_TRACKING_SPEC.md).
+Remote worker/control-plane ownership, thread-safety, shutdown, transport,
+wire JSON schema, and recovery boundaries are documented in
+[docs/REMOTE_WORKER.md](/D:/git/xwork/docs/REMOTE_WORKER.md).
+Deterministic replay entry/event contracts are documented in
+[docs/REPLAY.md](/D:/git/xwork/docs/REPLAY.md).
 
 Typical compile/run commands:
 
@@ -314,6 +336,9 @@ gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_persistence_smoke.
 gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_profile_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_profile_smoke.exe -lws2_32 -liphlpapi
 gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_orchestrator_provider_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_orchestrator_provider_smoke.exe -lws2_32 -liphlpapi
 gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_stress_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_stress_smoke.exe -lws2_32 -liphlpapi
+gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_multi_agent_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_multi_agent_smoke.exe -lws2_32 -liphlpapi
+gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_remote_worker_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_remote_worker_smoke.exe -lws2_32 -liphlpapi
+gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_replay_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_replay_smoke.exe -lws2_32 -liphlpapi
 tests\xwork_core_smoke.exe
 tests\xwork_host_smoke.exe
 tests\xwork_orchestrator_smoke.exe
@@ -321,6 +346,9 @@ tests\xwork_persistence_smoke.exe
 tests\xwork_profile_smoke.exe
 tests\xwork_orchestrator_provider_smoke.exe
 tests\xwork_stress_smoke.exe
+tests\xwork_multi_agent_smoke.exe
+tests\xwork_remote_worker_smoke.exe
+tests\xwork_replay_smoke.exe
 ```
 
 The provider smoke now runs offline by default with local OpenAI-compatible,
@@ -333,8 +361,7 @@ The real-provider runbook and drift log template are tracked in
 
 ## Non-Goals For This Stage
 
-- distributed scheduling
-- remote control plane
+- production remote transport / cloud control plane
 - rich editor integration
 - production-grade persistence
 - full autonomous planner

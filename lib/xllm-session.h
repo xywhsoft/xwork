@@ -104,6 +104,27 @@ typedef enum {
 } xllm_log_level;
 
 typedef enum {
+    XLLM_LOG_EVENT_UNKNOWN = 0,
+    XLLM_LOG_EVENT_RUNTIME_CREATE,
+    XLLM_LOG_EVENT_RUNTIME_DESTROY,
+    XLLM_LOG_EVENT_PROVIDER_REQUEST_START,
+    XLLM_LOG_EVENT_PROVIDER_RESPONSE_COMPLETE,
+    XLLM_LOG_EVENT_PROVIDER_RESPONSE_FAILED,
+    XLLM_LOG_EVENT_PROVIDER_RETRY_SCHEDULED,
+    XLLM_LOG_EVENT_STREAM_EVENT,
+    XLLM_LOG_EVENT_SESSION_COMPACT_TRIGGERED,
+    XLLM_LOG_EVENT_SESSION_COMPACT_RESULT,
+    XLLM_LOG_EVENT_TOOL_LOOP_ROUND,
+    XLLM_LOG_EVENT_TOOL_LOOP_EXECUTE,
+    XLLM_LOG_EVENT_TOOL_LOOP_STOP,
+    XLLM_LOG_EVENT_MEMORY_INGEST,
+    XLLM_LOG_EVENT_MEMORY_SEARCH,
+    XLLM_LOG_EVENT_MEMORY_HEALTH_CHECK,
+    XLLM_LOG_EVENT_WORKSPACE_SYNC,
+    XLLM_LOG_EVENT_WATCHER_EVENT
+} xllm_log_event;
+
+typedef enum {
     XLLM_TRACE_EVENT = 1,
     XLLM_TRACE_REQUEST,
     XLLM_TRACE_RESPONSE,
@@ -920,6 +941,10 @@ XLLM_API void xllm_error_init(xllm_error *pError);
 
 XLLM_API int xllm_runtime_create(const xllm_runtime_options *pOptions, xllm_runtime **ppRuntime);
 XLLM_API void xllm_runtime_destroy(xllm_runtime *pRuntime);
+
+XLLM_API const char *xllm_log_level_name(xllm_log_level eLevel);
+XLLM_API const char *xllm_log_event_name(xllm_log_event eEvent);
+XLLM_API const char *xllm_trace_kind_name(xllm_trace_kind eKind);
 
 XLLM_API int xllm_runtime_set_log_callback(
     xllm_runtime *pRuntime,
@@ -1791,6 +1816,7 @@ static void xllm__turn_release(xllm_turn *pTurn)
     memset(pTurn, 0, sizeof(*pTurn));
 }
 
+#if defined(XLLM__WITH_SESSION)
 static int xllm__turn_clone(xllm_turn *pOut, const xllm_turn *pIn)
 {
     if ( !pOut || !pIn ) {
@@ -1833,7 +1859,6 @@ static int xllm__turn_clone(xllm_turn *pOut, const xllm_turn *pIn)
     return XRT_NET_OK;
 }
 
-#if defined(XLLM__WITH_SESSION)
 XLLM_API int xllm_turn_clone(xllm_turn *pOut, const xllm_turn *pIn)
 {
     return xllm__turn_clone(pOut, pIn);
@@ -2918,6 +2943,87 @@ XLLM_API void xllm_runtime_destroy(xllm_runtime *pRuntime)
     }
     xllm__runtime_options_reset(&pRuntime->tOptions);
     xrtFree(pRuntime);
+}
+
+XLLM_API const char *xllm_log_level_name(xllm_log_level eLevel)
+{
+    switch ( eLevel ) {
+        case XLLM_LOG_ERROR:
+            return "error";
+        case XLLM_LOG_WARN:
+            return "warn";
+        case XLLM_LOG_INFO:
+            return "info";
+        case XLLM_LOG_DEBUG:
+            return "debug";
+        case XLLM_LOG_TRACE:
+            return "trace";
+        default:
+            return "unknown";
+    }
+}
+
+XLLM_API const char *xllm_log_event_name(xllm_log_event eEvent)
+{
+    switch ( eEvent ) {
+        case XLLM_LOG_EVENT_RUNTIME_CREATE:
+            return "runtime.create";
+        case XLLM_LOG_EVENT_RUNTIME_DESTROY:
+            return "runtime.destroy";
+        case XLLM_LOG_EVENT_PROVIDER_REQUEST_START:
+            return "provider.request_start";
+        case XLLM_LOG_EVENT_PROVIDER_RESPONSE_COMPLETE:
+            return "provider.response_complete";
+        case XLLM_LOG_EVENT_PROVIDER_RESPONSE_FAILED:
+            return "provider.response_failed";
+        case XLLM_LOG_EVENT_PROVIDER_RETRY_SCHEDULED:
+            return "provider.retry_scheduled";
+        case XLLM_LOG_EVENT_STREAM_EVENT:
+            return "stream.event";
+        case XLLM_LOG_EVENT_SESSION_COMPACT_TRIGGERED:
+            return "session.compact_triggered";
+        case XLLM_LOG_EVENT_SESSION_COMPACT_RESULT:
+            return "session.compact_result";
+        case XLLM_LOG_EVENT_TOOL_LOOP_ROUND:
+            return "tool_loop.round";
+        case XLLM_LOG_EVENT_TOOL_LOOP_EXECUTE:
+            return "tool_loop.execute";
+        case XLLM_LOG_EVENT_TOOL_LOOP_STOP:
+            return "tool_loop.stop";
+        case XLLM_LOG_EVENT_MEMORY_INGEST:
+            return "memory.ingest";
+        case XLLM_LOG_EVENT_MEMORY_SEARCH:
+            return "memory.search";
+        case XLLM_LOG_EVENT_MEMORY_HEALTH_CHECK:
+            return "memory.health_check";
+        case XLLM_LOG_EVENT_WORKSPACE_SYNC:
+            return "workspace.sync";
+        case XLLM_LOG_EVENT_WATCHER_EVENT:
+            return "watcher.event";
+        case XLLM_LOG_EVENT_UNKNOWN:
+        default:
+            return "unknown";
+    }
+}
+
+XLLM_API const char *xllm_trace_kind_name(xllm_trace_kind eKind)
+{
+    switch ( eKind ) {
+        case XLLM_TRACE_EVENT:
+            return "event";
+        case XLLM_TRACE_REQUEST:
+            return "request";
+        case XLLM_TRACE_RESPONSE:
+            return "response";
+        case XLLM_TRACE_STREAM:
+            return "stream";
+        case XLLM_TRACE_COMPACT:
+            return "compact";
+        case XLLM_TRACE_TOOL_LOOP:
+            return "tool_loop";
+        default:
+            return "unknown";
+    }
 }
 
 XLLM_API int xllm_runtime_set_log_callback(

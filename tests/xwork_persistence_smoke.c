@@ -54,7 +54,7 @@ int main(void)
     char *sFutureSnapshotPath = NULL;
     char sStoreRoot[128];
 
-    assert(XWORK_PERSISTENCE_FORMAT_VERSION == 3u);
+    assert(XWORK_PERSISTENCE_FORMAT_VERSION == 14u);
     xwork_file_persistence_init(&tStore);
     xwork_file_persistence_options_init(&tStoreOptions);
     xwork_persistence_backend_init(&tBackend);
@@ -83,6 +83,9 @@ int main(void)
     assert(xwork_runtime_create(&tRuntimeOptions, &pRuntime) == XWORK_OK);
 
     tRunOptions.sRunId = "persistence-split-run";
+    tRunOptions.sParentRunId = "persistence-parent";
+    tRunOptions.sAgentId = "persistence-agent";
+    tRunOptions.sTaskId = "persistence-task";
     tRunOptions.sInstruction = "persistence split smoke";
     tRunOptions.eAutonomy = XWORK_AUTONOMY_SEMI_AUTO;
     assert(xwork_run_create(pRuntime, &tRunOptions, &pRun) == XWORK_OK);
@@ -110,6 +113,9 @@ int main(void)
         ) == XWORK_OK
     );
     assert(tSummary.eState == XWORK_RUN_COMPLETED);
+    assert(strcmp(tSummary.sParentRunId, "persistence-parent") == 0);
+    assert(strcmp(tSummary.sAgentId, "persistence-agent") == 0);
+    assert(strcmp(tSummary.sTaskId, "persistence-task") == 0);
     assert(strcmp(tSummary.sInstruction, "persistence split smoke") == 0);
 
     xwork_run_snapshot_reset(&tSnapshot);
@@ -121,6 +127,8 @@ int main(void)
         ) == XWORK_OK
     );
     assert(tSnapshot.eState == XWORK_RUN_COMPLETED);
+    assert(strcmp(tSnapshot.sAgentId, "persistence-agent") == 0);
+    assert(strcmp(tSnapshot.sTaskId, "persistence-task") == 0);
     assert(tSnapshot.iArtifactCount >= 1u);
 
     assert(
@@ -145,6 +153,9 @@ int main(void)
     xwork_run_index_query_init(&tRunQuery);
     tRunQuery.bFilterState = true;
     tRunQuery.eState = XWORK_RUN_COMPLETED;
+    tRunQuery.sParentRunId = "persistence-parent";
+    tRunQuery.sAgentId = "persistence-agent";
+    tRunQuery.sTaskId = "persistence-task";
     tRunQuery.bRequireArtifacts = true;
     iStatus = xwork_file_persistence_query_run_index(&tStore, &tRunQuery, &tRunIndex);
     assert(iStatus == XWORK_OK);

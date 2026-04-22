@@ -11,6 +11,12 @@ short human-readable status.
 - When `xwork_local_host_options.bEnforceFilesystemRoot` is true, filesystem and editor-buffer paths must stay under `sDefaultWorkingDirectory`.
 - Failure responses include `ok:false`, an `error_kind`, and an `error` string where available.
 - Bounded operations may return `truncated:true` or pagination metadata.
+- If the runtime has `xwork_runtime_options::pReplayEngine`, host service calls
+  are replay-aware. Record mode stores host request/result payloads in the
+  replay cassette; strict/audit replay modes return recorded output without
+  invoking the real host service.
+- Side-effect-blocking record mode returns `XWORK_ERROR_PAUSED` before running
+  filesystem/process/host service operations.
 - Orchestrator execution may synthesize artifacts from successful builtin tool results.
 
 ## Filesystem
@@ -284,4 +290,3 @@ Request fields:
 
 Edits are policy/approval controlled by the orchestrator and can be persisted as
 buffer/file-change artifacts.
-

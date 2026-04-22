@@ -11,8 +11,9 @@ The `0.1.0` source snapshot includes:
 - Public status values and `xwork_status_cstr()`.
 - Runtime, workspace, run, async run, tool registry, host service, policy,
   event, approval, checkpoint, artifact, persistence, profile, session policy,
-  and orchestrator public structs/functions in `xwork.h`.
-- File persistence format version `XWORK_PERSISTENCE_FORMAT_VERSION == 3`.
+  orchestrator, multi-agent, remote worker/control plane, and replay public
+  structs/functions in `xwork.h`.
+- File persistence format version `XWORK_PERSISTENCE_FORMAT_VERSION == 9`.
 - Source aggregation through `xwork.c`.
 
 ## Compatibility Rules
@@ -60,7 +61,7 @@ The full default smoke matrix is listed in `tests/README.md` and mirrored by
 - Version and status string contracts are present.
 - Public init/reset/destroy coverage exists for the currently exposed owning
   objects and lists.
-- Persistence format v3 is documented and has focused newer-version rejection
+- Persistence format v9 is documented and has focused newer-version rejection
   coverage.
 - Host tool JSON contracts are documented separately in
   `docs/HOST_TOOL_CONTRACTS.md`.

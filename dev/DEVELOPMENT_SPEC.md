@@ -37,12 +37,17 @@
 - typed patch/report/command/output artifact emit helper
 - in-memory persistence 与 file persistence backend
 - persisted run/event/checkpoint/artifact 查询面
+- P3 remote worker/control plane 已支持 result 附带 artifact/diagnostics summary refs，并支持 artifact upload message 携带 blob ref、content hash、chunk 元数据和 payload bytes；artifact blob chunks 可查询并随 control-plane snapshot 持久化/恢复；stdout/stderr output chunk 也可上传、查询并恢复；in-process worker 也可通过 capability allowlist 执行 remote terminal start/list/stop 最小闭环；ownership/thread-safety/shutdown/transport/wire JSON schema/recovery contract 已落在 `docs/REMOTE_WORKER.md`
+- P3 deterministic replay 已有 cassette baseline：record/load/replay entry、runtime host-service record/replay、event log schema、model stream/terminal event sequence replay、checkpoint seek、strict/audit divergence、divergence report artifact、manifest/result/query、raw payload persistence store/list/load/recover 和 stable text hash
 - `xcode` / `xclaw` 内建 profile
-- `examples/ai_ide_agent.c` 和 `examples/claw_autonomous_agent.c` 最小产品接入样例
+- `examples/ai_ide_agent.c`、`examples/claw_autonomous_agent.c` 和 `examples/multi_agent_claw.c` 最小产品接入样例
 - 内部模块目录：
   - [src/xwork_core](/D:/git/xwork/src/xwork_core)
   - [src/xwork_workspace](/D:/git/xwork/src/xwork_workspace)
   - [src/xwork_tools](/D:/git/xwork/src/xwork_tools)
+  - [src/xwork_agents](/D:/git/xwork/src/xwork_agents)
+  - [src/xwork_remote](/D:/git/xwork/src/xwork_remote)
+  - [src/xwork_replay](/D:/git/xwork/src/xwork_replay)
   - [src/xwork_orchestrator](/D:/git/xwork/src/xwork_orchestrator)
   - [src/xwork_policy](/D:/git/xwork/src/xwork_policy)
   - [src/xwork_persistence](/D:/git/xwork/src/xwork_persistence)
@@ -210,6 +215,9 @@
 - profile smoke 已覆盖关键默认值、runtime/workspace/run/orchestrator options 应用，以及默认 approval 行为差异。
 - `examples/ai_ide_agent.c` 已覆盖 `xcode` profile、local filesystem host、example-only mock `xllm` model turn、dry-run patch/report artifacts，以及 `filesystem.apply_patch` 的 approval pause / submit / resume 闭环。
 - `examples/claw_autonomous_agent.c` 已覆盖 `xclaw` profile、`process.exec`、command/report artifacts、file persistence snapshot 和 recovery。
+- `examples/multi_agent_claw.c` 已覆盖 `xclaw` profile 下的 agent pool/task graph、planner/coder/tester/reviewer fan-out/fan-in、child run report artifacts、agent/task graph persistence、parent/agent/task run-index query 和 graph recovery。
+- `examples/remote_worker_agent.c` 已覆盖 P3 remote worker/control plane：local worker `process.exec`、control-plane snapshot persistence、recovery orphaning 和 queued task continuation。
+- `examples/replay_agent_run.c` 已覆盖 P3 deterministic replay：recorded cassette、checkpoint seek、strict replay、audit divergence 和 divergence report artifact。
 
 ## 6. 开发策略
 
@@ -295,9 +303,13 @@
 - run execution 已有 per-run execution guard，同一个 run 的并发 `xwork_run_execute` 入口会返回 `XWORK_ERROR_INVALID_STATE`
 - provider / host / persistence 错误统一收敛到窄的 `xwork_status` 集合：caller contract 问题走 `INVALID_ARGUMENT / INVALID_STATE / NOT_FOUND / ALREADY_EXISTS / UNSUPPORTED`，协作取消走 `CANCELLED`，外部 I/O、provider、host 或 persistence 后端失败走 `EXTERNAL_FAILURE`；`xwork_status_cstr()` 提供稳定日志名称。
 - provider smoke 主执行路径已切到 async run handle，保留 local stub provider matrix 验证 request/response normalization，并补了离线 model-call failure 路径；provider error-path matrix 已覆盖 upstream_5xx/auth/rate_limit/parse/timeout，orchestrator 统一收口为 `XWORK_ERROR_EXTERNAL_FAILURE` + `XWORK_RUN_FAILED`，错误 summary 固定包含 `xllm_error=<code>` 和 provider message
-- session compaction knobs 已进入 public `xwork_session_policy`：auto compact、trigger ratio/turns、reserve output tokens、keep recent turns、keep active tool chain、compact strategy。orchestrator 在 model turn 成功提交后按 policy 调用 `xllm_session_compact()`，并在真实 compact 后写入 `XWORK_CHECKPOINT_SESSION_COMPACTED` 与 `XWORK_EVENT_SESSION_COMPACTED`；persistence snapshot format 已升到 v3 以保存新增 session policy 字段。
-- 默认测试组织已固定：`tests/README.md` 记录 standalone/core/host/orchestrator/persistence/profile/provider-offline/stress/examples/provider-real 测试组；`.github/workflows/ci.yml` 在 Windows/MSYS2 上跑 `xwork.c` standalone compile、core smoke、host smoke、主 orchestrator smoke、persistence smoke、profile smoke、provider offline smoke、stress smoke 和 examples，真实 provider smoke 通过 repository variable 显式开启且 `continue-on-error`，不阻塞默认 CI。真实 provider smoke 支持成功 tool-loop，也支持 `XWORK_PROVIDER_SMOKE_EXPECT_ERROR=1` 的错误路径断言，用于坏密钥、坏模型或受控错误端点。
+- session compaction knobs 已进入 public `xwork_session_policy`：auto compact、trigger ratio/turns、reserve output tokens、keep recent turns、keep active tool chain、compact strategy。orchestrator 在 model turn 成功提交后按 policy 调用 `xllm_session_compact()`，并在真实 compact 后写入 `XWORK_CHECKPOINT_SESSION_COMPACTED` 与 `XWORK_EVENT_SESSION_COMPACTED`；persistence snapshot format 已升到 v14，以保存新增 session policy 字段、run-level agent/task id、task graph pause/handoff state、remote control plane snapshot/output chunks/artifact blob chunks、replay cassette/result/raw payload，以及 task node max turns/timeout。
+- 默认测试组织已固定：`tests/README.md` 记录 standalone/core/host/orchestrator/persistence/profile/provider-offline/stress/multi-agent/remote-worker/replay/examples/provider-real 测试组；`.github/workflows/ci.yml` 在 Windows/MSYS2 上跑 `xwork.c` standalone compile、core smoke、host smoke、主 orchestrator smoke、persistence smoke、profile smoke、provider offline smoke、stress smoke、multi-agent smoke、remote-worker smoke、replay smoke 和 examples，真实 provider smoke 通过 repository variable 显式开启且 `continue-on-error`，不阻塞默认 CI。真实 provider smoke 支持成功 tool-loop，也支持 `XWORK_PROVIDER_SMOKE_EXPECT_ERROR=1` 的错误路径断言，用于坏密钥、坏模型或受控错误端点。
 - `tests/xwork_stress_smoke.c` 已独立覆盖 terminal long-output capture/events，以及 many-runs/artifacts persistence query + pagination。
+- `tests/xwork_multi_agent_smoke.c` 已覆盖 P3 第一阶段 agent pool/task graph：2 个 agent 并发 fan-out、fan-in join、child run 映射、max concurrency、require-all 失败传播、per-agent retry、cooperative cancel、scheduler pause/resume、handoff refs/events/snapshot recovery、agent result/aggregate report artifacts、child-run event audit、agent pool snapshot、可重建 graph snapshot、file persistence 保存/加载、snapshot-to-graph 导入、persistence recovery 后继续执行、状态查询，以及 parent/agent/task run index 查询。
+- `tests/xwork_remote_worker_smoke.c` 已覆盖 P3 remote worker control plane：worker register/heartbeat、task policy/approval gate、network policy denial、secret redaction、capability matching、control-plane capability allowlist 拒绝、assignment queue、claim/complete、local worker remote `process.exec`、remote `process.exec` timeout/timeout_stop、destructive command denial、remote terminal start/list/stop、remote filesystem `write_text/read_text/apply_patch` 且继承 filesystem root policy 并覆盖越界 path denial、artifact upload message、blob ref、chunk payload 查询/恢复、stdout/stderr output chunk 上传与恢复、cancel、stale lease 和 orphaned assignment 标记、worker/task query、control plane file snapshot、load/recover，以及恢复后 queued task 继续执行、in-flight assignment 标记为 orphaned。
+- `tests/xwork_replay_smoke.c` 已覆盖 P3 deterministic replay cassette baseline：record/load/replay entry、typed filesystem snapshot/ref、normalized JSON hash 兼容、runtime host-service record/replay、raw result payload recovery、event log schema、model stream event helper、terminal interaction event、event sequence replay、checkpoint seek/replay、model/tool hash、strict success、audit divergence、divergence report artifact、side-effect blocking、cancel、manifest/result、entry query、file-persisted replay list/load/result、`.replay` future-version rejection 和 cassette-to-engine recovery。
+- `tests/xwork_remote_worker_smoke.c` 已覆盖 P3 remote worker/control-plane baseline：in-process control plane、HTTP decoded-message transport marker、worker register/heartbeat/lease、assignment、policy/approval/network/capability gates、process/filesystem/terminal worker execution、artifact/blob/output chunk recovery、stale lease/orphan、snapshot persistence 和恢复后 queued work continuation。
 - `process.exec` 最小 request contract 已支持 `cwd` 覆盖
 - `process.exec` 最小 request contract 已支持 `max_output_bytes` 截断
 - `process.exec` 最小 request contract 已支持 `env:["KEY=VALUE"]`
@@ -423,12 +435,14 @@
 - public API、ownership/lifetime、错误码、版本字符串和 persistence format version 已有明确 contract。
 - builtin host tool 面已覆盖 filesystem/process/terminal/vcs/editor/diagnostics 的 agent 常用路径。
 - policy/approval、checkpoint/recovery、artifact schema、workspace memory、xllm provider/tool-loop、product profile/example、CI smoke matrix 已形成默认可用路径。
+- P3 multi-agent 已具备 in-process agent pool/task graph、并发 fan-out/fan-in、cancel/pause/retry、snapshot/recovery、handoff request/result schema、artifact refs、memory context refs、shared workspace refs、handoff audit events、handoff 持久化恢复，以及 agent result / aggregate report artifact schema。
 - core/host/orchestrator/persistence/profile/provider/stress/examples 都有独立或聚合 smoke，可作为后续重构的安全网。
 
 下一阶段不应继续无边界扩张 v1 API，优先做 hardening：
 
 1. 把主 orchestrator 聚合 smoke 逐步拆薄为更小的主题文件，保留端到端聚合入口。
 2. 为 host tool JSON request/response 持续维护独立 contract 文档和示例 corpus；当前 contract 文档已落在 `docs/HOST_TOOL_CONTRACTS.md`，示例 corpus 已落在 `docs/HOST_TOOL_EXAMPLES.md`。
-3. 为 persistence format v3 持续维护 schema 文档和迁移测试 fixture；当前 format 文档已落在 `docs/PERSISTENCE_FORMAT.md`，focused newer-version fixture 已落在 `tests/xwork_persistence_smoke.c`。
+3. 为 persistence format v6 持续维护 schema 文档和迁移测试 fixture；当前 format 文档已落在 `docs/PERSISTENCE_FORMAT.md`，focused newer-version fixture 已落在 `tests/xwork_persistence_smoke.c`。
 4. 用真实 provider 环境定期跑成功/错误两条可选 smoke，并记录 provider 差异；运行说明和差异记录模板已落在 `docs/PROVIDER_SMOKE.md`。
 5. 在 release 前做一次 `xwork.h` ABI/source compatibility review，冻结 0.1.0 对外快照；冻结检查清单已落在 `docs/API_FREEZE_0_1.md`。
+6. P3 下一阶段完整能力单独跟踪：多 agent 并行调度、remote worker/control plane、deterministic replay platform；跟踪文件为 `P3_FUTURE_BOUNDARY_TRACKING_SPEC.md`。
