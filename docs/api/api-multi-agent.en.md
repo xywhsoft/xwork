@@ -1,21 +1,27 @@
 # Multi-Agent API
 
-Multi-Agent API in-process agent pool_ask graph_andoff_hild run_snapshot AI IDE, Law, Law, Law, Law, Law, Law, Law, Law, and Law.缁勭粐鴴愬嬲瀹¤銆佸彲鎭㈠鄄勪 Change 锷″浘銆?
-##妯″桡杈戈晫
+The Multi-Agent API provides in-process agent pool, task graph, dependency scheduling, handoff, child run mapping, pause/resume/cancel and snapshot recovery capabilities. It is oriented to scenarios such as AI IDE, claw, and automated R&D pipelines, and is used to organize multiple role agents into auditable and recoverable task graphs.
 
-- agent pool, agent, agent, task graph - `xwork_run` model-turn tool-loop run/orchestrator - snapshot鍙仮侶嶅彽搴忓垪鍖栫堫姐侊绂native thread銆乧乧allback 镙堛€丸鮮?live handle 涓鈭掭㈠銆?-graph mutation 搴斾笌 execute/query涓茶鍖栵绂task callback 鑻ュ苟鍙戣繍盛狋纴 dark€罽彜琛豼iao鎶ゅRuibang祫婧愩€?
-## gallium€chain夋戈绾﹀畾
+## Module boundaries
 
-| Silicon thin | Gallium chain |
+- The agent pool manages agent definitions and does not perform model inference.
+- task graph manages task nodes, dependencies, concurrency limits, failure strategies, handoff and execution status.
+- Each task will be mapped to `xwork_run` when executed, and the actual model-turn and tool-loop are completed by the run/orchestrator layer.
+- Snapshot only restores the serializable state; native thread, callback stack, and external live handle will not be restored.
+- Graph mutation should be serialized with execute/query; if task callback runs concurrently, it needs to protect shared resources by itself.
+
+## Ownership agreement
+
+| Object | Ownership |
 | --- | --- |
-|
-|
-|
-|
-|
-| `*_list_reset` / `*_snapshot_reset` |
+| `xwork_agent_pool_create` | Returns the owned pool and the caller uses `xwork_agent_pool_destroy` to release it. |
+| `xwork_agent_pool_add_agent` | pool copies the agent options string and returns the borrowed agent. |
+| `xwork_task_graph_create` | Returns the owned graph and the caller releases it with |
+| `xwork_task_graph` | Borrow agent pool, cancel token, execute callback and callback user data. |
+| `xwork_task_graph_get_snapshot` | Deep copy snapshot content, the caller uses `xwork_task_graph_snapshot_reset` to release it. |
+| `*_list_reset` / `*_snapshot_reset` | Free API allocated strings, arrays and nested lists. |
 
-## 鏏 manuscript瀷璋卂敤椤 coax
+## Typical calling sequence
 
 ```text
 xwork_agent_pool_options_init
@@ -33,36 +39,44 @@ xwork_task_graph_destroy
 xwork_agent_pool_destroy
 ```
 
-## 卒濆鍖栦笌Read僃斁绾﹀畾
+## Initialization and release convention
 
-`*_init` `NULL` `*_reset` `NULL` init钖庣姸镐与€坝皟颢ㄨ叏鍙?summary/list/snapshot 鄄?API铓嶏纴夤锤鍏?init锛涘鐢ㄥ涓涓€鼁洴瀯铓嶅厛reset?
-## Agent Pool 涶?Agent
+All `*_init` functions allow `NULL` to be passed in and do nothing at this time. All `*_reset` functions also allow `NULL` to be passed in and will revert to the post-init state after release. Before calling the API to obtain summary/list/snapshot, it is recommended to init first; reset before reusing the same structure to avoid leaking old content.
+
+## Agent Pool and Agent
 
 ### xwork_agent_pool_options_init
 
-Why?`xwork_agent_pool_options`?
-**锷绻兘锛?*
+Initialize `xwork_agent_pool_options`.
 
-描?pool options 哓嵂浂唛屼negative鍒涘涘 agent pool 火橩婳徶囥€?
-**What's the point?*
+**Function:**
+
+Clear the pool options to prepare for creating the agent pool.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_agent_pool_options_init(xwork_agent_pool_options *pOptions);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions`?`NULL`?
-**杩斿洴 alkali fine**
+- `pOptions`: options to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰嶈祫婧愶绂璋卂敤揂 Visit粛鎷ユ恁缁撴瀯钴湰韬€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- `pRuntime` pool `pRuntime`
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated; the caller still owns the structure itself.
+
+**Additional Note:**
+
+- `pRuntime` must be set before creating pool.
+- When `sPoolId` is empty, the current implementation uses `"default"`.
+
+**Example code:**
 
 ```c
 xwork_agent_pool_options opts;
@@ -71,7 +85,7 @@ opts.sPoolId = "main";
 opts.pRuntime = runtime;
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_pool_create`
 
@@ -79,29 +93,36 @@ opts.pRuntime = runtime;
 
 ### xwork_agent_options_init
 
-Why?`xwork_agent_options`?
-**锷绻兘锛?*
+Initialize `xwork_agent_options`.
 
-Agent options Agent options Agent options Agent agent
-**What's the point?*
+**Function:**
+
+Set the default value of agent options for registering planner, coder, reviewer and other agents.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_agent_options_init(xwork_agent_options *pOptions);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions`?`NULL`?
-**杩斿洴 alkali fine**
+- `pOptions`: options to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-`xwork_agent_pool_add_agent` `xwork_agent_pool_add_agent`浼橩鍒涒涶綷乚隣欑殑 chain note€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- `XWORK_AGENT_ROLE_CUSTOM`? - `XWORK_AUTONOMY_SEMI_AUTO`?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated; the string field is provided by the caller during the `xwork_agent_pool_add_agent` call, and the pool copies the value that needs to be retained.
+
+**Additional Note:**
+
+- Default role is `XWORK_AGENT_ROLE_CUSTOM`.
+- Default autonomous mode is `XWORK_AUTONOMY_SEMI_AUTO`.
+
+**Example code:**
 
 ```c
 xwork_agent_options opts;
@@ -110,7 +131,7 @@ opts.sAgentId = "coder";
 opts.eRole = XWORK_AGENT_ROLE_CODER;
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_pool_add_agent`
 
@@ -118,36 +139,42 @@ opts.eRole = XWORK_AGENT_ROLE_CODER;
 
 ### xwork_agent_snapshot_init
 
-Why?`xwork_agent_snapshot`?
-**锷绻兘锛?*
+Initialize `xwork_agent_snapshot`.
 
-What is the snapshot API of the agent snapshot?
-**What's the point?*
+**Function:**
+
+Prepare an agent snapshot that can be populated by the snapshot API or constructed manually.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_agent_snapshot_init(xwork_agent_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`锛氳鍒濆鍖栫殑 snapshot锛涘彲涓?`NULL`銆?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_agent_options_init` `xwork_agent_options_init`
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The default role and autonomy mode are consistent with `xwork_agent_options_init`.
+
+**Example code:**
 
 ```c
 xwork_agent_snapshot snapshot;
 xwork_agent_snapshot_init(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_snapshot_reset`
 - `xwork_agent_pool_get_snapshot`
@@ -156,35 +183,41 @@ xwork_agent_snapshot_init(&snapshot);
 
 ### xwork_agent_snapshot_reset
 
-`xwork_agent_snapshot`?
-**锷绻兘锛?*
+Release and reset `xwork_agent_snapshot`.
 
-Yue婃斁 snapshot 卐呴儴瀛楃涓诧纴骞鈮澶brand negative init Zhong Ruo€?
-**What's the point?*
+**Function:**
+
+Release the snapshot internal string and restore it to the init state.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_agent_snapshot_reset(xwork_agent_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`? `NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to reset; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Yue僁恁 snapshot 鎸乹恁逄勬苴混综合礉瀛楁锛屼笉Read僃斁缁撴瀯铯洴湰韬€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-xwork API
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the deep copy fields held by snapshot without releasing the structure itself.
+
+**Additional Note:**
+
+Only call reset on snapshots generated by the xwork API or constructed with the same ownership rules.
+
+**Example code:**
 
 ```c
 xwork_agent_snapshot_reset(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_snapshot_init`
 
@@ -192,36 +225,42 @@ xwork_agent_snapshot_reset(&snapshot);
 
 ### xwork_agent_snapshot_list_init
 
-鍒濆鍖?agent snapshot 鍒楄〃銆?
-**锷绻兘锛?*
+Initialize the agent snapshot list.
 
-How to use the snapshot API?
-**What's the point?*
+**Function:**
+
+Set the list to empty so that the snapshot API can populate it.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_agent_snapshot_list_init(xwork_agent_snapshot_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?`NULL`?
-**杩斿洴 alkali fine**
+- `pList`: List to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_agent_pool_get_snapshot`
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+List elements are usually generated by `xwork_agent_pool_get_snapshot` deep copy.
+
+**Example code:**
 
 ```c
 xwork_agent_snapshot_list list;
 xwork_agent_snapshot_list_init(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_snapshot_list_reset`
 
@@ -229,35 +268,41 @@ xwork_agent_snapshot_list_init(&list);
 
 ### xwork_agent_snapshot_list_reset
 
-译婃斁 agent snapshot 鍒楄〃銆?
-**锷绻兘锛?*
+Release the agent snapshot list.
 
-荙婃恁鍒楄〃卐呮 ulcer涓?agent snapshot 鍙婂垪曛ㄦ暟缁勩€?
-**What's the point?*
+**Function:**
+
+Release each agent snapshot and list array in the list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_agent_snapshot_list_reset(xwork_agent_snapshot_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?
-**杩斿洴 alkali fine**
+- `pList`: List to free; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read婃斁鍒楄〃鎷ユ湁镄勫 Cliff绱犲拰珁 role play粍锛屼笉Read僃斁鍒楄〃缁撴瀯钴湰韬€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-咋卂敤钖庡垪曛ㄥ洖鍒荒┖中闆€侊纴鍙啀娆′紶缁椤～鍏?API銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the elements and arrays owned by the list, but does not release the list structure itself.
+
+**Additional Note:**
+
+After the call, the list returns to the empty state and can be passed to the filling API again.
+
+**Example code:**
 
 ```c
 xwork_agent_snapshot_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_snapshot_reset`
 
@@ -265,36 +310,42 @@ xwork_agent_snapshot_list_reset(&list);
 
 ### xwork_agent_pool_snapshot_init
 
-What is the agent pool snapshot?
-**锷绻兘锛?*
+Initialize agent pool snapshot.
 
-Agent pool?
-**What's the point?*
+**Function:**
+
+Prepare a pool snapshot for persisting or restoring the agent pool.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_agent_pool_snapshot_init(xwork_agent_pool_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`tAgents`?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+`tAgents` is initialized internally.
+
+**Example code:**
 
 ```c
 xwork_agent_pool_snapshot snapshot;
 xwork_agent_pool_snapshot_init(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_pool_get_snapshot`
 - `xwork_agent_pool_snapshot_reset`
@@ -303,35 +354,41 @@ xwork_agent_pool_snapshot_init(&snapshot);
 
 ### xwork_agent_pool_snapshot_reset
 
-Read the agent pool snapshot?
-**锷绻兘锛?*
+Release the agent pool snapshot.
 
-Yue婃斁 pool id鍜?agent snapshot鍒楄〃銆?
-**What's the point?*
+**Function:**
+
+Release the pool id and agent snapshot list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_agent_pool_snapshot_reset(xwork_agent_pool_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-荐僃斁 snapshot 卐呴儴鎷ユ湁镄勬脴鎷Mad礉璧勬簮锛屼笉Read僃斁缁撴瀯撴湰韬€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_agent_pool_create_from_snapshot`
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the deep copy resources held inside the snapshot without releasing the structure itself.
+
+**Additional Note:**
+
+`xwork_agent_pool_create_from_snapshot` does not take over snapshot ownership.
+
+**Example code:**
 
 ```c
 xwork_agent_pool_snapshot_reset(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_pool_create_from_snapshot`
 
@@ -339,11 +396,13 @@ xwork_agent_pool_snapshot_reset(&snapshot);
 
 ### xwork_agent_pool_create
 
-What is the agent pool?
-**锷绻兘锛?*
+Create an agent pool.
 
-The runtime is runtime, in-process agent pool, agent task graph, in-process agent pool.
-**What's the point?*
+**Function:**
+
+Create an in-process agent pool based on runtime to register agents and borrow them from the task graph.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_agent_pool_create(
@@ -352,19 +411,26 @@ XWORK_API xwork_status xwork_agent_pool_create(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pOptions`: pool creation parameter; must contain a valid `pRuntime`.
+- `ppPool`: Output owned pool.
 
-- `XWORK_ERROR_NO_MEMORY`唛橩唴瀛华垎喰嶅け璐ャ€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-`*ppPool` `*ppPool` `xwork_agent_pool_destroy` `*ppPool` runtime runtime untime pool Wa's teachings and spinning emerald harp?
-**Chen ュ Pang Xuan cun 槑?*
+- `XWORK_OK`: Created successfully.
+- `XWORK_ERROR_INVALID_ARGUMENT`: Parameter is empty or runtime is invalid.
+- `XWORK_ERROR_NO_MEMORY`: Memory allocation failed.
 
-`sPoolId`
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+After success, `*ppPool` is owned by the caller and released using `xwork_agent_pool_destroy`. Pool borrows runtime, and runtime must live longer than pool.
+
+**Additional Note:**
+
+`sPoolId` is copied; default id is used when not set.
+
+**Example code:**
 
 ```c
 xwork_agent_pool *pool = NULL;
@@ -375,7 +441,7 @@ opts.sPoolId = "main";
 xwork_status st = xwork_agent_pool_create(&opts, &pool);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_pool_destroy`
 - `xwork_agent_pool_add_agent`
@@ -384,11 +450,13 @@ xwork_status st = xwork_agent_pool_create(&opts, &pool);
 
 ### xwork_agent_pool_create_from_snapshot
 
-浠?snapshot 鎭㈠agent pool銆?
-**锷绻兘锛?*
+Restore the agent pool from snapshot.
 
-What is the pool snapshot and the agent pool is the agent pool?
-**What's the point?*
+**Function:**
+
+Rebuild the agent pool and the agent definitions within it using the pool snapshot taken previously.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_agent_pool_create_from_snapshot(
@@ -398,26 +466,32 @@ XWORK_API xwork_status xwork_agent_pool_create_from_snapshot(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pRuntime` is a pool that has a runtime pool and a runtime pool -
-**杩斿洴 alkali fine**
+- `pRuntime`: The runtime borrowed by the pool after recovery.
+- `pSnapshot`: agent pool snapshot.
+- `ppPool`: Output owned pool.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Reset?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-鍭㈠鍙正钖?agent 鍏冩暟鎹纴涓嶆仮澶?runtime 鍐呭閮?live 正典 €?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+After success, the pool is owned by the caller; the snapshot is not taken over and is still reset by the caller.
+
+**Additional Note:**
+
+The recovery only contains agent metadata and does not restore the internal and external live state of the runtime.
+
+**Example code:**
 
 ```c
 xwork_agent_pool *pool = NULL;
 xwork_status st = xwork_agent_pool_create_from_snapshot(runtime, &snapshot, &pool);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_pool_get_snapshot`
 - `xwork_agent_pool_destroy`
@@ -426,35 +500,41 @@ xwork_status st = xwork_agent_pool_create_from_snapshot(runtime, &snapshot, &poo
 
 ### xwork_agent_pool_destroy
 
-阌€骣?agent pool銆?
-**锷绻兘锛?*
+Destroy agent pool.
 
-The pool is the pool where the agent is.
-**What's the point?*
+**Function:**
+
+Releases the pool and all agent definitions it owns.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_agent_pool_destroy(xwork_agent_pool *pPool);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pPool`?`NULL`?
-**杩斿洴 alkali fine**
+- `pPool`: The pool to be destroyed; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read the pool, runtime?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-阌€姣?pool 铓嶏纴搴濛厛阌€姣丸€窺椤璇?pool 镄?task graph銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases resources owned by the pool; borrowed runtimes are not released.
+
+**Additional Note:**
+
+Before destroying the pool, the task graph borrowing the pool should be destroyed first.
+
+**Example code:**
 
 ```c
 xwork_agent_pool_destroy(pool);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_pool_create`
 
@@ -462,11 +542,13 @@ xwork_agent_pool_destroy(pool);
 
 ### xwork_agent_pool_add_agent
 
-钖?pool剉ㄥ彽agent銆?
-**锷绻兘锛?*
+Register the agent with the pool.
 
-涶嶅尗 agent options锛屽碢 agent 瀹hydrogen箟锷珲uke pool锛屽苟鍙繑锲?borrowed agent 鎸 returned拋銆?
-**What's the point?*
+**Function:**
+
+Copy agent options, add the agent definition to the pool, and return the borrowed agent pointer.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_agent_pool_add_agent(
@@ -476,19 +558,25 @@ XWORK_API xwork_status xwork_agent_pool_add_agent(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pPool` agent pool agent `ppAgent`?borrowed agent?
-**杩斿洴 alkali fine**
+- `pPool`: Target agent pool.
+- `pOptions`: agent definition; must contain non-null `sAgentId`.
+- `ppAgent`: Optional output borrowed agent.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-agent 鐢?pool 鎷ユ湁揗旗ppAgent` 杩洿洖chain熺椤掸Back拋招宲ool 阌€姣丗澶综合晥抆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-agent id pool
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The agent is owned by the pool; `ppAgent` returns the borrowed pointer, which becomes invalid after the pool is destroyed.
+
+**Additional Note:**
+
+The agent id should be unique within the same pool.
+
+**Example code:**
 
 ```c
 xwork_agent *agent = NULL;
@@ -499,7 +587,7 @@ opts.eRole = XWORK_AGENT_ROLE_REVIEWER;
 xwork_agent_pool_add_agent(pool, &opts, &agent);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_pool_find_agent`
 - `xwork_agent_get_id`
@@ -508,35 +596,41 @@ xwork_agent_pool_add_agent(pool, &opts, &agent);
 
 ### xwork_agent_pool_get_agent_count
 
-銮峰彇agent 鏁比忺銆?
-**锷绻兘锛?*
+Get the number of agents.
 
-杩斿洖pool涓WherePingㄥ唽鄄?agent涓暟銆?
-**What's the point?*
+**Function:**
+
+Returns the number of registered agents in the pool.
+
+**Function prototype:**
 
 ```c
 XWORK_API size_t xwork_agent_pool_get_agent_count(const xwork_agent_pool *pPool);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pPool` gent pool?
-**杩斿洴 alkali fine**
+- `pPool`: agent pool; can be `NULL`.
 
-杩斿洖agent 鏁比噺攛沗pPool` 涓?`NULL` 鏃惰繑鍥?`0`抆?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns the number of agents; when `pPool` is `NULL`, returns `0`.
 
-璇ュ€和槸褰揿堠 in-memory pool 锄勫揩镦у甇璇画暟銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+This value is a snapshot reading of the current in-memory pool.
+
+**Example code:**
 
 ```c
 size_t count = xwork_agent_pool_get_agent_count(pool);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_pool_add_agent`
 
@@ -544,11 +638,13 @@ size_t count = xwork_agent_pool_get_agent_count(pool);
 
 ### xwork_agent_pool_find_agent
 
-鎸?id 镆ユ缦 agent銆?
-**锷绻兘锛?*
+Find agent by id.
 
-What's the pool number?
-**What's the point?*
+**Function:**
+
+Find the specified agent id in the pool.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_agent *xwork_agent_pool_find_agent(
@@ -557,25 +653,30 @@ XWORK_API xwork_agent *xwork_agent_pool_find_agent(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pPool` gent pool? - `sAgentId` gent id?
-**杩斿洴 alkali fine**
+- `pPool`：agent pool。
+- `sAgentId`：agent id。
 
-`NULL` `NULL`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-杩斿洴Chain shoulder 敱汕 pool 鎷ユ湁锛岃皟鐢ㄨ€呬笉鑳狠淳蕉€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns borrowed agent when found; returns `NULL` when not found or the parameter is invalid.
 
-What is the agent pool?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The return value is owned by the pool and cannot be released by the caller.
+
+**Additional Note:**
+
+The return pointer becomes invalid after the agent pool is destroyed.
+
+**Example code:**
 
 ```c
 xwork_agent *coder = xwork_agent_pool_find_agent(pool, "coder");
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_get_role`
 
@@ -583,11 +684,13 @@ xwork_agent *coder = xwork_agent_pool_find_agent(pool, "coder");
 
 ### xwork_agent_pool_get_snapshot
 
-銮峰彇 agent pool snapshot銆?
-**锷绻兘锛?*
+Get agent pool snapshot.
 
-pool id pool id agent agent snapshot shot?
-**What's the point?*
+**Function:**
+
+Deep copy the pool id and all agent definitions to generate a durable snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_agent_pool_get_snapshot(
@@ -596,19 +699,24 @@ XWORK_API xwork_status xwork_agent_pool_get_snapshot(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pPool`: source pool.
+- `pSnapshot`: output snapshot; should be init before calling.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-snapshot 鎷ユ湁娣比嫹琐濴婴縸纴咋卂敤Key呯椤
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-鍑 must be used
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The snapshot has deep copy content, and the caller uses `xwork_agent_pool_snapshot_reset` to release it.
+
+**Additional Note:**
+
+The function resets the old contents of the output snapshot.
+
+**Example code:**
 
 ```c
 xwork_agent_pool_snapshot snapshot;
@@ -617,7 +725,7 @@ xwork_agent_pool_get_snapshot(pool, &snapshot);
 xwork_agent_pool_snapshot_reset(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_pool_create_from_snapshot`
 
@@ -625,35 +733,41 @@ xwork_agent_pool_snapshot_reset(&snapshot);
 
 ### xwork_agent_get_id
 
-銮峰彇agent id銆?
-**锷绻兘锛?*
+Get agent id.
 
-杩斿洖 agent 镄?id 瀛楃涓layer€?
-**What's the point?*
+**Function:**
+
+Returns the agent's id string.
+
+**Function prototype:**
 
 ```c
 XWORK_API const char *xwork_agent_get_id(const xwork_agent *pAgent);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pAgent`: agent pointer; can be `NULL`.
 
-杩濿洖 borrowed id锛旗pAgent` 涓?`NULL` 鏃惰繑鍥?`NULL`抆?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-杩斿洖chainshoulder敱汕agent pool掷ユ湁锛岃皟鐢ㄨ€呬笉鑳综合狠鏀都€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns borrowed id; returns `NULL` when `pAgent` is `NULL`.
 
-璇?id 鍙捤浜?task node 鄄?`sAgentId`銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The return value is owned by the agent pool and cannot be released by the caller.
+
+**Additional Note:**
+
+This id is available for task node's `sAgentId`.
+
+**Example code:**
 
 ```c
 const char *id = xwork_agent_get_id(agent);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_add_node`
 
@@ -661,67 +775,79 @@ const char *id = xwork_agent_get_id(agent);
 
 ### xwork_agent_get_role
 
-銮峰彇agent 铮厕磊銆?
-**锷绻兘锛?*
+Get the agent role.
 
-杩洿洖agent鄄?`xwork_agent_role`銆?
-**What's the point?*
+**Function:**
+
+Returns `xwork_agent_role` for agent.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_agent_role xwork_agent_get_role(const xwork_agent *pAgent);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pAgent`: agent pointer; can be `NULL`.
 
-杩斿洖诺敕壣棊旗pAgent` 涓?`NULL` 鏃惰繑鍥?`XWORK_AGENT_ROLE_CUSTOM`抆?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns the role; returns `XWORK_AGENT_ROLE_CUSTOM` if `pAgent` is `NULL`.
 
-What's the point of this?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+Roles are used to host UI, logs, and scheduling policy decisions.
+
+**Example code:**
 
 ```c
 xwork_agent_role role = xwork_agent_get_role(agent);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_pool_add_agent`
 
 ---
 
-## Task Node Juan?Task Graph
+## Task Node and Task Graph
 
 ### xwork_task_node_options_init
 
-What is the task node options?
-**锷绻兘锛?*
+Initialize task node options.
 
-What is the task graph?
-**What's the point?*
+**Function:**
+
+Prepare task node definition for adding to task graph.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_node_options_init(xwork_task_node_options *pOptions);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions`?`NULL`?
-**杩斿洴 alkali fine**
+- `pOptions`: options to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-`xwork_task_graph_add_node` `xwork_task_graph_add_node`
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`XWORK_AUTONOMY_SEMI_AUTO`?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated; `xwork_task_graph_add_node` copies strings and arrays that need to be preserved.
+
+**Additional Note:**
+
+The default autonomous mode is `XWORK_AUTONOMY_SEMI_AUTO`.
+
+**Example code:**
 
 ```c
 xwork_task_node_options opts;
@@ -731,7 +857,7 @@ opts.sAgentId = "coder";
 opts.sInstruction = "Implement the feature.";
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_add_node`
 
@@ -739,29 +865,37 @@ opts.sInstruction = "Implement the feature.";
 
 ### xwork_task_graph_options_init
 
-What is the task graph options?
-**锷绻兘锛?*
+Initialize task graph options.
 
-What is the task graph?
-**What's the point?*
+**Function:**
+
+Prepare task graph creation parameters.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_graph_options_init(xwork_task_graph_options *pOptions);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions`?`NULL`?
-**杩斿洴 alkali fine**
+- `pOptions`: options to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- `1` `1` `1` graph What is the value of `pAgentPool`?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+- The default maximum concurrency is `1`.
+- The default failure policy is `XWORK_TASK_FAILURE_FAIL_FAST`.
+- `pAgentPool` must be set before creating graph.
+
+**Example code:**
 
 ```c
 xwork_task_graph_options opts;
@@ -771,7 +905,7 @@ opts.pAgentPool = pool;
 opts.iMaxConcurrency = 2;
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_create`
 
@@ -779,36 +913,42 @@ opts.iMaxConcurrency = 2;
 
 ### xwork_task_node_summary_init
 
-What is the task node summary?
-**锷绻兘锛?*
+Initialize task node summary.
 
-鍑嗗涓€洓Change 锷℃憳簺粋鋶纴鐢ㄤ簬镆ヨ鍗曚釜鴴栧涓妭飣Guiya姸镐?
-**What's the point?*
+**Function:**
+
+Prepare a task summary structure for querying the status of single or multiple nodes.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_node_summary_init(xwork_task_node_summary *pSummary);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSummary`: summary to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`XWORK_TASK_PENDING`?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The default task status is `XWORK_TASK_PENDING`.
+
+**Example code:**
 
 ```c
 xwork_task_node_summary summary;
 xwork_task_node_summary_init(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_get_node_summary`
 
@@ -816,35 +956,41 @@ xwork_task_node_summary_init(&summary);
 
 ### xwork_task_node_summary_reset
 
-Read the task node summary?
-**锷绻兘锛?*
+Release task node summary.
 
-Read the summary 涓敱API 壣典嫹LU戈殑瀛楃涓INSertGou韭㈠涓?init Zhongruo€and€?
-**What's the point?*
+**Function:**
+
+Release the string deep copied by the API in summary and restore it to the init state.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_node_summary_reset(xwork_task_node_summary *pSummary);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSummary`: summary to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read婃斁 summary 鍍呴儴鎷ユ湁璧勬簮甛屼笉Read僃斁缁撴瀯钴湰韬€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`pUserData` Is there a problem?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the resources held inside summary but does not release the structure itself.
+
+**Additional Note:**
+
+`pUserData` is a borrowed pointer and will not be released.
+
+**Example code:**
 
 ```c
 xwork_task_node_summary_reset(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_node_summary_init`
 
@@ -852,36 +998,42 @@ xwork_task_node_summary_reset(&summary);
 
 ### xwork_task_node_summary_list_init
 
-鍒濆鍖?task node summary鍒楄〃銆?
-**锷绻兘锛?*
+Initialize the task node summary list.
 
-鍑嗗涓€涓┖鍒楄〃锛倀敤浜庢崴鏀?graph 鑺傂偣鎽樿銆?
-**What's the point?*
+**Function:**
+
+Prepare an empty list to receive graph node summaries.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_node_summary_list_init(xwork_task_node_summary_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?`NULL`?
-**杩斿洴 alkali fine**
+- `pList`: List to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_task_graph_list_node_summaries`
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+This list should be initialized before calling `xwork_task_graph_list_node_summaries`.
+
+**Example code:**
 
 ```c
 xwork_task_node_summary_list list;
 xwork_task_node_summary_list_init(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_list_node_summaries`
 
@@ -889,35 +1041,41 @@ xwork_task_node_summary_list_init(&list);
 
 ### xwork_task_node_summary_list_reset
 
-译婃斁 task node summary 鍒楄〃銆?
-**锷绻兘锛?*
+Release the task node summary list.
 
-Read婃斁鍒楄〃涓卍chain?node summary鍜屽垪曛ㄦ暟缁卩€?
-**What's the point?*
+**Function:**
+
+Free all node summary and list arrays in the list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_node_summary_list_reset(xwork_task_node_summary_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?
-**杩斿洴 alkali fine**
+- `pList`: List to free; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Reading僃斁鍒楄〃鎷ユ湁镄勫崴縸纴涓嶉菀鞪瀛ㄧ粨鋋勪綋chain汉銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-Read the API?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the contents owned by the list, but not the list structure itself.
+
+**Additional Note:**
+
+After freeing, the list can be passed back to the query API.
+
+**Example code:**
 
 ```c
 xwork_task_node_summary_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_node_summary_reset`
 
@@ -925,36 +1083,42 @@ xwork_task_node_summary_list_reset(&list);
 
 ### xwork_task_node_snapshot_init
 
-What is the task node snapshot?
-**锷绻兘锛?*
+Initialize task node snapshot.
 
-鍑嗗涓€涓change锷¤妭飣?snapshot锛尀敤浜庢件侶嶆娸鸷箙鍖栥€?
-**What's the point?*
+**Function:**
+
+Prepare a task node snapshot for recovery or persistence.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_node_snapshot_init(xwork_task_node_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-鍒濆鍖栧怗瀛楁涓红┖锛倀姸镐佷negative hazel樿 pending 璇箟銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+After initialization, the field is empty and the status is the default pending semantics.
+
+**Example code:**
 
 ```c
 xwork_task_node_snapshot snapshot;
 xwork_task_node_snapshot_init(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_get_snapshot`
 
@@ -962,35 +1126,41 @@ xwork_task_node_snapshot_init(&snapshot);
 
 ### xwork_task_node_snapshot_reset
 
-Read the task node snapshot?
-**锷绻兘锛?*
+Release the task node snapshot.
 
-译文婃斁浠氲姟鑺卜偣 snapshot 涓殑瀛楃涓layer€亀orkspace id 鏁衣粍鍜屼緷璧?id 鏁狠粍鍆?
-**What's the point?*
+**Function:**
+
+Release the string, workspace id array and dependency id array in the task node snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_node_snapshot_reset(xwork_task_node_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-荐婃斁 snapshot 卐呴儴鎷ユ捐璧勬簮锛屼笉Read僃斁缁撴瀯钴湰韬€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-咋卂敤钖?snapshot 锲炲韌 init Zhong Duo€and€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the resources held within the snapshot but does not release the structure itself.
+
+**Additional Note:**
+
+After calling snapshot, return to init state.
+
+**Example code:**
 
 ```c
 xwork_task_node_snapshot_reset(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_node_snapshot_init`
 
@@ -998,36 +1168,42 @@ xwork_task_node_snapshot_reset(&snapshot);
 
 ### xwork_task_node_snapshot_list_init
 
-鍒濆鍖?task node snapshot 鍒楄〃銆?
-**锷绻兘锛?*
+Initialize the task node snapshot list.
 
-鍑嗗涓€涓┖ snapshot 鍒楄〃銆?
-**What's the point?*
+**Function:**
+
+Prepare an empty snapshot list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_node_snapshot_list_init(xwork_task_node_snapshot_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?`NULL`?
-**杩斿洴 alkali fine**
+- `pList`: List to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_task_graph_snapshot.tNodes` `xwork_task_graph_snapshot.tNodes`?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+This list is typically used as `xwork_task_graph_snapshot.tNodes`.
+
+**Example code:**
 
 ```c
 xwork_task_node_snapshot_list list;
 xwork_task_node_snapshot_list_init(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_node_snapshot_list_reset`
 
@@ -1035,35 +1211,41 @@ xwork_task_node_snapshot_list_init(&list);
 
 ### xwork_task_node_snapshot_list_reset
 
-Read the task node snapshot 卒楄〃銆?
-**锷绻兘锛?*
+Release the task node snapshot list.
 
-Read the link?task node snapshot 鍜屾暟缁卩€?
-**What's the point?*
+**Function:**
+
+Release all task node snapshots and arrays in the list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_node_snapshot_list_reset(xwork_task_node_snapshot_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?
-**杩斿洴 alkali fine**
+- `pList`: List to free; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Reading僃斁鍒楄〃鎷ユ湁镄勫崴縸纴涓嶉菀鞪瀛ㄧ粨鋋勪綋chain汉銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_task_graph_snapshot_reset` 浼氶棿掺ヨ皟鐢ㄥ畠銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the contents owned by the list, but not the list structure itself.
+
+**Additional Note:**
+
+`xwork_task_graph_snapshot_reset` calls it indirectly.
+
+**Example code:**
 
 ```c
 xwork_task_node_snapshot_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_snapshot_reset`
 
@@ -1071,36 +1253,42 @@ xwork_task_node_snapshot_list_reset(&list);
 
 ### xwork_task_graph_result_init
 
-What is the task graph result?
-**锷绻兘锛?*
+Initialize task graph result.
 
-灏?graph galliumц缁撴灉璁℃暟娓崴浂銆?
-**What's the point?*
+**Function:**
+
+Clear the graph execution result count to zero.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_graph_result_init(xwork_task_graph_result *pResult);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pResult`?`NULL`?
-**杩斿洴 alkali fine**
+- `pResult`: result to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_task_graph_execute` 鍙～鍏呰缁撴瀯銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+`xwork_task_graph_execute` populates the structure.
+
+**Example code:**
 
 ```c
 xwork_task_graph_result result;
 xwork_task_graph_result_init(&result);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_execute`
 
@@ -1108,36 +1296,42 @@ xwork_task_graph_result_init(&result);
 
 ### xwork_task_graph_snapshot_init
 
-What is the task graph snapshot?
-**锷绻兘锛?*
+Initialize task graph snapshot.
 
-鍑嗗 graph snapshot锛妀敤浜庢崴逴贺粲鏁emerited for锷″洘中尊€and€?
-**What's the point?*
+**Function:**
+
+Prepare a graph snapshot to receive the complete task graph state.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_graph_snapshot_init(xwork_task_graph_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰嶈祫婧愶绂捐呴儴卒楄〃鍒濆鍖栦negative廌heng€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_task_graph_get_snapshot`
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated; the internal list is initialized to empty.
+
+**Additional Note:**
+
+This structure should be initialized before calling `xwork_task_graph_get_snapshot`.
+
+**Example code:**
 
 ```c
 xwork_task_graph_snapshot snapshot;
 xwork_task_graph_snapshot_init(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_get_snapshot`
 - `xwork_task_graph_snapshot_reset`
@@ -1146,35 +1340,41 @@ xwork_task_graph_snapshot_init(&snapshot);
 
 ### xwork_task_graph_snapshot_reset
 
-Read the task graph snapshot?
-**锷绻兘锛?*
+Release the task graph snapshot.
 
-Read婃斁 graph id銆佹殏 Pot?鍙栨秷秡緷洜銆佷change锷¤妭镣?snapshot鍒楄〃鍜?handoff鍒楄〃銆?
-**What's the point?*
+**Function:**
+
+Release graph id, pause/cancel reason, task node snapshot list and handoff list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_graph_snapshot_reset(xwork_task_graph_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-荐婃斁 snapshot 卐呴儴鎷ユ捐璧勬簮锛屼笉Read僃斁缁撴瀯钴湰韬€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_task_graph_create_from_snapshot`
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the resources held within the snapshot but does not release the structure itself.
+
+**Additional Note:**
+
+`xwork_task_graph_create_from_snapshot` does not take over snapshot ownership.
+
+**Example code:**
 
 ```c
 xwork_task_graph_snapshot_reset(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_create_from_snapshot`
 
@@ -1182,11 +1382,13 @@ xwork_task_graph_snapshot_reset(&snapshot);
 
 ### xwork_task_graph_create
 
-What is the task graph?
-**锷绻兘锛?*
+Create task graph.
 
-鍒涘經€涓change锷″浘锛倀敤浜庢区锷?task node銆丶0鏄康緧砧栥€佢彛緽屽 agent 宸ヤ緔笧and€?
-**What's the point?*
+**Function:**
+
+Create a task graph for adding task nodes, declaring dependencies, and executing multi-agent workflows.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_create(
@@ -1195,19 +1397,24 @@ XWORK_API xwork_status xwork_task_graph_create(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions`?-`ppGraph`?owned graph?
-**杩斿洴 alkali fine**
+- `pOptions`: Creation parameter; must contain a valid `pAgentPool`.
+- `ppGraph`: Output owned graph.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-graph 椰掕皟鐢ㄨ€呮卍chain夛纴鐢?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-Chain 缃?graph id 鞞Duojiao鐢ㄩ粯璁?id銆俙iMaxConcurrency
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The graph is owned by the caller and released with `xwork_task_graph_destroy`; the graph borrows the agent pool, cancel token and callback.
+
+**Additional Note:**
+
+The default id is used when graph id is not set. When `iMaxConcurrency` is `0`, it is processed according to the implementation default value.
+
+**Example code:**
 
 ```c
 xwork_task_graph *graph = NULL;
@@ -1218,7 +1425,7 @@ opts.iMaxConcurrency = 2;
 xwork_task_graph_create(&opts, &graph);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_destroy`
 - `xwork_task_graph_add_node`
@@ -1227,11 +1434,13 @@ xwork_task_graph_create(&opts, &graph);
 
 ### xwork_task_graph_create_from_snapshot
 
-浠?snapshot 鎭㈠task graph銆?
-**锷绻兘锛?*
+Restore the task graph from snapshot.
 
-鍩婷簬 snapshot 卍卮簬 snapshot 荍兮妭颣广€䷷緷甧栥€乭andoff 鍜屾殏 Pot?鍙栨秧砧栥€和€?
-**What's the point?*
+**Function:**
+
+Rebuild the node, dependency, handoff and pause/cancel status of the task graph based on the snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_create_from_snapshot(
@@ -1241,26 +1450,32 @@ XWORK_API xwork_status xwork_task_graph_create_from_snapshot(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot` is a graph snapshot? - `ppGraph` is a graph owned graph?
-**杩斿洴 alkali fine**
+- `pOptions`: The running environment parameters after recovery must provide compatible agent pool and callback.
+- `pSnapshot`: source graph snapshot.
+- `ppGraph`: Output owned graph.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-掴愬姛钖?graph 褰掕皟鐢ㄨ€呮卍chain夛礂snapshot 涓嶈玺ョ銆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-READY抆丷UNNING銆丅LOCKED 绛?live in-flight Live handle
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+After success, the graph is owned by the caller; the snapshot is not taken over.
+
+**Additional Note:**
+
+Live in-flight states such as READY, RUNNING, and BLOCKED will be converted to a state that can continue to be scheduled according to the recovery boundary; external threads and live handles will not be recovered.
+
+**Example code:**
 
 ```c
 xwork_task_graph *graph = NULL;
 xwork_task_graph_create_from_snapshot(&opts, &snapshot, &graph);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_get_snapshot`
 
@@ -1268,35 +1483,41 @@ xwork_task_graph_create_from_snapshot(&opts, &snapshot, &graph);
 
 ### xwork_task_graph_destroy
 
-阌€姣?task graph銆?
-**锷绻兘锛?*
+Destroy the task graph.
 
-Read the graph銆佽妭飣广€乭andoff 鍜屽崴閮ㄧ姸镐和€?
-**What's the point?*
+**Function:**
+
+Release graph, nodes, handoffs and internal state.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_task_graph_destroy(xwork_task_graph *pGraph);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pGraph`?`NULL`?
-**杩斿洴 alkali fine**
+- `pGraph`: The graph to be destroyed; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read the graph and use it. Agent pool and ancel token. Callback user data?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-涓嶈鍦?graph 姝ｅ湪铓ц镞気槣丸畠銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases graph-owned resources without releasing borrowed agent pool, cancel token, or callback user data.
+
+**Additional Note:**
+
+Do not destroy the graph while it is executing.
+
+**Example code:**
 
 ```c
 xwork_task_graph_destroy(graph);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_create`
 
@@ -1304,11 +1525,13 @@ xwork_task_graph_destroy(graph);
 
 ### xwork_task_graph_add_node
 
-壣沲姞浠曲槟鑺傜偣銆?
-**锷绻兘锛?*
+Add task node.
 
-What is the graph?
-**What's the point?*
+**Function:**
+
+Adds a task node to the graph that is executed by the specified agent.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_add_node(
@@ -1317,19 +1540,24 @@ XWORK_API xwork_status xwork_task_graph_add_node(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pGraph`
-**杩斿洴 alkali fine**
+- `pGraph`: target graph.
+- `pOptions`: node definition; must contain `sTaskId` and `sAgentId`.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-graph 澶嶅嗗 task id銆佹寚浠ゃ€乸rofile id銆亀orkspace id 黛夊瓧娈碉绂`pUserData`涓椴窺敤掸Back拡抆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-`sAgentId`
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+graph copies fields such as task id, instruction, profile id, workspace id; `pUserData` is a borrowed pointer.
+
+**Additional Note:**
+
+`sAgentId` must be found in the graph's agent pool.
+
+**Example code:**
 
 ```c
 xwork_task_node_options node;
@@ -1340,7 +1568,7 @@ node.sInstruction = "Review the patch.";
 xwork_task_graph_add_node(graph, &node);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_add_dependency`
 
@@ -1348,11 +1576,13 @@ xwork_task_graph_add_node(graph, &node);
 
 ### xwork_task_graph_add_dependency
 
-壣貲姞浠曰槟渚濊禆銆?
-**锷绻兘锛?*
+Add task dependencies.
 
-`sAfterTaskId` `sAfterTaskId` `sBeforeTaskId` `sAfterTaskId`
-**What's the point?*
+**Function:**
+
+The statement `sAfterTaskId` must be executed after `sBeforeTaskId`.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_add_dependency(
@@ -1362,25 +1592,31 @@ XWORK_API xwork_status xwork_task_graph_add_dependency(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pGraph`: target graph.
+- `sBeforeTaskId`: predecessor task id.
+- `sAfterTaskId`: post task id.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-graph 涶嶅埗渚濊禆 id銆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-涓や釜浠谲姟閮 borrowed 椤曰Fanying birch adze 涘jing鐜緷緧栦瀦瀵Hardness嚧铓ц阒Dulm銳綶玺ㄨ繘銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+graph replication dependency id.
+
+**Additional Note:**
+
+Both tasks must already exist; circular dependencies prevent the execution phase from advancing.
+
+**Example code:**
 
 ```c
 xwork_task_graph_add_dependency(graph, "implement", "review");
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_execute`
 
@@ -1388,35 +1624,41 @@ xwork_task_graph_add_dependency(graph, "implement", "review");
 
 ### xwork_task_graph_get_node_count
 
-Luan Feng 彇浠氲姟麺傂偣遁 accompanying 噺銆?
-**锷绻兘锛?*
+Get the number of task nodes.
 
-杩斿洖graph涓殑task node 鏁比噺抆?
-**What's the point?*
+**Function:**
+
+Returns the number of task nodes in the graph.
+
+**Function prototype:**
 
 ```c
 XWORK_API size_t xwork_task_graph_get_node_count(const xwork_task_graph *pGraph);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pGraph`: task graph; can be `NULL`.
 
-杩斿洖鑺傂偣鏁発攛沗pGraph` 涓?`NULL` 鏃惰繑鍥?`0`抆?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns the number of nodes; returns `0` when `pGraph` is `NULL`.
 
-璇ュ€between笉浠ｈ〃宸畲洴怪檪 for 锷℃暟Read忠€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+This value does not represent the number of tasks completed.
+
+**Example code:**
 
 ```c
 size_t count = xwork_task_graph_get_node_count(graph);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_list_node_summaries`
 
@@ -1424,11 +1666,13 @@ size_t count = xwork_task_graph_get_node_count(graph);
 
 ### xwork_task_graph_get_node_summary
 
-What is the value of the product?
-**锷绻兘锛?*
+Query the summary of a single node.
 
-鎸?task id 銮峰彇翺傂偣鈥锣€与€佸皾璇曟鏁铁銺銆銆䷷緷緧砠暟翟翕瓑鎽樿皾璇曟鏁銆?
-**What's the point?*
+**Function:**
+
+Get summary information such as node status, number of attempts, run id, number of dependencies, etc. by task id.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_get_node_summary(
@@ -1438,19 +1682,25 @@ XWORK_API xwork_status xwork_task_graph_get_node_summary(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pGraph` graph graph? -
-**杩斿洴 alkali fine**
+- `pGraph`: source graph.
+- `sTaskId`: task id.
+- `pSummary`: Output summary; should be init before calling.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-summary 鎷ユ湁娣综合嫹LU濆瓧绗︿蛛妀椤
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-Summary
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+summary owns a deep copy of the string and frees it with `xwork_task_node_summary_reset`.
+
+**Additional Note:**
+
+The function resets the old contents of the output summary.
+
+**Example code:**
 
 ```c
 xwork_task_node_summary summary;
@@ -1459,7 +1709,7 @@ xwork_task_graph_get_node_summary(graph, "review", &summary);
 xwork_task_node_summary_reset(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_list_node_summaries`
 
@@ -1467,11 +1717,13 @@ xwork_task_node_summary_reset(&summary);
 
 ### xwork_task_graph_list_node_summaries
 
-What’s the point?
-**锷绻兘锛?*
+List all node summaries.
 
-铮峰彇 graph涓卍chain?task node 鄄勬憳簸丞chenㄣ€?
-**What's the point?*
+**Function:**
+
+Get a summary list of all task nodes in the graph.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_list_node_summaries(
@@ -1480,19 +1732,24 @@ XWORK_API xwork_status xwork_task_graph_list_node_summaries(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pGraph`?
-**杩斿洴 alkali fine**
+- `pGraph`: source graph.
+- `pList`: Output list; should be init before calling.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-鍒楄〃鎷ユ湁 deep-copy 鍏卂礌雀敤
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-鍑 mustard 暟浼氶t郃緭鍑 coax 垪chen ㄧ殑镑啞у唴瀹广€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The list has deep-copy elements, freed with `xwork_task_node_summary_list_reset`.
+
+**Additional Note:**
+
+The function resets the old contents of the output list.
+
+**Example code:**
 
 ```c
 xwork_task_node_summary_list list;
@@ -1501,7 +1758,7 @@ xwork_task_graph_list_node_summaries(graph, &list);
 xwork_task_node_summary_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_node_summary_list_reset`
 
@@ -1509,11 +1766,13 @@ xwork_task_node_summary_list_reset(&list);
 
 ### xwork_task_graph_get_node_run
 
-銮峰彇麺偂偣瀵gui粲run銆?
-**锷绻兘锛?*
+Get the node corresponding to run.
 
-杩斿洖镆愪采task node鍏Chong丈鄄?`xwork_run`銆?
-**What's the point?*
+**Function:**
+
+Returns the `xwork_run` associated with a task node.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_run *xwork_task_graph_get_node_run(
@@ -1522,25 +1781,30 @@ XWORK_API xwork_run *xwork_task_graph_get_node_run(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pGraph`: source graph.
+- `sTaskId`: task id.
 
-`NULL` `NULL`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-杩斿洖Chainshoulder敱敱 graph/run 璞四嫢厅夛纴璋卂敤敤Key呬笉鑳综合狠与€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns borrowed run if found; returns `NULL` if it does not exist or has not been created.
 
-Ning Ge洤浜庺煡鐐?child run 浜嬩浩銆乻ummary鴴?artifact銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The return value is owned by the graph/run layer and cannot be destroyed by the caller.
+
+**Additional Note:**
+
+Commonly used to view child run events, summary or artifacts.
+
+**Example code:**
 
 ```c
 xwork_run *run = xwork_task_graph_get_node_run(graph, "implement");
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_run_get_summary`
 
@@ -1548,11 +1812,13 @@ xwork_run *run = xwork_task_graph_get_node_run(graph, "implement");
 
 ### xwork_task_graph_get_snapshot
 
-銮峰彇task graph snapshot銆?
-**锷绻兘锛?*
+Get task graph snapshot.
 
-Di Bian Qianlu?graph褰揿堠clock rudder€侊纴鍖呮嫭麜偣銆佷緷甧頥€乭andoff銆佽彽琛粀粨鋋滃鏆鏆effective仠/鍙栨秷留秙笧銆?
-**What's the point?*
+**Function:**
+
+Deep copy the current state of the graph, including nodes, dependencies, handoffs, execution results, and pause/cancel flags.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_get_snapshot(
@@ -1561,19 +1827,24 @@ XWORK_API xwork_status xwork_task_graph_get_snapshot(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pGraph` graph銆?-
-**杩斿洴 alkali fine**
+- `pGraph`: source graph.
+- `pSnapshot`: output snapshot; should be init before calling.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-snapshot 鎷ユ湁 deep-copy 鍍呭锛妀椤
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-snapshot persistence backend create-from-snapshot persistence backend create-from-snapshot persistence backend
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The snapshot has deep-copy content and is released with `xwork_task_graph_snapshot_reset`.
+
+**Additional Note:**
+
+The snapshot can be handed over to the persistence backend for persistence, and then restored using create-from-snapshot.
+
+**Example code:**
 
 ```c
 xwork_task_graph_snapshot snapshot;
@@ -1582,7 +1853,7 @@ xwork_task_graph_get_snapshot(graph, &snapshot);
 xwork_task_graph_snapshot_reset(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_create_from_snapshot`
 
@@ -1590,11 +1861,13 @@ xwork_task_graph_snapshot_reset(&snapshot);
 
 ### xwork_task_graph_execute
 
-Galliumцtask graph銆?
-**锷绻兘锛?*
+Execute task graph.
 
-鎸変緷緧bi栧姧绯淯€丹涶澶у苟鍙戝拋澶Braid touch 绛栫淐It’s a good idea run?
-**What's the point?*
+**Function:**
+
+Schedule task nodes according to dependencies, maximum concurrency, and failure policies, and call the run execution logic corresponding to each node.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_execute(
@@ -1603,19 +1876,24 @@ XWORK_API xwork_status xwork_task_graph_execute(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pGraph`镞多玎玺Xuancun把graph 鍍呴儴缁洴灉銆?
-**杩斿洴 alkali fine**
+- `pGraph`: graph to be executed.
+- `pResult`: Optional output execution results; when passing `NULL`, only the graph internal results are updated.
 
-`XWORK_OK` `XWORK_OK`
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶈簉?graph gallium€chain夋潈曗旗pResult` 涓嶅戈锷ㄦ€佽祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK`, execution error, or graph state error.
 
-graph execute re-entry execution re-entry
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Graph ownership is not transferred; `pResult` does not contain dynamic resources.
+
+**Additional Note:**
+
+The graph prevents execute re-entry; pauses will stop advancement at scheduling boundaries and cancellations will be propagated to the configured cancel token.
+
+**Example code:**
 
 ```c
 xwork_task_graph_result result;
@@ -1623,7 +1901,7 @@ xwork_task_graph_result_init(&result);
 xwork_status st = xwork_task_graph_execute(graph, &result);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_pause`
 - `xwork_task_graph_cancel`
@@ -1632,11 +1910,13 @@ xwork_status st = xwork_task_graph_execute(graph, &result);
 
 ### xwork_task_graph_cancel
 
-What is the task graph?
-**锷绻兘锛?*
+Cancel task graph.
 
-璁Jujiang graph 鍙栨獙鍙锛€侊纴骞荜氰綷洜鄄?
-**What's the point?*
+**Function:**
+
+Set the graph cancellation state and propagate the cancellation reason to the configured xllm cancel token.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_cancel(
@@ -1645,25 +1925,30 @@ XWORK_API xwork_status xwork_task_graph_cancel(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pGraph`
-**杩斿洴 alkali fine**
+- `pGraph`: target graph.
+- `sReason`: Optional cancellation reason.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-graph
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-鍙栨秷涓気昌€姣?graph锛涜皟鐢ㄨ€嬬粛鍙煡璇?snapshot鍜?summary銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+graph Copy cancellation reason string.
+
+**Additional Note:**
+
+Cancellation does not destroy the graph; the caller can still query the snapshot and summary.
+
+**Example code:**
 
 ```c
 xwork_task_graph_cancel(graph, "user requested stop");
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_is_cancelled`
 
@@ -1671,29 +1956,35 @@ xwork_task_graph_cancel(graph, "user requested stop");
 
 ### xwork_task_graph_is_cancelled
 
-妫€镆?graph逄惁chenchencha姹effect彇娑四€?
-**锷绻兘锛?*
+Check if the graph has requested cancellation.
 
-杩斿洖graph 褰揿堠鍙栨秷镙肖銆?
-**What's the point?*
+**Function:**
+
+Returns the current cancellation mark of the graph.
+
+**Function prototype:**
 
 ```c
 XWORK_API bool xwork_task_graph_is_cancelled(const xwork_task_graph *pGraph);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pGraph`: task graph; can be `NULL`.
 
-`true`?`false`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `true` if canceled; otherwise returns `false`.
 
-璇ュ嚱鏁 Board彧妫€镆ヨ姹傜姸镐侊纴涓璇璇役卍chain夎繛屼腑浠氲姟hen燬粲 Guo Cang銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+This function only checks the request status and does not guarantee that all running tasks have been stopped.
+
+**Example code:**
 
 ```c
 if (xwork_task_graph_is_cancelled(graph)) {
@@ -1701,7 +1992,7 @@ if (xwork_task_graph_is_cancelled(graph)) {
 }
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_cancel`
 
@@ -1709,11 +2000,13 @@ if (xwork_task_graph_is_cancelled(graph)) {
 
 ### xwork_task_graph_pause
 
-Does it work on the task graph?
-**锷绻兘锛?*
+Pause the task graph.
 
-璁jujiangjiangxiaoxuanxuanfeng簰锛屼佳铓ц鍦ㄨ皟搴﹁ Actually 鐣屽仠姝㈢屋缁惎锷ㄦ把浠淲姟銆?
-**What's the point?*
+**Function:**
+
+Set a pause request so that execution stops at a scheduling boundary to continue starting new tasks.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_pause(
@@ -1722,25 +2015,30 @@ XWORK_API xwork_status xwork_task_graph_pause(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pGraph`
-**杩斿洴 alkali fine**
+- `pGraph`: target graph.
+- `sReason`: Optional pause reason.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-graph
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-揆effect仠涓嶅搓浜庡彇娑堬炂玭㈠钖?graph 鍙漁皟搴︽湭瀹屾尚浠毲姟銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+graph replication pause reason string.
+
+**Additional Note:**
+
+Pausing is different from canceling; after resuming, the graph can continue to schedule unfinished tasks.
+
+**Example code:**
 
 ```c
 xwork_task_graph_pause(graph, "waiting for approval");
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_resume`
 - `xwork_task_graph_is_paused`
@@ -1749,36 +2047,42 @@ xwork_task_graph_pause(graph, "waiting for approval");
 
 ### xwork_task_graph_resume
 
-What is the task graph?
-**锷绻兘锛?*
+Restore task graph.
 
-哓呴嫎鏆 effect仠璇风眰鍜豾殏殃管滃师锲箮€?
-**What's the point?*
+**Function:**
+
+Clear the pause request and reason for the pause.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_resume(xwork_task_graph *pGraph);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pGraph`: target graph.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read the graph 卍呬liaoying 樼殑鏆 effect 仠铡熷洜銆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-掭㈠涓鈥氕姩璋卂椤
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Release the pause reason saved in the graph.
+
+**Additional Note:**
+
+Restore does not automatically call `xwork_task_graph_execute`; the caller needs to advance execution again.
+
+**Example code:**
 
 ```c
 xwork_task_graph_resume(graph);
 xwork_task_graph_execute(graph, &result);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_pause`
 
@@ -1786,35 +2090,41 @@ xwork_task_graph_execute(graph, &result);
 
 ### xwork_task_graph_is_paused
 
-妫€镆?graph 鏄惁箸茶姹傛殏婆溿€?
-**锷绻兘锛?*
+Check if the graph has requested a pause.
 
-What is the graph?
-**What's the point?*
+**Function:**
+
+Returns the current pause mark of the graph.
+
+**Function prototype:**
 
 ```c
 XWORK_API bool xwork_task_graph_is_paused(const xwork_task_graph *pGraph);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pGraph`: task graph; can be `NULL`.
 
-`true`?`false`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `true` if paused; otherwise returns `false`.
 
-璇ュ嚱鏁版镆ヨ姹傜姸羊纴涓brand bluffchenㄦ disease chain変change锷℃鍦ㄦ墽琛屻€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+This function checks the request status, which does not mean that no tasks are being executed.
+
+**Example code:**
 
 ```c
 bool paused = xwork_task_graph_is_paused(graph);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_pause`
 - `xwork_task_graph_resume`
@@ -1825,11 +2135,13 @@ bool paused = xwork_task_graph_is_paused(graph);
 
 ### xwork_handoff_request_options_init
 
-What are the options for handoff request options?
-**锷绻兘锛?*
+Initialize handoff request options.
 
-鍑嗗涓€涓?handoff 璇风眰锛倀敤浜庡湪涓や鉜 task node 涔嬮棿浼抻€掍笂涓嬫枃抆?
-**What's the point?*
+**Function:**
+
+Prepare a handoff request to pass context between two task nodes.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_handoff_request_options_init(
@@ -1837,19 +2149,23 @@ XWORK_API void xwork_handoff_request_options_init(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions`?`NULL`?
-**杩斿洴 alkali fine**
+- `pOptions`: options to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰嶈祫婧愶绂request API 浼橩鍒涶涷佷皣鐣欑殑瀛楃涓insert拋鏁 to play the role of 粍銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-乇呴　璁剧江 handoff id銆乫rom task id鍜?to task id銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated; the request API copies strings and arrays that need to be retained.
+
+**Additional Note:**
+
+Handoff id, from task id and to task id must be set.
+
+**Example code:**
 
 ```c
 xwork_handoff_request_options opts;
@@ -1859,7 +2175,7 @@ opts.sFromTaskId = "implement";
 opts.sToTaskId = "review";
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_request_handoff`
 
@@ -1867,11 +2183,13 @@ opts.sToTaskId = "review";
 
 ### xwork_handoff_result_options_init
 
-What is the result of handoff result options?
-**锷绻兘锛?*
+Initialize handoff result options.
 
-卑嗗 handoff 澶勭恊缁洴灉锛倀敤浜庢帴鍙椤€佹嫆缁濇倨瀹屾垚 handoff銆?
-**What's the point?*
+**Function:**
+
+Prepare handoff processing results for accepting, rejecting, or completing a handoff.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_handoff_result_options_init(
@@ -1879,19 +2197,23 @@ XWORK_API void xwork_handoff_result_options_init(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions`?`NULL`?
-**杩斿洴 alkali fine**
+- `pOptions`: options to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Resolve API
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`eState` What is the value of `XWORK_HANDOFF_PENDING`?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated; the resolve API copies the message.
+
+**Additional Note:**
+
+`eState` should be set to a final or intermediate processing state other than `XWORK_HANDOFF_PENDING`.
+
+**Example code:**
 
 ```c
 xwork_handoff_result_options opts;
@@ -1900,7 +2222,7 @@ opts.sHandoffId = "h1";
 opts.eState = XWORK_HANDOFF_ACCEPTED;
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_resolve_handoff`
 
@@ -1908,36 +2230,42 @@ opts.eState = XWORK_HANDOFF_ACCEPTED;
 
 ### xwork_handoff_summary_init
 
-What is the handoff summary?
-**锷绻兘锛?*
+Initialize handoff summary.
 
-鍑嗗涓€涓?handoff summary锛叀敤浜庢帴退逬姹幛垨镆ヨ缁撴灉銆?
-**What's the point?*
+**Function:**
+
+Prepare a handoff summary for receiving request or query results.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_handoff_summary_init(xwork_handoff_summary *pSummary);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSummary`: summary to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-樇樿中闆€佷negative pending 璇箟銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The default status is pending semantics.
+
+**Example code:**
 
 ```c
 xwork_handoff_summary summary;
 xwork_handoff_summary_init(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_request_handoff`
 
@@ -1945,35 +2273,41 @@ xwork_handoff_summary_init(&summary);
 
 ### xwork_handoff_summary_reset
 
-Read the handoff summary?
-**锷绻兘锛?*
+Release handoff summary.
 
-译婃斁 handoff summary 涓殑瀛楃涓INSert拰liaokuang椤鏁狠粍銆?
-**What's the point?*
+**Function:**
+
+Free the string and reference arrays in the handoff summary.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_handoff_summary_reset(xwork_handoff_summary *pSummary);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSummary`: summary to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read婃斁 summary 鍍呴儴鎷ユ湁璧勬簮甛屼笉Read僃斁缁撴瀯钴湰韬€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-artifact refs 鈆乵emory refs 鍜?workspace ids 閮箜寜瀛楃涓fork暟缁偯兯倀鏀Ju€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the resources held inside summary but does not release the structure itself.
+
+**Additional Note:**
+
+Artifact refs, memory refs, and workspace ids are all released as string arrays.
+
+**Example code:**
 
 ```c
 xwork_handoff_summary_reset(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_handoff_summary_init`
 
@@ -1981,36 +2315,42 @@ xwork_handoff_summary_reset(&summary);
 
 ### xwork_handoff_summary_list_init
 
-鍒濆鍖?handoff summary 鍒楄〃銆?
-**锷绻兘锛?*
+Initialize the handoff summary list.
 
-鍑嗗涓€渓┖鍒楄〃锛倀椤浜庢崴鏀?graph涓卍chain?handoff銆?
-**What's the point?*
+**Function:**
+
+Prepare an empty list to receive all handoffs in the graph.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_handoff_summary_list_init(xwork_handoff_summary_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?`NULL`?
-**杩斿洴 alkali fine**
+- `pList`: List to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-咋卂椤 `xwork_task_graph_list_handoffs` 铓嶅簲鍒捒濆鍖栥€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+It should be initialized before calling `xwork_task_graph_list_handoffs`.
+
+**Example code:**
 
 ```c
 xwork_handoff_summary_list list;
 xwork_handoff_summary_list_init(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_list_handoffs`
 
@@ -2018,35 +2358,41 @@ xwork_handoff_summary_list_init(&list);
 
 ### xwork_handoff_summary_list_reset
 
-Yue僃恁 handoff summary 鍒楄〃銆?
-**锷绻兘锛?*
+Release the handoff summary list.
 
-Read婃斁鍒楄〃涓卍chain?handoff summary鍜屽垪曛ㄦ暟缁勩€?
-**What's the point?*
+**Function:**
+
+Releases all handoff summaries and list arrays in the list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_handoff_summary_list_reset(xwork_handoff_summary_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?
-**杩斿洴 alkali fine**
+- `pList`: List to free; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read婃斁鍒楄〃鎷ユ湁璧勬簮锛屼笉Read僃斁鍒楄〃缁撴瀯寒洴湰韬€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-Read more
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releasing the resources owned by the list does not release the list structure itself.
+
+**Additional Note:**
+
+After release, the list returns to an empty state.
+
+**Example code:**
 
 ```c
 xwork_handoff_summary_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_handoff_summary_reset`
 
@@ -2054,11 +2400,13 @@ xwork_handoff_summary_list_reset(&list);
 
 ### xwork_task_graph_request_handoff
 
-鍒涘狠 handoff 璇风簰銆?
-**锷绻兘锛?*
+Create a handoff request.
 
-鍦ㄤ袱涓?task node 涔嬮棿璁 Board綍涓€涓?pending handoff锛屽苟鍙梼宁?artifact銆乵emory context鍜屽Ruibang?workspace 寮uku椤銆?
-**What's the point?*
+**Function:**
+
+Records a pending handoff between two task nodes, optionally with artifacts, memory context, and shared workspace references.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_request_handoff(
@@ -2068,19 +2416,25 @@ XWORK_API xwork_status xwork_task_graph_request_handoff(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- XWORKPLACEHOLDER0 TOKEN
-**杩斿洴 alkali fine**
+- `pGraph`: target graph.
+- `pOptions`: handoff request parameter.
+- `pSummary`: Optional output summary.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-graph graph
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-from/to task 乇呴　瀛华湪曰樨andoff id 搴濿湪 graph 鍐呭殮涓€銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+graph copies the requested content; summary, if populated, is reset by the caller.
+
+**Additional Note:**
+
+from/to task must exist; handoff id should be unique within the graph.
+
+**Example code:**
 
 ```c
 xwork_handoff_summary summary;
@@ -2089,7 +2443,7 @@ xwork_task_graph_request_handoff(graph, &opts, &summary);
 xwork_handoff_summary_reset(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_resolve_handoff`
 - `xwork_task_graph_list_handoffs`
@@ -2098,11 +2452,13 @@ xwork_handoff_summary_reset(&summary);
 
 ### xwork_task_graph_resolve_handoff
 
-What's the point of handoff?
-**锷绻兘锛?*
+Handle handoff.
 
-Xuan Cun 銊鮸湁 handoff 鄄勭姸镕和€佺姸镐人爜鍜屾秷鎭€?
-**What's the point?*
+**Function:**
+
+Update existing handoff status, status code and message.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_resolve_handoff(
@@ -2112,19 +2468,25 @@ XWORK_API xwork_status xwork_task_graph_resolve_handoff(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?summary?
-**杩斿洴 alkali fine**
+- `pGraph`: target graph.
+- `pOptions`: Processing result; must contain handoff id.
+- `pSummary`: Optional output updated summary.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-graph 澶嶅埗 message锛泂ummary 濡坝濉平曰倀敱咋卂敤Key?reset銆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-`eState`涓嶈嘘奇濇寔涓?`XWORK_HANDOFF_PENDING`銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+graph copies message; summary, if populated, reset by caller.
+
+**Additional Note:**
+
+`eState` cannot remain `XWORK_HANDOFF_PENDING`.
+
+**Example code:**
 
 ```c
 xwork_handoff_result_options result;
@@ -2134,7 +2496,7 @@ result.eState = XWORK_HANDOFF_COMPLETED;
 xwork_task_graph_resolve_handoff(graph, &result, NULL);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_request_handoff`
 
@@ -2142,11 +2504,13 @@ xwork_task_graph_resolve_handoff(graph, &result, NULL);
 
 ### xwork_task_graph_list_handoffs
 
-鍒楀吭 graph涓殑 handoff銆?
-**锷绻兘锛?*
+List handoffs in graph.
 
-銮峰彇彰濿堠 task graph 鮸茶褰kuang殑 handoff summary 鍒楄〃銆?
-**What's the point?*
+**Function:**
+
+Get the recorded handoff summary list of the current task graph.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_list_handoffs(
@@ -2155,19 +2519,24 @@ XWORK_API xwork_status xwork_task_graph_list_handoffs(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pGraph`?
-**杩斿洴 alkali fine**
+- `pGraph`: source graph.
+- `pList`: Output list; should be init before calling.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-鍒楄〃鎷ユ湁 deep-copy 鍍呭锛倀椤
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-璇?API 鍙捤浜?UI 鏄 dramaず pending handoff 鴴栨丮澶嶅悗 READ嶅综合涓娄笅鏂囧叧绯簯氯€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The list has deep-copy contents, released with `xwork_handoff_summary_list_reset`.
+
+**Additional Note:**
+
+This API can be used for UI display pending handoff or re-establishing context after recovery.
+
+**Example code:**
 
 ```c
 xwork_handoff_summary_list list;
@@ -2176,21 +2545,23 @@ xwork_task_graph_list_handoffs(graph, &list);
 xwork_handoff_summary_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_request_handoff`
 
 ---
 
-## 鎶ュ憡涓庤仛钖?Artifact
+## Reporting and Aggregation Artifact
 
 ### xwork_task_graph_emit_agent_result_report
 
-Agent task 鐢熸垚缁撴灉玶ュ憡 artifact銆?
-**锷绻兘锛?*
+Generate results reporting artifacts for individual agent tasks.
 
-掶婃寚瀹?task 镄?child run 缁撴灉鍍椤叆璋卂椤鏂guigui彁渚涚殑 artifact 瀵 silicon thin銆?
-**What's the point?*
+**Function:**
+
+Writes the child run results of the specified task to the artifact object provided by the caller.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_emit_agent_result_report(
@@ -2201,19 +2572,26 @@ XWORK_API xwork_status xwork_task_graph_emit_agent_result_report(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pGraph` graph graph- `pArtifact` How to use artifact API?
-**杩斿洴 alkali fine**
+- `pGraph`: source graph.
+- `sTaskId`: task id.
+- `sArtifactId`: output artifact id.
+- `pArtifact`: output artifact; should be initialized according to artifact API before calling.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Artifact API reset?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-The task is the run event.
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The artifact content is held by the output object and the caller presses the artifact API reset.
+
+**Additional Note:**
+
+This report is for a single task and does not replace the run event audit flow.
+
+**Example code:**
 
 ```c
 xwork_artifact artifact;
@@ -2222,7 +2600,7 @@ xwork_task_graph_emit_agent_result_report(graph, "review", "review-report", &art
 xwork_artifact_reset(&artifact);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_emit_aggregate_report`
 - `xwork_artifact_reset`
@@ -2231,11 +2609,13 @@ xwork_artifact_reset(&artifact);
 
 ### xwork_task_graph_emit_aggregate_report
 
-What is the artifact?
-**锷绻兘锛?*
+Generate aggregate reporting artifact.
 
-掶婃暣涓?task graph 镄勬墽琛粀粨鋋滆仛钖韚埌鎸囧畾 run 镄?artifact涓€?
-**What's the point?*
+**Function:**
+
+Aggregate the execution results of the entire task graph into the artifact of the specified run.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_task_graph_emit_aggregate_report(
@@ -2246,19 +2626,26 @@ XWORK_API xwork_status xwork_task_graph_emit_aggregate_report(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pArtifact`?artifact?
-**杩斿洴 alkali fine**
+- `pGraph`: source graph.
+- `pRun`: run to receive aggregated reports.
+- `sArtifactId`: output artifact id.
+- `pArtifact`: Output artifact.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-artifact 鍍呭鐢颭緭鍑 coaxPU℃寔chain庛纴璋卤椤Key呮寜 artifact API reset锛码un 涓嶈玺ョ銆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-What is the user interface of the UI?pipeline?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The artifact content is held by the output object and the caller presses artifact API reset; run is not taken over.
+
+**Additional Note:**
+
+Aggregated reports are suitable as UI summaries or pipeline artifact indexes.
+
+**Example code:**
 
 ```c
 xwork_artifact artifact;
@@ -2267,17 +2654,17 @@ xwork_task_graph_emit_aggregate_report(graph, run, "graph-report", &artifact);
 xwork_artifact_reset(&artifact);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_emit_agent_result_report`
 - `xwork_run`
 
 ---
 
-## The manuscript is 叧鏂囨.
+## Related documents
 
 - [Run API](api-run.md)
 - [Artifact API](api-artifacts.md)
-- [澶?Agent 浠诲姟鍥綸(../guide/multi-agent-intro.md)
-- [澶?Agent claw 鑼冧緥](../case/multi-agent-claw.md)
-- [鍐呴儴 multi-agent contract](../../dev/docs/MULTI_AGENT.md)
+- [Multi-Agent Task Graph](../guide/multi-agent-intro.md)
+- [Multi-Agent claw Example](../case/multi-agent-claw.md)
+- [Internal multi-agent contract](../../dev/docs/MULTI_AGENT.md)

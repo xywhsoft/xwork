@@ -1,28 +1,48 @@
 # Persistence API
 
-> Zhong Ruo €侊 fine Juan 枃 阬嚱鏁鏁 Board 嬬Key 溴纴寰呬Hanchen ュ阒呫€?
-The Persistence API has a runtime function and a heckpoint function and a rtifact and agent pool and a request graph and an emote control plane and a replay cassette and a durable backend function.
-##妯″潡瀹hydrogen綅
+> Status: Chinese function-by-function reference, waiting for manual review.
 
-Persistence, xwork, durable agent run, file backend涓嶆槸鍒嗗嫷寮忔暟鎹簱锛屼篃涶嶆槸澶氩开Key呭瓨鍌绂濡悛灉awn€簽turn绋?DB `xwork_persistence_backend`?`xwork_persistence_backend`?
-## chain
+The Persistence API is responsible for saving run, event, checkpoint, artifact, agent pool, task graph, remote control plane and replay cassette to the durable backend.
 
-| 绫淲埆 | 澹典槑 |
+## Module positioning
+
+Persistence provides xwork with local durable agent run capabilities. The built-in file backend is not a distributed database, nor a multi-writer store; if you need a remote DB or object store, you should implement a custom `xwork_persistence_backend`.
+
+## This page covers the statement
+
+| Category | Statement |
 | --- | --- |
-| `xwork_persistence_backend`, `xwork_file_persistence_options`, `xwork_file_persistence` |
-| `### xwork_*` `### xwork_*` |
+| Structure | `xwork_persistence_backend`, `xwork_file_persistence_options`, `xwork_file_persistence` |
+| Function | All `### xwork_*` sections on this page |
 
-## 镙敕笗嗟湰
+## Format version
 
-褰揿堠`XWORK_PERSISTENCE_FORMAT_VERSION`涓?`14`抆?
-What's the point?
-- 褰揿堠洴栧Fan鏀寔鄄勬棫鐗徟湰锛氭寜鍏鈥稿Chain fried 鞞枞姐€?- `XWORK_ERROR_UNSUPPORTED`?-`XWORK_ERROR_EXTERNAL_FAILURE`?- What is the value of `XWORK_ERROR_NOT_FOUND`?
-## gallium€chain勋戋戁诺勫寯
+Currently `XWORK_PERSISTENCE_FORMAT_VERSION` is `14`.
 
-- runtime options `pPersistenceBackend` `pPersistenceBackend` `pPersistenceBackend` backend callback鐢熷懡 forge ㄦ湡銆?- Gallium € chain?list/load/query 枈揿叭缁洯鐢铟鐢ㄦ南鎷ユ湁锛涘～鍏呭怗鹇呴　璋卂椤瀵rose簲 reset銆?- recover API杩斿洖鄄?pool/graph/control plane/run涓?owned object锛岃皟鐢ㄦ南璐绻 chu阌€姣和€?
-## Ning Ge?
-- `XWORK_ERROR_NOT_FOUND` `XWORK_ERROR_NO_MEMORY`, deep-copy, backend callback, `XWORK_ERROR_EXTERNAL_FAILURE`, I/O backend callback.
-## 阃氱敤锣姧緥
+Read rules:
+
+- Current or older supported versions: loaded by compatible defaults.
+- Unknown update version: Return `XWORK_ERROR_UNSUPPORTED`.
+- Corrupt or incomplete file: Returns `XWORK_ERROR_EXTERNAL_FAILURE`.
+- Object does not exist: return `XWORK_ERROR_NOT_FOUND`.
+
+## Ownership Rules
+
+- `pPersistenceBackend` in runtime options is copied by value.
+- backend callback function pointer and `pUserData` are borrowed and must override the runtime lifetime.
+- `xwork_file_persistence_configure_backend` will copy the root path to the store and configure the backend callback table to point to the store.
+- All list/load/query output structures are owned by the caller; the corresponding reset must be called after filling.
+- The pool/graph/control plane/run returned by the recover API is an owned object, and the caller is responsible for destroying it.
+
+## Common error codes
+
+- `XWORK_ERROR_INVALID_ARGUMENT`: Invalid store, backend, runtime, run id, object id, or output structure.
+- `XWORK_ERROR_NOT_FOUND`: Object does not exist.
+- `XWORK_ERROR_UNSUPPORTED`: Format version updated or capability not supported.
+- `XWORK_ERROR_NO_MEMORY`: Allocation or deep-copy failed.
+- `XWORK_ERROR_EXTERNAL_FAILURE`: File I/O, corrupt record, or backend callback failed.
+
+## General example
 
 ```c
 #include "xwork.h"
@@ -50,36 +70,42 @@ int configure_store(void) {
 
 ### xwork_persistence_backend_init
 
-鍒濆鍖?persistence backend callback 琛ㄣ€?
-**锷绻兘锛?*
+Initialize the persistence backend callback table.
 
-鍒涘缓鑷畾涔?backend 鎴栨帴鏀?file backend 閰嶇疆鍓嶏紝灏?callback 琛ㄦ竻闆躲€?
-**What's the point?*
+**Function:**
+
+Clear the callback table before creating a custom backend or receiving a file backend configuration.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_persistence_backend_init(xwork_persistence_backend *pBackend);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pBackend` is not the same as `NULL` is `NULL` is it?
-**杩斿洴 alkali fine**
+- `pBackend`: Output parameter. Can be `NULL`; cleared if not `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-`pUserData` `pUserData`
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- runtime 浼氭寜chain fried鍒?backend 琛ㄣ€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Functions do not allocate resources. callback and `pUserData` are managed by the caller.
+
+**Additional Note:**
+
+- The runtime will copy the backend table by value.
+
+**Example code:**
 
 ```c
 xwork_persistence_backend backend;
 xwork_persistence_backend_init(&backend);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_configure_backend`
 
@@ -87,11 +113,13 @@ xwork_persistence_backend_init(&backend);
 
 ### xwork_file_persistence_options_init
 
-What are the file persistence options?
-**锷绻兘锛?*
+Initialize file persistence options.
 
-What is the file backend?
-**What's the point?*
+**Function:**
+
+Prepare to configure the built-in file backend.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_file_persistence_options_init(
@@ -99,19 +127,23 @@ XWORK_API void xwork_file_persistence_options_init(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions` is not the same as `NULL` is `NULL` is it?
-**杩斿洴 alkali fine**
+- `pOptions`: Output parameter. Can be `NULL`; cleared if not `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-The root path is the root path of the root path.
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- `sRootPath` file backend file backend
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Functions do not allocate resources. `sRootPath` is borrowed from the caller and copied during configure.
+
+**Additional Note:**
+
+- `sRootPath` is a required field to configure the file backend.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_options options;
@@ -119,7 +151,7 @@ xwork_file_persistence_options_init(&options);
 options.sRootPath = ".xwork_store";
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_configure_backend`
 
@@ -127,36 +159,42 @@ options.sRootPath = ".xwork_store";
 
 ### xwork_file_persistence_init
 
-What is the file persistence store?
-**锷绻兘锛?*
+Initialize file persistence store.
 
-`xwork_file_persistence` file backend
-**What's the point?*
+**Function:**
+
+Prepare an `xwork_file_persistence` structure for configuring the file backend.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_file_persistence_init(xwork_file_persistence *pStore);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pStore` is not the same as `NULL` is `NULL` is it?
-**杩斿洴 alkali fine**
+- `pStore`: Output parameter. Can be `NULL`; cleared if not `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-鍑簟涓嶅垎閰制祫婧橩€俢onfigure钖?store鎷ユ湁root path铓湰銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- `xwork_file_persistence_reset`?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Functions do not allocate resources. After configure the store has a copy of the root path.
+
+**Additional Note:**
+
+- Call `xwork_file_persistence_reset` after use is complete.
+
+**Example code:**
 
 ```c
 xwork_file_persistence store;
 xwork_file_persistence_init(&store);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_reset`
 
@@ -164,35 +202,41 @@ xwork_file_persistence_init(&store);
 
 ### xwork_file_persistence_reset
 
-Read the file persistence store?
-**锷绻兘锛?*
+Release and reset the file persistence store.
 
-File backend store file backend store root path init init Zhongduo€?
-**What's the point?*
+**Function:**
+
+Release the root path held by the file backend store and return to the init state.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_file_persistence_reset(xwork_file_persistence *pStore);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pStore`?`NULL`?
-**杩斿洴 alkali fine**
+- `pStore`: input/output parameters. Can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Yue婃斁 store 鎷ユ湁镄?root path铓湰銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- 涓氪 fine鍒犋掎纾亴涓婄殑 persistence 鏁版偁銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Release the copy of root path owned by the store.
+
+**Additional Note:**
+
+- Persistence data on disk will not be deleted.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_reset(&store);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_init`
 
@@ -200,11 +244,13 @@ xwork_file_persistence_reset(&store);
 
 ### xwork_file_persistence_configure_backend
 
-file backend?
-**锷绻兘锛?*
+Configure the built-in file backend.
 
-掶?file store 缁戝畾鍒?root path锛屽苟濉Pang
-**What's the point?*
+**Function:**
+
+Bind the file store to the root path and populate the `xwork_persistence_backend` callback table for use by the runtime.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_configure_backend(
@@ -214,25 +260,32 @@ XWORK_API xwork_status xwork_file_persistence_configure_backend(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pStore` `pOptions` `NULL` `sRootPath` `sRootPath` `pBackend`锛氲緷鍑鍑鬍雳雁雁 effect退椤椤氪
-**杩斿洴 alkali fine**
+- `pStore`: input/output parameters. Must not be `NULL`.
+- `pOptions`: input parameters. Must be other than `NULL`, and `sRootPath` must be a non-empty string.
+- `pBackend`: Output parameter. Must not be `NULL`. Receive callback table on success.
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-store 鎷ユ湁 root path 铓湰锛暚ackend callback 琛ㄥ€熺昤 store 毻怀negative user data锛宻tore 鹇呴　窙洊 runtime 雛囥€熺昤?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or a generic persistence error code.
 
-- 卑 must be used as a guide to reset store/backend
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The store has a copy of the root path; the backend callback table borrows the store as user data, and the store must cover the runtime lifetime.
+
+**Additional Note:**
+
+- The function creates the necessary directories.
+- Reconfiguration will reset store/backend first.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_configure_backend(&store, &options, &backend);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_create`
 
@@ -240,8 +293,9 @@ xwork_file_persistence_configure_backend(&store, &options, &backend);
 
 ### xwork_file_persistence_list_runs
 
-Run id?
-**What's the point?*
+List persistent run ids.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_list_runs(
@@ -250,22 +304,28 @@ XWORK_API xwork_status xwork_file_persistence_list_runs(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-铓弿 file backend涓fanqi濆瓨鄄?run銆?
-**卙四暟锛?*
+Scan the file backend for saved runs.
 
-- `pStore` - `pList` - `pList` - `pList` `NULL`四屾帴馀?owned
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `pList`: Output parameter. Must be other than `NULL`, receives a list of owned strings.
 
-咋卂敤Key呭繀椤捤椤
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 杩斿洖镄勬槧 run id锛屼鬉锷纺水 run 鍐呭銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The caller must free the list with `xwork_string_list_reset`.
+
+**Additional Note:**
+
+- What is returned is the run id, and the run content is not loaded.
+
+**Example code:**
 
 ```c
 xwork_string_list list;
@@ -274,7 +334,7 @@ xwork_file_persistence_list_runs(&store, &list);
 xwork_string_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_list_persisted_runs`
 
@@ -282,8 +342,9 @@ xwork_string_list_reset(&list);
 
 ### xwork_file_persistence_list_run_summaries
 
-Run summary?
-**What's the point?*
+List all run summaries.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_list_run_summaries(
@@ -292,22 +353,28 @@ XWORK_API xwork_status xwork_file_persistence_list_run_summaries(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-file backend
-**卙四暟锛?*
+Load the summary of each run in the file backend.
 
-- `pStore` is the only one that can be used for wedding purposes? - `pList`
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`xwork_run_summary_list_reset`?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 鐢ㄤ簬 run history UI?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The caller must `xwork_run_summary_list_reset`.
+
+**Additional Note:**
+
+- for run history UI.
+
+**Example code:**
 
 ```c
 xwork_run_summary_list list;
@@ -316,7 +383,7 @@ xwork_file_persistence_list_run_summaries(&store, &list);
 xwork_run_summary_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_list_persisted_run_summaries`
 
@@ -324,8 +391,9 @@ xwork_run_summary_list_reset(&list);
 
 ### xwork_file_persistence_list_run_index
 
-How can I run index?
-**What's the point?*
+List run index.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_list_run_index(
@@ -334,22 +402,28 @@ XWORK_API xwork_status xwork_file_persistence_list_run_index(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-杩濖洖鍖呭戈 summary涓?last objects鄄?run index銆?
-**卙四暟锛?*
+Returns the run index containing summary and last objects.
 
-- `pStore` is the only one that can be used for wedding purposes? - `pList`
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`xwork_run_index_list_reset`?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 江変环浜庢椤 query 鏉′Huan鄄?run index 镆ヨ銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The caller must `xwork_run_index_list_reset`.
+
+**Additional Note:**
+
+- Equivalent to run index query without query condition.
+
+**Example code:**
 
 ```c
 xwork_run_index_list list;
@@ -358,7 +432,7 @@ xwork_file_persistence_list_run_index(&store, &list);
 xwork_run_index_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_query_run_index`
 
@@ -366,8 +440,9 @@ xwork_run_index_list_reset(&list);
 
 ### xwork_file_persistence_query_run_index
 
-Run index?
-**What's the point?*
+Query run index by condition.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_query_run_index(
@@ -377,29 +452,36 @@ XWORK_API xwork_status xwork_file_persistence_query_run_index(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-鎸?run state銆乤utonomy銆鹴ast event/checkpoint/approval黛夋浔浠浠酠煇璇?run index銆?
-**卙四暟锛?*
+Query run index based on run state, autonomy, last event/checkpoint/approval and other conditions.
 
-- `pStore` `pList`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `pQuery`: input parameters. Can be `NULL`.
+- `pList`: Output parameter. Must not be `NULL`.
 
-Reset
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- query 瀛楃涓管瓧娈典negative borrowed銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The caller must reset the output list.
+
+**Additional Note:**
+
+- The query string field is borrowed.
+
+**Example code:**
 
 ```c
 xwork_run_index_query query;
 xwork_run_index_query_init(&query);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_run_index_query_init`
 
@@ -407,8 +489,9 @@ xwork_run_index_query_init(&query);
 
 ### xwork_file_persistence_list_checkpoints
 
-Checkpoint id run
-**What's the point?*
+List the checkpoint id of the run.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_list_checkpoints(
@@ -418,28 +501,35 @@ XWORK_API xwork_status xwork_file_persistence_list_checkpoints(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-Checkpoint run
-**卙四暟锛?*
+Scan the checkpoint directory of the specified run.
 
-- `pStore` `pList`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be a non-empty run id.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`xwork_string_list_reset`?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- What is the checkpoint?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The caller must `xwork_string_list_reset`.
+
+**Additional Note:**
+
+- Only returns the id and does not load the checkpoint content.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_list_checkpoints(&store, "run-1", &list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_load_checkpoint`
 
@@ -447,8 +537,9 @@ xwork_file_persistence_list_checkpoints(&store, "run-1", &list);
 
 ### xwork_file_persistence_list_events
 
-鍒楀吭 run 镄?event 銆?
-**What's the point?*
+List the event id of run.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_list_events(
@@ -458,28 +549,35 @@ XWORK_API xwork_status xwork_file_persistence_list_events(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-鍒楀嚭厸囧畾 run 镄?event log涓彲锷銺水 event id銆?
-**卙四暟锛?*
+Lists the event ids that can be loaded in the event log of the specified run.
 
-- `pStore` `pList`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pList`: Output parameter. Must not be `NULL`.
 
-咋卂敤Key?reset卒楄〃銆?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 鐢ㄤ簬瀹¤铡嗗彶姆嶅巻銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+List of callers reset.
+
+**Additional Note:**
+
+- Used for audit history traversal.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_list_events(&store, "run-1", &list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_load_event`
 
@@ -487,8 +585,9 @@ xwork_file_persistence_list_events(&store, "run-1", &list);
 
 ### xwork_file_persistence_list_artifacts
 
-鍒楀吭 run 镄?artifact id銆?
-**What's the point?*
+List the artifact ids for the run.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_list_artifacts(
@@ -498,28 +597,35 @@ XWORK_API xwork_status xwork_file_persistence_list_artifacts(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-卒楀嚭厸囧畾 run 宸叀卛瀛?artifact銆?
-**卙四暟锛?*
+Lists saved artifacts for the specified run.
 
-- `pStore` `pList`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pList`: Output parameter. Must not be `NULL`.
 
-咋卂敤Key?reset卒楄〃銆?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- What is the artifact?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+List of callers reset.
+
+**Additional Note:**
+
+- Only returns the id and does not load the artifact content.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_list_artifacts(&store, "run-1", &list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_load_artifact`
 
@@ -527,8 +633,9 @@ xwork_file_persistence_list_artifacts(&store, "run-1", &list);
 
 ### xwork_file_persistence_list_artifact_summaries
 
-鍒楀吭 run 镄?artifact summary銆?
-**What's the point?*
+List the artifact summary for the run.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_list_artifact_summaries(
@@ -538,28 +645,35 @@ XWORK_API xwork_status xwork_file_persistence_list_artifact_summaries(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-锷纺irrigate鎸囧畾 run 锄?artifact metadata鍒楄〃銆?
-**卙四暟锛?*
+Loads the artifact metadata list for the specified run.
 
-- `pStore` `pList`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`xwork_artifact_summary_list_reset`?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 涓嶅姞枞袁珁?content text銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The caller must `xwork_artifact_summary_list_reset`.
+
+**Additional Note:**
+
+- Does not load full content text.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_list_artifact_summaries(&store, "run-1", &summaries);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_query_artifact_summaries`
 
@@ -567,8 +681,9 @@ xwork_file_persistence_list_artifact_summaries(&store, "run-1", &summaries);
 
 ### xwork_file_persistence_query_artifact_summaries
 
-Artifact summary銆?
-**What's the point?*
+Query artifact summary by condition.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_query_artifact_summaries(
@@ -579,29 +694,37 @@ XWORK_API xwork_status xwork_file_persistence_query_artifact_summaries(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-鸸?kind銆乷utput class銆乺ole銆丶ame銆丮IME銆乻torage ref銆鹪xit code鍜?sequence镆ヨ artifact summary銆?
-**卙四暟锛?*
+Query artifact summary by kind, output class, role, name, MIME, storage ref, exit code, and sequence.
 
-- `pStore` `pQuery`?`NULL`?-`pList`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pQuery`: input parameters. Can be `NULL`.
+- `pList`: Output parameter. Must not be `NULL`.
 
-咋卂敤Key?reset枈揿嚭鍒楄〃銆?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 绌?query 绛夊搓浜?list summaries銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The caller reset outputs the list.
+
+**Additional Note:**
+
+- An empty query is equivalent to list summaries.
+
+**Example code:**
 
 ```c
 xwork_artifact_summary_query query;
 xwork_artifact_summary_query_init(&query);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_artifact_summary_query_init`
 
@@ -609,8 +732,9 @@ xwork_artifact_summary_query_init(&query);
 
 ### xwork_file_persistence_query_run_steps
 
-镆ヨ鎸丷箙鍖?run step銆?
-**What's the point?*
+Query persistence run step.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_query_run_steps(
@@ -621,28 +745,36 @@ XWORK_API xwork_status xwork_file_persistence_query_run_steps(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-浠庢寔涔呭寲 event/checkpoint 涓擓鎴?step 鍒楄〃銆?
-**卙四暟锛?*
+Generate step list from persistent event/checkpoint.
 
-- `pStore` `pQuery`?`NULL`?-`pList`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pQuery`: input parameters. Can be `NULL`.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`xwork_run_step_list_reset`?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- step event/checkpoint event/checkpoint
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The caller must `xwork_run_step_list_reset`.
+
+**Additional Note:**
+
+- step is a query projection derived from event/checkpoint.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_query_run_steps(&store, "run-1", NULL, &steps);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_run_step_query_init`
 
@@ -650,8 +782,9 @@ xwork_file_persistence_query_run_steps(&store, "run-1", NULL, &steps);
 
 ### xwork_file_persistence_load_event
 
-What is the event?
-**What's the point?*
+Load the specified event.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_event(
@@ -662,22 +795,30 @@ XWORK_API xwork_status xwork_file_persistence_load_event(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-浠?file backend 锷纺水鎸囧畾 run 鄄勬寚瀹?event銆?
-**卙四暟锛?*
+Loads the specified event for the specified run from the file backend.
 
-- `pStore` XWORKPLACEHOLDER2 TOKEN
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `sEventId`: input parameters. Must be non-empty.
+- `pEvent`: Output parameter. Must not be `NULL`.
 
-event 鎺ユ湕 owned 瀛楁曃它皟鐢ㄨ€?reset銆?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- init?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The event receives the owned field and the caller resets it.
+
+**Additional Note:**
+
+- It is recommended to init the output structure first.
+
+**Example code:**
 
 ```c
 xwork_event event;
@@ -686,7 +827,7 @@ xwork_file_persistence_load_event(&store, "run-1", "event-1", &event);
 xwork_event_reset(&event);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_list_events`
 
@@ -694,8 +835,9 @@ xwork_event_reset(&event);
 
 ### xwork_file_persistence_load_last_event
 
-What is the event?
-**What's the point?*
+Load the last event.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_last_event(
@@ -705,28 +847,35 @@ XWORK_API xwork_status xwork_file_persistence_load_last_event(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-锷纺irrigate鸧畾 run 锄勬涶钖庺竴涓?event銆?
-**卙四暟锛?*
+Loads the last event of the specified run.
 
-- `pStore` `pEvent`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pEvent`: Output parameter. Must not be `NULL`.
 
-What is the reset event key?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 娌℃湁 event 锞 inert鹑锲?`XWORK_ERROR_NOT_FOUND`銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset event.
+
+**Additional Note:**
+
+- Returns `XWORK_ERROR_NOT_FOUND` if there is no event.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_last_event(&store, "run-1", &event);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_load_persisted_last_event`
 
@@ -734,8 +883,9 @@ xwork_file_persistence_load_last_event(&store, "run-1", &event);
 
 ### xwork_file_persistence_load_run_snapshot
 
-What is the latest run snapshot?
-**What's the point?*
+Load latest run snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_run_snapshot(
@@ -745,22 +895,29 @@ XWORK_API xwork_status xwork_file_persistence_load_run_snapshot(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-锷纺irrigate鎸囧畾 run 锄?latest snapshot锛妀敤浜庺仮澶?run銆?
-**卙四暟锛?*
+Load the latest snapshot of the specified run for recovery of the run.
 
-- `pStore` `pSnapshot`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pSnapshot`: Output parameter. Must not be `NULL`.
 
-snapshot 鎺ユ湕 owned 瀛楁曃它皟鐢ㄨ€?reset銆?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- What is the workspace/tool/xllm/host service?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+snapshot receives the owned field and the caller resets.
+
+**Additional Note:**
+
+- The workspace/tool/xllm/host service must be re-registered before recovery.
+
+**Example code:**
 
 ```c
 xwork_run_snapshot snapshot;
@@ -769,7 +926,7 @@ xwork_file_persistence_load_run_snapshot(&store, "run-1", &snapshot);
 xwork_run_snapshot_reset(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_recover_run`
 
@@ -777,8 +934,9 @@ xwork_run_snapshot_reset(&snapshot);
 
 ### xwork_file_persistence_load_checkpoint_snapshot
 
-锷纺irrigation checkpoint 瀵gui粲 run snapshot銆?
-**What's the point?*
+Loading checkpoint corresponds to run snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_checkpoint_snapshot(
@@ -789,28 +947,36 @@ XWORK_API xwork_status xwork_file_persistence_load_checkpoint_snapshot(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-Checkpoint
-**卙四暟锛?*
+Load the run snapshot saved by the specified checkpoint.
 
-- `pStore` XWORKPLACEHOLDER2 TOKEN
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `sCheckpointId`: input parameters. Must be non-empty.
+- `pSnapshot`: Output parameter. Must not be `NULL`.
 
-What is the key?reset snapshot?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 鐢ㄤ簬浠庡巻鍙?checkpoint 鎭㈠銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset snapshot.
+
+**Additional Note:**
+
+- Used for recovery from historical checkpoints.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_checkpoint_snapshot(&store, "run-1", "ckpt-1", &snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_load_run_snapshot`
 
@@ -818,8 +984,9 @@ xwork_file_persistence_load_checkpoint_snapshot(&store, "run-1", "ckpt-1", &snap
 
 ### xwork_file_persistence_store_task_graph_snapshot
 
-What is the task graph snapshot?
-**What's the point?*
+Save task graph snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_store_task_graph_snapshot(
@@ -828,28 +995,34 @@ XWORK_API xwork_status xwork_file_persistence_store_task_graph_snapshot(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-What is the multi-agent task graph and the file backend?
-**卙四暟锛?*
+Write multi-agent task graph status to file backend.
 
-– `pStore`
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `pSnapshot`: input parameters. Must not be `NULL`.
 
-鍑 must隟璇燲彇 snapshot锛屼鬉玺ョ铓€chain夋潈銆?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- What is the snapshot id link?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The function reads the snapshot without taking over ownership.
+
+**Additional Note:**
+
+- snapshot id must be valid.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_store_task_graph_snapshot(&store, &snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_load_task_graph_snapshot`
 
@@ -857,8 +1030,9 @@ xwork_file_persistence_store_task_graph_snapshot(&store, &snapshot);
 
 ### xwork_file_persistence_load_task_graph_snapshot
 
-What is the task graph snapshot?
-**What's the point?*
+Load task graph snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_task_graph_snapshot(
@@ -868,28 +1042,35 @@ XWORK_API xwork_status xwork_file_persistence_load_task_graph_snapshot(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-锷纺水鎸囧畾task graph 锄勬崔涔呭寲 Zhongruo€and€?
-**卙四暟锛?*
+Loads the persistent state of the specified task graph.
 
-- `pStore` `pSnapshot`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sGraphId`: input parameters. Must be non-empty.
+- `pSnapshot`: Output parameter. Must not be `NULL`.
 
-What is the key?reset snapshot?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- What is the agent pool and runtime?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset snapshot.
+
+**Additional Note:**
+
+- Resume execution also requires agent pool and runtime.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_task_graph_snapshot(&store, "graph-1", &snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_recover_task_graph`
 
@@ -897,8 +1078,9 @@ xwork_file_persistence_load_task_graph_snapshot(&store, "graph-1", &snapshot);
 
 ### xwork_file_persistence_store_agent_pool_snapshot
 
-Qi Chuan agent pool snapshot?
-**What's the point?*
+Save agent pool snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_store_agent_pool_snapshot(
@@ -907,28 +1089,34 @@ XWORK_API xwork_status xwork_file_persistence_store_agent_pool_snapshot(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-Agent pool Agent snapshot agent pool
-**卙四暟锛?*
+Save the agent pool configuration and agent snapshot.
 
-– `pStore`
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `pSnapshot`: input parameters. Must not be `NULL`.
 
-鍑 must隟璇燲彇 snapshot锛屼鬉玺ョ铓€chain夋潈銆?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 鐢ㄤ簬 multi-agent 鎭㈠銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The function reads the snapshot without taking over ownership.
+
+**Additional Note:**
+
+- for multi-agent recovery.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_store_agent_pool_snapshot(&store, &pool_snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_load_agent_pool_snapshot`
 
@@ -936,8 +1124,9 @@ xwork_file_persistence_store_agent_pool_snapshot(&store, &pool_snapshot);
 
 ### xwork_file_persistence_load_agent_pool_snapshot
 
-What is the agent pool snapshot?
-**What's the point?*
+Load agent pool snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_agent_pool_snapshot(
@@ -947,28 +1136,35 @@ XWORK_API xwork_status xwork_file_persistence_load_agent_pool_snapshot(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-What is the agent pool?
-**卙四暟锛?*
+Load the persistent configuration of the specified agent pool.
 
-- `pStore` `pSnapshot`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sPoolId`: input parameters. Must be non-empty.
+- `pSnapshot`: Output parameter. Must not be `NULL`.
 
-What is the key?reset snapshot?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- load the live pool?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset snapshot.
+
+**Additional Note:**
+
+- load only returns data and does not create a live pool.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_agent_pool_snapshot(&store, "pool-1", &snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_agent_pool_create_from_snapshot`
 
@@ -976,8 +1172,9 @@ xwork_file_persistence_load_agent_pool_snapshot(&store, "pool-1", &snapshot);
 
 ### xwork_file_persistence_store_control_plane_snapshot
 
-What is the control plane snapshot?
-**What's the point?*
+Save the control plane snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_store_control_plane_snapshot(
@@ -986,28 +1183,34 @@ XWORK_API xwork_status xwork_file_persistence_store_control_plane_snapshot(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-Qiciquan remote worker control plane Zhongduo€?
-**卙四暟锛?*
+Save remote worker control plane state.
 
-– `pStore`
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `pSnapshot`: input parameters. Must not be `NULL`.
 
-鍑 must隟璇燲彇 snapshot锛屼鬉玺ョ铓€chain夋潈銆?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 鍖呭惈worker銆乼ask銆乴ease銆乷utput/blob chunk 鎽樿銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The function reads the snapshot without taking over ownership.
+
+**Additional Note:**
+
+- Contains worker, task, lease, output/blob chunk summary.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_store_control_plane_snapshot(&store, &snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_load_control_plane_snapshot`
 
@@ -1015,8 +1218,9 @@ xwork_file_persistence_store_control_plane_snapshot(&store, &snapshot);
 
 ### xwork_file_persistence_load_control_plane_snapshot
 
-What is the control plane snapshot?
-**What's the point?*
+Load the control plane snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_control_plane_snapshot(
@@ -1026,28 +1230,35 @@ XWORK_API xwork_status xwork_file_persistence_load_control_plane_snapshot(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-The remote worker control plane is connected to the remote worker control plane.
-**卙四暟锛?*
+Load remote worker control plane persistent state.
 
-- `pStore` `pSnapshot`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sPlaneId`: input parameters. Must be non-empty.
+- `pSnapshot`: Output parameter. Must not be `NULL`.
 
-What is the key?reset snapshot?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- Load the control plane and the snapshot control plane.
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset snapshot.
+
+**Additional Note:**
+
+- load only returns the snapshot and does not start the control plane.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_control_plane_snapshot(&store, "plane-1", &snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_recover_control_plane`
 
@@ -1055,8 +1266,9 @@ xwork_file_persistence_load_control_plane_snapshot(&store, "plane-1", &snapshot)
 
 ### xwork_file_persistence_store_replay
 
-Qiciquan replay engine cassette?
-**What's the point?*
+Save replay engine cassette.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_store_replay(
@@ -1065,28 +1277,34 @@ XWORK_API xwork_status xwork_file_persistence_store_replay(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-Replay manifest, intries, vents, filesystem refs, results, etc.
-**卙四暟锛?*
+Save the replay manifest, entries, events, filesystem refs, and result.
 
-– `pStore`
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `pEngine`: input parameters. Must not be `NULL`.
 
-What's the value of the replay engine?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- replay engine?Replay API?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+The function reads the replay engine and does not take over ownership.
+
+**Additional Note:**
+
+- For the specific recording/playback capabilities of the replay engine, see the Replay API.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_store_replay(&store, engine);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_load_replay_engine`
 
@@ -1094,8 +1312,9 @@ xwork_file_persistence_store_replay(&store, engine);
 
 ### xwork_file_persistence_list_replays
 
-鍒楀吭 replay id銆?
-**What's the point?*
+List replay ids.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_list_replays(
@@ -1104,28 +1323,34 @@ XWORK_API xwork_status xwork_file_persistence_list_replays(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-铓弿 file backend涓fanqi濆瓨鄄?replay cassette銆?
-**卙四暟锛?*
+Scan replay cassettes saved in the file backend.
 
-- `pStore` is the only one that can be used for wedding purposes? - `pList`
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `pList`: Output parameter. Must not be `NULL`.
 
-璋卂敤Key?reset 瀛怃涓综合枪曛ㄣ€?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- Replay id?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset string list.
+
+**Additional Note:**
+
+- Only replay id is returned.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_list_replays(&store, &list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_load_replay_manifest`
 
@@ -1133,8 +1358,9 @@ xwork_file_persistence_list_replays(&store, &list);
 
 ### xwork_file_persistence_load_replay_manifest
 
-Why replay manifest?
-**What's the point?*
+Load the replay manifest.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_replay_manifest(
@@ -1144,28 +1370,35 @@ XWORK_API xwork_status xwork_file_persistence_load_replay_manifest(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-锷纺殹 replay 锄?manifest 鍏冩暟酹€?
-**卙四暟锛?*
+Load the replay's manifest metadata.
 
-- `pStore` `pManifest`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sReplayId`: input parameters. Must be non-empty.
+- `pManifest`: Output parameter. Must not be `NULL`.
 
-What is the key?reset manifest?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 涓嶅姞杞?entry 鍒楄〃銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset manifest.
+
+**Additional Note:**
+
+- Do not load the entry list.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_replay_manifest(&store, "replay-1", &manifest);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_replay_manifest_reset`
 
@@ -1173,8 +1406,9 @@ xwork_file_persistence_load_replay_manifest(&store, "replay-1", &manifest);
 
 ### xwork_file_persistence_load_replay_entries
 
-Replay entry summaries銆?
-**What's the point?*
+Load replay entry summaries.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_replay_entries(
@@ -1184,28 +1418,35 @@ XWORK_API xwork_status xwork_file_persistence_load_replay_entries(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-锷纺irrigate replay cassette 锄?entry summary 鍒楄〃銆?
-**卙四暟锛?*
+Load the entry summary list of replay cassette.
 
-- `pStore` `pList`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sReplayId`: input parameters. Must be non-empty.
+- `pList`: Output parameter. Must not be `NULL`.
 
-Reset entry summary list?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- What is the summary of the payload?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset entry summary list.
+
+**Additional Note:**
+
+- Only the summary is loaded, not the complete payload.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_replay_entries(&store, "replay-1", &entries);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_replay_entry_summary_list_reset`
 
@@ -1213,8 +1454,9 @@ xwork_file_persistence_load_replay_entries(&store, "replay-1", &entries);
 
 ### xwork_file_persistence_load_replay_result
 
-Replay result?
-**What's the point?*
+Load replay result.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_replay_result(
@@ -1224,28 +1466,35 @@ XWORK_API xwork_status xwork_file_persistence_load_replay_result(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-锷纺irrigate replay 铓ц缁撴灴灉鍜岄Juan?divergence銆?
-**卙四暟锛?*
+Load replay execution results and first divergence.
 
-- `pStore` `pResult`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sReplayId`: input parameters. Must be non-empty.
+- `pResult`: Output parameter. Must not be `NULL`.
 
-What is the key?reset replay result?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 鐢ㄤ簬 replay 铡嗗彶UI 鴴?CI gate銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset replay result.
+
+**Additional Note:**
+
+- Used to replay history UI or CI gate.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_replay_result(&store, "replay-1", &result);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_replay_result_reset`
 
@@ -1253,8 +1502,9 @@ xwork_file_persistence_load_replay_result(&store, "replay-1", &result);
 
 ### xwork_file_persistence_load_replay_engine
 
-How about replay engine?
-**What's the point?*
+Load replay engine.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_replay_engine(
@@ -1265,22 +1515,30 @@ XWORK_API xwork_status xwork_file_persistence_load_replay_engine(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-浠庝iao瀛樼殑 replay cassette 鋋勫狠 live replay engine銆?
-**卙四暟锛?*
+Build a live replay engine from a saved replay cassette.
 
-- `pStore` `pOptions` `ppEngine`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sReplayId`: input parameters. Must be non-empty.
+- `pOptions`: input parameters. Default options can be used for `NULL`.
+- `ppEngine`: Output parameter. Must not be `NULL`.
 
-`*ppEngine` `xwork_replay_engine_destroy` `xwork_replay_engine_destroy`
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- live replay engine
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Upon success `*ppEngine` is owned by the caller and must be `xwork_replay_engine_destroy`.
+
+**Additional Note:**
+
+- The live replay engine is not a snapshot and needs to be explicitly destroyed.
+
+**Example code:**
 
 ```c
 xwork_replay_engine *engine = NULL;
@@ -1288,7 +1546,7 @@ xwork_file_persistence_load_replay_engine(&store, "replay-1", NULL, &engine);
 xwork_replay_engine_destroy(engine);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_store_replay`
 
@@ -1296,8 +1554,9 @@ xwork_replay_engine_destroy(engine);
 
 ### xwork_file_persistence_recover_task_graph
 
-鍭㈠agent pool鍜?task graph銆?
-**What's the point?*
+Restore the agent pool and task graph.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_recover_task_graph(
@@ -1311,28 +1570,39 @@ XWORK_API xwork_status xwork_file_persistence_recover_task_graph(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-浠庢寔涔呭寲 agent pool snapshot 涓?task graph snapshot 鍒涘leu live 瀵 silicon thin 銆?
-**卙四暟锛?*
+Create live objects from persistent agent pool snapshots and task graph snapshots.
 
--`pStore` `NULL`抆?- XWORKPLACEHOLDER 4TOKEN `ppPool`
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence/multi-agent persistence/multi-agent ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `pRuntime`: input/output parameters. Must not be `NULL`.
+- `sPoolId`: input parameters. Must be non-empty.
+- `sGraphId`: input parameters. Must be non-empty.
+- `pExecutionOptions`: input parameters. Can be `NULL`.
+- `ppPool`: Output parameter. Must not be `NULL`.
+- `ppGraph`: Output parameter. Must not be `NULL`.
 
-掴愬姛钖?pool鍜?graph 鐢锟鍢ㄨ€嫮嫢夛纴鍒嗗埆鐢ㄥ搴?destroy 鍑 must隟Read嫃斁銆?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- runtime installation and installation of workspace and workspace and service installation of xllm and workspace.
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence/multi-agent error code.
+
+**Resource ownership:**
+
+After success, the pool and graph are owned by the caller and released using the corresponding destroy function respectively.
+
+**Additional Note:**
+
+- The runtime must have been reconfigured workspace, tool, host service and xllm.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_recover_task_graph(&store, runtime, "pool-1", "graph-1", NULL, &pool, &graph);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_task_graph_destroy`
 - `xwork_agent_pool_destroy`
@@ -1341,8 +1611,9 @@ xwork_file_persistence_recover_task_graph(&store, runtime, "pool-1", "graph-1", 
 
 ### xwork_file_persistence_recover_control_plane
 
-What is the remote control plane?
-**What's the point?*
+Restore remote control plane.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_recover_control_plane(
@@ -1354,28 +1625,37 @@ XWORK_API xwork_status xwork_file_persistence_recover_control_plane(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-control plane snapshot live control plane
-**卙四暟锛?*
+Create a live control plane from a control plane snapshot.
 
--`pStore` `NULL`抆?- -
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence/remote ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `pRuntime`: input/output parameters. Must not be `NULL`.
+- `sPlaneId`: input parameters. Must be non-empty.
+- `pOptions`: input parameters. Can be `NULL`.
+- `ppPlane`: Output parameter. Must not be `NULL`.
 
-`*ppPlane` `xwork_control_plane_destroy` `xwork_control_plane_destroy`
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- Worker
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence/remote error code.
+
+**Resource ownership:**
+
+Upon success `*ppPlane` is owned by the caller and must be `xwork_control_plane_destroy`.
+
+**Additional Note:**
+
+- Recovery does not automatically reconnect worker network connections.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_recover_control_plane(&store, runtime, "plane-1", NULL, &plane);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_destroy`
 
@@ -1383,8 +1663,9 @@ xwork_file_persistence_recover_control_plane(&store, runtime, "plane-1", NULL, &
 
 ### xwork_file_persistence_load_last_approval_request
 
-锷纺溴鈶?approval request銆?
-**What's the point?*
+Load the last approval request.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_last_approval_request(
@@ -1394,28 +1675,35 @@ XWORK_API xwork_status xwork_file_persistence_load_last_approval_request(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-璇氲彇鸸囧畾 run chain€钖庤褰ukuang殑瀹℃壒璇风簰銆?
-**卙四暟锛?*
+Read the last recorded approval request for the specified run.
 
-- `pStore` `pRequest`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pRequest`: Output parameter. Must not be `NULL`.
 
-What is the key?reset request?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- `XWORK_ERROR_NOT_FOUND`?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset request.
+
+**Additional Note:**
+
+- Returns `XWORK_ERROR_NOT_FOUND` when there is no approval request.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_last_approval_request(&store, "run-1", &request);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_load_persisted_last_approval_request`
 
@@ -1423,8 +1711,9 @@ xwork_file_persistence_load_last_approval_request(&store, "run-1", &request);
 
 ### xwork_file_persistence_load_run_summary
 
-run summary?
-**What's the point?*
+Load run summary.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_run_summary(
@@ -1434,28 +1723,35 @@ XWORK_API xwork_status xwork_file_persistence_load_run_summary(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-蒇谲彇鸸囧畾run 镄?summary銆?
-**卙四暟锛?*
+Read the summary of the specified run.
 
-- `pStore` `pSummary`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pSummary`: Output parameter. Must not be `NULL`.
 
-What is the key?reset summary?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- summary 阃effect掎鍒楄〃椤碉纴纓嶅set钖畲鏁?run snapshot銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset summary.
+
+**Additional Note:**
+
+- summary is suitable for list pages and does not contain the full run snapshot.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_run_summary(&store, "run-1", &summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_load_run_snapshot`
 
@@ -1463,8 +1759,9 @@ xwork_file_persistence_load_run_summary(&store, "run-1", &summary);
 
 ### xwork_file_persistence_load_checkpoint
 
-Checkpoint?
-**What's the point?*
+Load checkpoint.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_checkpoint(
@@ -1475,28 +1772,36 @@ XWORK_API xwork_status xwork_file_persistence_load_checkpoint(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-Checkpoint metadata?
-**卙四暟锛?*
+Read the specified checkpoint metadata for the specified run.
 
-- `pStore` XWORKPLACEHOLDER2 TOKEN
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `sCheckpointId`: input parameters. Must be non-empty.
+- `pCheckpoint`: Output parameter. Must not be `NULL`.
 
-What is the key?reset checkpoint?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- Checkpoint snapshot? run state?checkpoint snapshot?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset checkpoint.
+
+**Additional Note:**
+
+- To restore run state, use checkpoint snapshot.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_checkpoint(&store, "run-1", "ckpt-1", &checkpoint);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_load_checkpoint_snapshot`
 
@@ -1504,8 +1809,9 @@ xwork_file_persistence_load_checkpoint(&store, "run-1", "ckpt-1", &checkpoint);
 
 ### xwork_file_persistence_load_last_checkpoint
 
-Checkpoint?
-**What's the point?*
+Load the last checkpoint.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_last_checkpoint(
@@ -1515,28 +1821,35 @@ XWORK_API xwork_status xwork_file_persistence_load_last_checkpoint(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-Checkpoint checkpoint?
-**卙四暟锛?*
+Read the last recorded checkpoint of the specified run.
 
-- `pStore` `pCheckpoint`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pCheckpoint`: Output parameter. Must not be `NULL`.
 
-What is the key?reset checkpoint?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- Checkpoint `XWORK_ERROR_NOT_FOUND`
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset checkpoint.
+
+**Additional Note:**
+
+- Returns `XWORK_ERROR_NOT_FOUND` when there is no checkpoint.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_last_checkpoint(&store, "run-1", &checkpoint);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_load_persisted_last_checkpoint`
 
@@ -1544,8 +1857,9 @@ xwork_file_persistence_load_last_checkpoint(&store, "run-1", &checkpoint);
 
 ### xwork_file_persistence_load_artifact
 
-What is the artifact?
-**What's the point?*
+Load artifact.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_artifact(
@@ -1556,28 +1870,36 @@ XWORK_API xwork_status xwork_file_persistence_load_artifact(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-璇氲彇鸸囧畾 run 鄄勬寚瀹?artifact銆?
-**卙四暟锛?*
+Read the specified artifact for the specified run.
 
-- `pStore` XWORKPLACEHOLDER2 TOKEN
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `sArtifactId`: input parameters. Must be non-empty.
+- `pArtifact`: Output parameter. Must not be `NULL`.
 
-What is the key?reset artifact?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- content
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset artifact.
+
+**Additional Note:**
+
+- Whether content is inlined depends on the artifact options when saving.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_artifact(&store, "run-1", "artifact-1", &artifact);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_list_artifacts`
 
@@ -1585,8 +1907,9 @@ xwork_file_persistence_load_artifact(&store, "run-1", "artifact-1", &artifact);
 
 ### xwork_file_persistence_load_last_artifact
 
-锷纺溴�钖庺竴涓?artifact銆?
-**What's the point?*
+Load the last artifact.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_load_last_artifact(
@@ -1596,28 +1919,35 @@ XWORK_API xwork_status xwork_file_persistence_load_last_artifact(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-蒇谲彇鸸囧畾 run chain€钖庤褰kuang殑 artifact銆?
-**卙四暟锛?*
+Read the last recorded artifact of the specified run.
 
-- `pStore` `pArtifact`?
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pArtifact`: Output parameter. Must not be `NULL`.
 
-What is the key?reset artifact?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- Artifact `XWORK_ERROR_NOT_FOUND`
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset artifact.
+
+**Additional Note:**
+
+- Returns `XWORK_ERROR_NOT_FOUND` when there is no artifact.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_load_last_artifact(&store, "run-1", &artifact);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_load_persisted_last_artifact`
 
@@ -1625,8 +1955,9 @@ xwork_file_persistence_load_last_artifact(&store, "run-1", &artifact);
 
 ### xwork_file_persistence_find_artifact_by_name
 
-What is the artifact?
-**What's the point?*
+Find artifacts by name.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_file_persistence_find_artifact_by_name(
@@ -1637,28 +1968,36 @@ XWORK_API xwork_status xwork_file_persistence_find_artifact_by_name(
 );
 ```
 
-**锷绻兘锛?*
+**Function:**
 
-鍦ㄦ寚瀹?run 鄄?artifact 涓寜 name 绮剧‘镆ユ媞骞姞枞 elder sister€?
-**卙四暟锛?*
+Exactly find and load the artifact by name in the specified run.
 
-- `pStore` XWORKPLACEHOLDER2 TOKEN
-**杩斿洴 alkali fine**
+**parameter:**
 
-`XWORK_OK` `XWORK_OK` persistence ?
-**璧勬簮褰掎睘锛?*
+- `pStore`: input parameters. Must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `sArtifactName`: input parameters. Must be non-empty.
+- `pArtifact`: Output parameter. Must not be `NULL`.
 
-What is the key?reset artifact?
-**Chen ュ Pang Xuan cun 槑?*
+**Return value:**
 
-- 涶hydrogen kettle钖屽敕 artifact 鞞 inert锲炲焄鐜板畾涔夌殑鍖Guili椤縸纴夤hong涓氩姟瞞综合鐢ㄥ殕涓€ name銆?
-**锣冧緥締ｇ爜锛?*
+Returns `XWORK_OK` or a generic persistence error code.
+
+**Resource ownership:**
+
+Caller reset artifact.
+
+**Additional Note:**
+
+- When there are multiple artifacts with the same name, an implementation-defined match is returned. It is recommended that the business layer use a unique name.
+
+**Example code:**
 
 ```c
 xwork_file_persistence_find_artifact_by_name(&store, "run-1", "final.md", &artifact);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_find_persisted_artifact_by_name`
 
@@ -1666,11 +2005,13 @@ xwork_file_persistence_find_artifact_by_name(&store, "run-1", "final.md", &artif
 
 ## Runtime Facade
 
-Runtime facade runtime facade runtime facade `xwork_persistence_backend` backend file backend file backend file backend file backend file backend file backend file backend
+The Runtime facade function calls the underlying backend through the `xwork_persistence_backend` currently configured by the runtime. Their output ownership is consistent with the corresponding file backend function.
+
 ### xwork_runtime_list_persisted_runs
 
-Run id?
-**What's the point?*
+List persistent run ids.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_list_persisted_runs(
@@ -1679,25 +2020,30 @@ XWORK_API xwork_status xwork_runtime_list_persisted_runs(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- XWORKPLACEHOLDER0 TOKEN
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. A persistence backend must be configured.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset list?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- facade 涓嶅叧鰇?backend 鏄?file 杩樻槸镊畾涔夊焄鐜比 €?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset list.
+
+**Additional Note:**
+
+- The facade does not care whether the backend is a file or a custom implementation.
+
+**Example code:**
 
 ```c
 xwork_runtime_list_persisted_runs(runtime, &list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_list_runs`
 
@@ -1705,8 +2051,9 @@ xwork_runtime_list_persisted_runs(runtime, &list);
 
 ### xwork_runtime_list_persisted_checkpoints
 
-What is the checkpoint id?
-**What's the point?*
+List persistent checkpoint ids.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_list_persisted_checkpoints(
@@ -1716,25 +2063,31 @@ XWORK_API xwork_status xwork_runtime_list_persisted_checkpoints(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` `pList`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset list?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 浠呭垪鍑?id銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset list.
+
+**Additional Note:**
+
+- List only ids.
+
+**Example code:**
 
 ```c
 xwork_runtime_list_persisted_checkpoints(runtime, "run-1", &list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_load_persisted_checkpoint`
 
@@ -1742,8 +2095,9 @@ xwork_runtime_list_persisted_checkpoints(runtime, "run-1", &list);
 
 ### xwork_runtime_list_persisted_events
 
-What is the event id?
-**What's the point?*
+List persistent event ids.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_list_persisted_events(
@@ -1753,25 +2107,31 @@ XWORK_API xwork_status xwork_runtime_list_persisted_events(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` `pList`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset list?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 浠呭垪鍑?id銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset list.
+
+**Additional Note:**
+
+- List only ids.
+
+**Example code:**
 
 ```c
 xwork_runtime_list_persisted_events(runtime, "run-1", &list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_load_persisted_event`
 
@@ -1779,8 +2139,9 @@ xwork_runtime_list_persisted_events(runtime, "run-1", &list);
 
 ### xwork_runtime_list_persisted_artifacts
 
-Artifact id?
-**What's the point?*
+List persistence artifact ids.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_list_persisted_artifacts(
@@ -1790,25 +2151,31 @@ XWORK_API xwork_status xwork_runtime_list_persisted_artifacts(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` `pList`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset list?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 浠呭垪鍑?id銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset list.
+
+**Additional Note:**
+
+- List only ids.
+
+**Example code:**
 
 ```c
 xwork_runtime_list_persisted_artifacts(runtime, "run-1", &list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_load_persisted_artifact`
 
@@ -1816,8 +2183,9 @@ xwork_runtime_list_persisted_artifacts(runtime, "run-1", &list);
 
 ### xwork_runtime_list_persisted_artifact_summaries
 
-What is the artifact summary?
-**What's the point?*
+List persistence artifact summary.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_list_persisted_artifact_summaries(
@@ -1827,25 +2195,31 @@ XWORK_API xwork_status xwork_runtime_list_persisted_artifact_summaries(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` `pList`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset list?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- What's the content?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset list.
+
+**Additional Note:**
+
+- Does not load full content.
+
+**Example code:**
 
 ```c
 xwork_runtime_list_persisted_artifact_summaries(runtime, "run-1", &summaries);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_query_persisted_artifact_summaries`
 
@@ -1853,8 +2227,9 @@ xwork_runtime_list_persisted_artifact_summaries(runtime, "run-1", &summaries);
 
 ### xwork_runtime_query_persisted_artifact_summaries
 
-What is the artifact summary?
-**What's the point?*
+Query the persistence artifact summary.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_query_persisted_artifact_summaries(
@@ -1865,25 +2240,32 @@ XWORK_API xwork_status xwork_runtime_query_persisted_artifact_summaries(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` `pQuery`?`NULL`?-`pList`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pQuery`: input parameters. Can be `NULL`.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset list?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 捡四灉 backend 涓嶆彁渚涘师颢?query锛宺untime鍙洴阃€鍒?list 钖庤嘃狠ゃ€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset list.
+
+**Additional Note:**
+
+- If the backend does not provide native query, the runtime can fall back to list and then filter.
+
+**Example code:**
 
 ```c
 xwork_runtime_query_persisted_artifact_summaries(runtime, "run-1", NULL, &summaries);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_artifact_summary_query_init`
 
@@ -1891,8 +2273,9 @@ xwork_runtime_query_persisted_artifact_summaries(runtime, "run-1", NULL, &summar
 
 ### xwork_runtime_query_persisted_run_steps
 
-镆ヨ鎸丷箙鍖?run step銆?
-**What's the point?*
+Query persistence run step.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_query_persisted_run_steps(
@@ -1903,25 +2286,32 @@ XWORK_API xwork_status xwork_runtime_query_persisted_run_steps(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` `pQuery`?`NULL`?-`pList`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pQuery`: input parameters. Can be `NULL`.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset list?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 捡四灉 backend 涓嶆殮鸸丶师鐢?query锛宺untime鍙粠 event/checkpoint 娲剧敓銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset list.
+
+**Additional Note:**
+
+- If the backend does not support native query, the runtime can be derived from event/checkpoint.
+
+**Example code:**
 
 ```c
 xwork_runtime_query_persisted_run_steps(runtime, "run-1", NULL, &steps);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_run_step_query_init`
 
@@ -1929,8 +2319,9 @@ xwork_runtime_query_persisted_run_steps(runtime, "run-1", NULL, &steps);
 
 ### xwork_runtime_list_persisted_run_summaries
 
-Run summary銆?
-**What's the point?*
+List persistence run summary.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_list_persisted_run_summaries(
@@ -1939,25 +2330,30 @@ XWORK_API xwork_status xwork_runtime_list_persisted_run_summaries(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pRuntime`
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset list?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 阃肖掎铡嗗彶run 鍒楄〃 UI銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset list.
+
+**Additional Note:**
+
+- Suitable for historical run list UI.
+
+**Example code:**
 
 ```c
 xwork_runtime_list_persisted_run_summaries(runtime, &list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_list_persisted_run_index`
 
@@ -1965,8 +2361,9 @@ xwork_runtime_list_persisted_run_summaries(runtime, &list);
 
 ### xwork_runtime_list_persisted_run_index
 
-Run index?
-**What's the point?*
+List the persistent run index.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_list_persisted_run_index(
@@ -1975,25 +2372,30 @@ XWORK_API xwork_status xwork_runtime_list_persisted_run_index(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pRuntime`
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset list?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 江変环浜庢椤 query 鏉′Huan鄄?index 镆ヨ銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset list.
+
+**Additional Note:**
+
+- Equivalent to index query without query condition.
+
+**Example code:**
 
 ```c
 xwork_runtime_list_persisted_run_index(runtime, &index);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_query_persisted_run_index`
 
@@ -2001,8 +2403,9 @@ xwork_runtime_list_persisted_run_index(runtime, &index);
 
 ### xwork_runtime_query_persisted_run_index
 
-镆ヨ鎸丷箙鍖?run index銆?
-**What's the point?*
+Query persistence run index.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_query_persisted_run_index(
@@ -2012,25 +2415,31 @@ XWORK_API xwork_status xwork_runtime_query_persisted_run_index(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pRuntime` `pList`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `pQuery`: input parameters. Can be `NULL`.
+- `pList`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset list?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- query 瀛楃涓综合瓧娈电敱咋卂椤鏂 graduate?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset list.
+
+**Additional Note:**
+
+- The query string field is borrowed from the caller.
+
+**Example code:**
 
 ```c
 xwork_runtime_query_persisted_run_index(runtime, NULL, &index);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_run_index_query_init`
 
@@ -2038,8 +2447,9 @@ xwork_runtime_query_persisted_run_index(runtime, NULL, &index);
 
 ### xwork_runtime_load_persisted_run_summary
 
-Run summary銆?
-**What's the point?*
+Load persistence run summary.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_load_persisted_run_summary(
@@ -2049,25 +2459,31 @@ XWORK_API xwork_status xwork_runtime_load_persisted_run_summary(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` `pSummary`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pSummary`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset summary?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 涓嶆仮澶?live run抆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset summary.
+
+**Additional Note:**
+
+- Do not resume live run.
+
+**Example code:**
 
 ```c
 xwork_runtime_load_persisted_run_summary(runtime, "run-1", &summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_recover_run_from_persistence`
 
@@ -2075,8 +2491,9 @@ xwork_runtime_load_persisted_run_summary(runtime, "run-1", &summary);
 
 ### xwork_runtime_load_persisted_last_event
 
-What is the event?
-**What's the point?*
+Load the persisted last event.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_load_persisted_last_event(
@@ -2086,25 +2503,31 @@ XWORK_API xwork_status xwork_runtime_load_persisted_last_event(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` `pEvent`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pEvent`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the reset event key?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 镞?event鞞 lazy鹑锲?not found銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset event.
+
+**Additional Note:**
+
+- Return not found when there is no event.
+
+**Example code:**
 
 ```c
 xwork_runtime_load_persisted_last_event(runtime, "run-1", &event);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_load_persisted_event`
 
@@ -2112,8 +2535,9 @@ xwork_runtime_load_persisted_last_event(runtime, "run-1", &event);
 
 ### xwork_runtime_load_persisted_last_approval_request
 
-Is there an approval request?
-**What's the point?*
+Load the persisted last approval request.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_load_persisted_last_approval_request(
@@ -2123,25 +2547,31 @@ XWORK_API xwork_status xwork_runtime_load_persisted_last_approval_request(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` `pRequest`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pRequest`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset request?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 鐢ㄤ簬鎭㈠瀹℃壒 UI銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset request.
+
+**Additional Note:**
+
+- Used to restore approval UI.
+
+**Example code:**
 
 ```c
 xwork_runtime_load_persisted_last_approval_request(runtime, "run-1", &request);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_run_submit_approval`
 
@@ -2149,8 +2579,9 @@ xwork_runtime_load_persisted_last_approval_request(runtime, "run-1", &request);
 
 ### xwork_runtime_load_persisted_last_checkpoint
 
-Checkpoint? Checkpoint?
-**What's the point?*
+Load the last persistent checkpoint.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_load_persisted_last_checkpoint(
@@ -2160,25 +2591,31 @@ XWORK_API xwork_status xwork_runtime_load_persisted_last_checkpoint(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` `pCheckpoint`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pCheckpoint`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset checkpoint?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- Checkpoint metadata?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset checkpoint.
+
+**Additional Note:**
+
+- Only load checkpoint metadata.
+
+**Example code:**
 
 ```c
 xwork_runtime_load_persisted_last_checkpoint(runtime, "run-1", &checkpoint);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_load_persisted_checkpoint`
 
@@ -2186,8 +2623,9 @@ xwork_runtime_load_persisted_last_checkpoint(runtime, "run-1", &checkpoint);
 
 ### xwork_runtime_load_persisted_last_artifact
 
-What is the artifact?
-**What's the point?*
+Load the persistent last artifact.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_load_persisted_last_artifact(
@@ -2197,25 +2635,31 @@ XWORK_API xwork_status xwork_runtime_load_persisted_last_artifact(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` `pArtifact`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `pArtifact`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset artifact?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 锞?artifact锞 lazy鹑锲?not found銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset artifact.
+
+**Additional Note:**
+
+- Returns not found when there is no artifact.
+
+**Example code:**
 
 ```c
 xwork_runtime_load_persisted_last_artifact(runtime, "run-1", &artifact);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_load_persisted_artifact`
 
@@ -2223,8 +2667,9 @@ xwork_runtime_load_persisted_last_artifact(runtime, "run-1", &artifact);
 
 ### xwork_runtime_load_persisted_event
 
-What is the event?
-**What's the point?*
+Load persistent events.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_load_persisted_event(
@@ -2235,25 +2680,32 @@ XWORK_API xwork_status xwork_runtime_load_persisted_event(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` XWORKPLACEHOLDER2 TOKEN
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `sEventId`: input parameters. Must be non-empty.
+- `pEvent`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the reset event key?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 鐢ㄤ簬瀹¤鍜?step 镆ヨ銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset event.
+
+**Additional Note:**
+
+- Used for auditing and step queries.
+
+**Example code:**
 
 ```c
 xwork_runtime_load_persisted_event(runtime, "run-1", "event-1", &event);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_list_persisted_events`
 
@@ -2261,8 +2713,9 @@ xwork_runtime_load_persisted_event(runtime, "run-1", "event-1", &event);
 
 ### xwork_runtime_load_persisted_checkpoint
 
-Checkpoint? Checkpoint?
-**What's the point?*
+Load persistent checkpoint.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_load_persisted_checkpoint(
@@ -2273,25 +2726,32 @@ XWORK_API xwork_status xwork_runtime_load_persisted_checkpoint(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` XWORKPLACEHOLDER2 TOKEN
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `sCheckpointId`: input parameters. Must be non-empty.
+- `pCheckpoint`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset checkpoint?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- Checkpoint metadata?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset checkpoint.
+
+**Additional Note:**
+
+- Only load checkpoint metadata.
+
+**Example code:**
 
 ```c
 xwork_runtime_load_persisted_checkpoint(runtime, "run-1", "ckpt-1", &checkpoint);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_load_persisted_last_checkpoint`
 
@@ -2299,8 +2759,9 @@ xwork_runtime_load_persisted_checkpoint(runtime, "run-1", "ckpt-1", &checkpoint)
 
 ### xwork_runtime_load_persisted_artifact
 
-What is the artifact?
-**What's the point?*
+Load persistence artifacts.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_load_persisted_artifact(
@@ -2311,25 +2772,32 @@ XWORK_API xwork_status xwork_runtime_load_persisted_artifact(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` XWORKPLACEHOLDER2 TOKEN
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `sArtifactId`: input parameters. Must be non-empty.
+- `pArtifact`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset artifact?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- content 銄惁鍙敤鍙栧浅浜?backend銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset artifact.
+
+**Additional Note:**
+
+- Whether content is available depends on the backend.
+
+**Example code:**
 
 ```c
 xwork_runtime_load_persisted_artifact(runtime, "run-1", "artifact-1", &artifact);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_find_persisted_artifact_by_name`
 
@@ -2337,8 +2805,9 @@ xwork_runtime_load_persisted_artifact(runtime, "run-1", "artifact-1", &artifact)
 
 ### xwork_runtime_find_persisted_artifact_by_name
 
-What is the artifact?
-**What's the point?*
+Find persistence artifacts by name.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_find_persisted_artifact_by_name(
@@ -2349,25 +2818,32 @@ XWORK_API xwork_status xwork_runtime_find_persisted_artifact_by_name(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` XWORKPLACEHOLDER2 TOKEN
-**杩斿洴 alkali fine**
+- `pRuntime`: input parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `sArtifactName`: input parameters. Must be non-empty.
+- `pArtifact`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK` backend
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the key?reset artifact?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or backend error code.
 
-- 寤红涓氩姟璞备琴琇?artifact name鍞竴銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Caller reset artifact.
+
+**Additional Note:**
+
+- It is recommended that the business layer ensure that the artifact name is unique.
+
+**Example code:**
 
 ```c
 xwork_runtime_find_persisted_artifact_by_name(runtime, "run-1", "final.md", &artifact);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_load_persisted_artifact`
 
@@ -2375,8 +2851,9 @@ xwork_runtime_find_persisted_artifact_by_name(runtime, "run-1", "final.md", &art
 
 ### xwork_runtime_recover_run
 
-浠?run snapshot鎭㈠live run銆?
-**What's the point?*
+Resume a live run from a run snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_recover_run(
@@ -2386,25 +2863,32 @@ XWORK_API xwork_status xwork_runtime_recover_run(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` `pSnapshot` `NULL`?
-**杩斿洴 alkali fine**
+- `pRuntime`: input/output parameters. Must not be `NULL`.
+- `pSnapshot`: input parameters. Must not be `NULL`.
+- `ppRun`: Output parameter. Must not be `NULL`.
 
-`XWORK_OK` `XWORK_OK`
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-鴴愬姛钖?run 锄勭潃鍒?runtime锛倱啋咋卹椤Key呮樉寮?destroy鴴?runtime destroy銆?
-**Chen ュ Pang Xuan cun 槑?*
+Return `XWORK_OK` or run to recover the error code.
 
-- Workspace/tool/xllm/host service?live process?callback callback?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+After successful run attaches to the runtime and is explicitly destroyed or runtime destroyed by the caller.
+
+**Additional Note:**
+
+- Compatible workspace/tool/xllm/host service must be registered before recovery.
+- Does not restore live process, terminal, thread or callback stacks.
+
+**Example code:**
 
 ```c
 xwork_runtime_recover_run(runtime, &snapshot, &run);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_file_persistence_load_run_snapshot`
 
@@ -2412,8 +2896,9 @@ xwork_runtime_recover_run(runtime, &snapshot, &run);
 
 ### xwork_runtime_recover_run_from_persistence
 
-浠?persistence latest snapshot 鎭㈠ live run銆?
-**What's the point?*
+Resume live run from persistence latest snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_runtime_recover_run_from_persistence(
@@ -2423,38 +2908,46 @@ XWORK_API xwork_status xwork_runtime_recover_run_from_persistence(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pRuntime` XWORKPLACEHOLDER1 TOKEN
-**杩斿洴 alkali fine**
+- `pRuntime`: input/output parameters. Backend must be configured.
+- `sRunId`: input parameters. Must be non-empty.
+- `ppRun`: Output parameter. Must not be `NULL`.
 
-杩斿洖
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Run time
-**Chen ュ Pang Xuan cun 槑?*
+Return `XWORK_OK` or backend/run recovery error code.
 
-- 杩欐槧锷纺水 latest snapshot 钖庤皟颢?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+After successful run attaches to the runtime.
+
+**Additional Note:**
+
+- This is a convenient entry point for calling `xwork_runtime_recover_run` after loading the latest snapshot.
+
+**Example code:**
 
 ```c
 xwork_runtime_recover_run_from_persistence(runtime, "run-1", &run);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_recover_run`
 
-## 鎭㈠杈Guihu
+## Restore boundaries
 
-The interaction between orkspace id, ending tool, pproval decision, ast checkpoint, rtifact metadata, gent/task/worker/replay snapshot_live OS process handler_interactive terminal session_live OS process handler_interactive terminal session_live OS process handler_interactive terminal session_live OS process handler
-## 绾cross▼杈爈晫
+Serializable status, workspace id, pending tool, approval decision, last checkpoint, artifact metadata, agent/task/worker/replay snapshot can be restored. Live OS process handles, interactive terminal sessions, thread stacks, network connections, callback stacks, or user UI sessions cannot be restored.
 
-File backend file backend file backend锄勋苟鍙戝开鍏ュ簢鐢鞟鐢ㄦ南涓茶鍖栥€俽untime facade 鄄勋苟鍙戣 actually鐣荼笌洴枞眰 backend 涓€镊欰€?
-## The manuscript is 叧鏂囨.
+## Thread boundaries
+
+The built-in file backend is not designed as a multi-process/multi-writer database. Concurrent writes to the same store root should be serialized by the caller. The runtime facade's concurrency boundaries are consistent with the underlying backend.
+
+## Related documents
 
 - [Run API](api-run.md)
 - [Artifact API](api-artifacts.md)
 - [Replay API](api-replay.md)
-- [鎸佷箙鍖栥€乧heckpoint 涓?replay](../guide/persistence-replay-intro.md)
-- [鍐呴儴 persistence format](../../dev/docs/PERSISTENCE_FORMAT.md)
+- [Persistence, Checkpoints, and Replay](../guide/persistence-replay-intro.md)
+- [Internal persistence format](../../dev/docs/PERSISTENCE_FORMAT.md)

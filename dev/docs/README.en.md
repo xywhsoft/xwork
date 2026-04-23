@@ -1,6 +1,9 @@
-# xwork 卐呴儴涓庡巻卙cruci枃妗?
-> chain洰褰曚liaoyinghua紑鍙戣绋笩兑锄兮璁¤褰曘€丸崴鮮?contrac t銆丸inch瀹regulation€ц鏄庡勰铡嗗彶纺绻燜璧勬枡銆悛寮忕敤洴枴枃妗ｅ叆鍙ｅ檪[`../../docs/README.md`](../../docs/README.md)?
-杩掎簺鏂囨. They are in love with each other. `docs/` The API is the API.涓€?
+# xwork internal and historical documentation
+
+> This directory saves design records, internal contracts, compatibility instructions and historical tracking data during the development process. The official user documentation entrance is at [`../../docs/README.md`](../../docs/README.md).
+
+These documents can serve as source material for formal documentation, but do not serve as the main entry point for users. Stable content needs to be distilled into API, tutorial or example documentation under `docs/`.
+
 Current documents:
 
 - [PACKAGING.md](PACKAGING.md): source-level packaging, aggregate `xwork.c` usage, include/lib layout, and version rule.

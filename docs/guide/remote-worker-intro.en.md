@@ -1,36 +1,61 @@
-# Remote Worker and Control Plane
+# Remote Worker and control plane
 
-> Status: English draft, pending review.
+>Status: First draft in Chinese, awaiting manual review.
 
-Remote Worker support models a control plane, worker registry, leases, assignments, remote results, and output/artifact chunks.
+xwork's remote worker capabilities provide control plane objects and protocol data structures. It does not force binding to a network server; the socket, authentication, retry, deployment and cloud control plane are taken care of by the host product.
 
-## Transport Boundary
+## Core Competencies
 
-| Transport | Meaning |
+| Capabilities | Description |
 | --- | --- |
-| `XWORK_REMOTE_TRANSPORT_IN_PROCESS` | Control plane and worker share process memory. |
-| `XWORK_REMOTE_TRANSPORT_HTTP_BOUNDARY` | Host product owns HTTP/socket/auth/retry; xwork receives decoded messages. |
+| worker registry | Register workers, heartbeats, capabilities, leases and status. |
+| assignment queue | Submit remote tasks, match workers according to capabilities, claim/complete/fail/cancel. |
+| policy gate | Unified inspection of remote task tools, networks, and approval policies. |
+| artifact upload | Upload results via blob ref, content hash, chunk metadata and payload bytes. |
+| output chunks | Save stdout/stderr or terminal output chunk, support query and recovery. |
+| recovery | Recover the control plane snapshot and mark the in-flight assignment as orphaned. |
 
-## Minimal Control Plane
+## Network Boundary
 
-```c
-xwork_control_plane_options tPlaneOptions;
-xwork_control_plane *pPlane = NULL;
+xwork defines decoded-message transport marker and protocol objects, but does not have a full HTTP server/client built in. This allows AI IDE, claw or future cloud services to access according to their own security model:
 
-xwork_control_plane_options_init(&tPlaneOptions);
-tPlaneOptions.sPlaneId = "plane-1";
-tPlaneOptions.pRuntime = pRuntime;
-tPlaneOptions.eTransport = XWORK_REMOTE_TRANSPORT_IN_PROCESS;
+- socket life cycle.
+-worker auth.
+- tenant/project isolation.
+- retry/backoff.
+- Large file blob streaming.
 
-xwork_control_plane_create(&tPlaneOptions, &pPlane);
-xwork_control_plane_start(pPlane);
+## Transport boundary map
+
+```text
+worker process
+  |
+  | HTTP/WebSocket/gRPC/etc.
+  v
+host-owned transport
+  - socket lifecycle
+  - auth / signing / mTLS
+  - retry / replay protection
+  - blob streaming
+  |
+  | decoded message
+  v
+xwork_control_plane API
+  - register / heartbeat
+  - enqueue / claim / complete
+  - artifact/output chunk
+  - snapshot / recovery
 ```
 
-## Boundary
+`XWORK_REMOTE_TRANSPORT_HTTP_BOUNDARY` indicates that the message has completed network layer decoding and authentication before entering xwork. xwork saves the transport marker for auditing and recovery, but does not own the socket.
 
-xwork does not include a production cloud control plane. Worker auth, tenant isolation, network protocol implementation, and deployment are host responsibilities.
+## In-process transport
 
-## Next
+`XWORK_REMOTE_TRANSPORT_IN_PROCESS` is suitable for local worker, testing and single-process deployments. The control plane and worker share memory, and holding `xwork_control_plane *` represents a trusted caller.
 
-- [Remote Worker API](../api/api-remote-worker.en.md)
-- [Remote Worker Agent example](../case/remote-worker-agent.en.md)
+Production remote deployment must add worker auth, tenant/project isolation, key management and network retries at the hosting layer.
+
+## Related examples
+
+- [Remote Worker Example](../case/remote-worker-agent.md)
+- [Remote Worker API](../api/api-remote-worker.md)

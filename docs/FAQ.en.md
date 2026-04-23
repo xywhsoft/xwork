@@ -1,27 +1,39 @@
-# FAQ
+# xwork FAQ
 
-> Status: English draft, pending review.
+>Status: First draft in Chinese, awaiting review.
 
-## Is xwork a complete agent product?
+## What is the boundary between xwork and xllm?
 
-No. xwork is an agent workflow runtime library. Product UI, CLI, planning behavior, cloud deployment, and user interaction belong to host products such as `xcode` or `xclaw`.
+`xllm` is responsible for the model side: provider, request/response, stream, session, memory and tool call protocols.
 
-## How is xwork different from xllm?
+`xwork` is responsible for the workflow side: workspace, run, tool execution, approval, artifact, checkpoint, persistence, multi-agent, remote worker and replay.
 
-`xllm` handles model providers, sessions, memory, and streaming. xwork wraps model calls in workspaces, tools, approval, artifacts, persistence, remote workers, and replay.
+## Is xwork a complete Agent product?
 
-## Does remote worker include a network server?
+no. xwork is a common library and runtime infrastructure for Agent development. UI, CLI, cloud services, user accounts, deployment, product strategy, and branded experiences belong to upper-level products, such as AI IDE or claw.
 
-No. xwork defines the control-plane and worker data model plus decoded transport boundary. The host product owns HTTP/socket implementation, authentication, retries, and deployment.
+## Why doesn't remote worker have built-in network services?
 
-## Can recovery restore live processes or terminals?
+The production remote worker needs to handle socket lifecycle, authentication, signing, mTLS, tenant/project isolation, retries, throttling, blob streaming, and deployment topology. These strategies are strongly product dependent. xwork only defines control-plane objects and decoded-message transport boundaries to avoid binding the library to a certain cloud architecture.
 
-No. Recovery restores serializable state such as snapshots, events, checkpoints, artifacts, task graphs, and control-plane state. Live OS handles and terminal sessions are not recovered.
+## Why does recovery not restore the live process/terminal?
 
-## Is deterministic replay fully deterministic?
+OS process handles, terminal sessions, thread stacks, and callback stacks cannot be reliably serialized. xwork persists snapshot, event, artifact and replay cassette. After recovery, the product should rediscover or restart the live resources.
 
-Replay is deterministic for recorded interactions and normalized hashes. It cannot guarantee exactly-once behavior for unrecorded external side effects.
+## Can xwork directly replace the tool system in the product?
 
-## Should every tool be registered by default?
+Shared semantic parts can be replaced incrementally: tool definition, approval, host service contract, artifact, and persistence. Product specific UI, permissions, remote network and editor bridge should remain at the product layer, accessed through xwork host services.
 
-No. Register only the tools required by the active profile and workspace. Apply policy and approval before risky operations.
+## Does xwork require built-in file persistence?
+
+Not required. Built-in file backend suitable for local durable runs, examples and smoke. The product can implement `xwork_persistence_backend` to connect to its own database or object storage.
+
+## Does xwork have a built-in planner?
+
+There is no built-in complete autonomous planner. xwork provides planner boundary, plan report artifact, tool choice and task graph import capabilities. The real planning strategy is implemented by the product or model layer.
+
+## Related documents
+
+- [Architecture](ARCHITECTURE.md)
+- [Best Practices](BEST_PRACTICES.md)
+- [Migration Guide](MIGRATION.md)

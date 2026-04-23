@@ -1,12 +1,12 @@
 # xwork
 
-`xwork` is a C agent workflow runtime library built on top of `xllm`.
+`xwork` is a C-language Agent workflow runtime library that sits on top of `xllm`.
 
-Its goal is to extract reusable infrastructure for AI IDEs, autonomous command-line agents, remote workers, recoverable task flows, and deterministic replay. Product layers such as `xcode` and `xclaw` can build on top of it instead of re-implementing runtime, tool, approval, artifact, persistence, and orchestration primitives.
+Its goal is to precipitate recurring capabilities in AI IDE, command line autonomous Agent, remote Worker and resumable task flow into a common infrastructure for reuse by subsequent products such as `xcode` and `xclaw`.
 
-## Positioning
+## position
 
-Default layering:
+The default layering is as follows:
 
 ```text
 xrt
@@ -15,74 +15,132 @@ xwork
 xcode / xclaw
 ```
 
-`xllm` owns model providers, sessions, memory, request/response handling, and streaming.
+`xllm` is responsible for unifying model calls, provider adaptation, session, memory and streaming responses.
 
-`xwork` orchestrates model calls around workspaces, tools, approval, task state, artifacts, persistence, remote execution, and replay.
+`xwork` is responsible for orchestrating model calls around workspaces, tools, approvals, task status, artifacts, persistence, remote execution and replay.
 
-## Core Capabilities
+## Core Competencies
 
-| Capability | Description |
+| Capabilities | Description |
 | --- | --- |
-| Runtime / Workspace | Runtime, workspace, profile, shared `xllm_runtime`, and workspace memory management. |
-| Tool Registry | Model-callable tool definitions, executors, arguments, and cancellation context. |
-| Orchestrator | Model turn + tool loop, tool calls, approval pause/resume, and final summary. |
-| Policy / Approval | Policy and approval modeling for filesystem, process, network, terminal, and risky operations. |
-| Host Tools | Built-in filesystem, process, terminal, VCS, and editor host tool contracts. |
-| Artifacts | File content, patches, command output, terminal state, diagnostics, and structured reports. |
-| Persistence | Run, event, checkpoint, artifact, agent graph, remote plane, and replay cassette storage. |
-| Multi-Agent | In-process agent pool, task graph, dependency scheduling, handoff, and recovery boundary. |
-| Remote Worker | Control plane, worker registry, lease, assignment, and artifact/output chunk protocol objects. |
-| Deterministic Replay | Record/replay models, tools, checkpoints, filesystem refs, and divergence reports. |
+| Runtime / Workspace | Manage runtime, workspace, profile, shared xllm runtime and workspace memory. |
+| Tool Registry | Register model callable tools and unify tool definitions, parameters, executors and cancellation contexts. |
+| Orchestrator | Drives the model turn + tool loop, handling tool invocation, approval pause, resume and final summary. |
+| Policy / Approval | Model policy judgments and approval requests for files, processes, networks, terminals, and high-risk operations. |
+| Host Tools | Built-in filesystem, process, terminal, vcs, editor host tool contract. |
+| Artifacts | Log file contents, patches, command output, terminal status, diagnostics, and structured reports. |
+| Persistence | Saves run, event, checkpoint, artifact, agent graph, remote plane and replay cassette. |
+| Multi-Agent | Provides in-process agent pool, task graph, dependency scheduling, handoff and recovery boundaries. |
+| Remote Worker | Provides control plane, worker registry, lease, assignment, artifact/output chunk protocol objects. |
+| Deterministic Replay | Record and replay models, tools, checkpoints, filesystem snapshots/refs, and report divergence. |
 
-## Current Boundaries
+## Current stage capability boundary
 
-Usable today:
+Already available:
 
-- Single-run runtime/workspace/tool/orchestrator loop.
-- `xllm` model turn + tool loop, streaming events, approval pause/resume, and async cancellation.
-- Local filesystem/process/terminal/VCS/editor host tool contracts.
-- Artifacts, checkpoints, file persistence, and run/event/artifact queries.
-- In-process multi-agent task graphs.
-- In-process remote worker/control plane objects and decoded HTTP transport boundary.
-- Deterministic replay cassette, filesystem snapshot/ref, and divergence report.
+- Single run runtime/workspace/tool/orchestrator closed loop.
+- xllm model turn + tool loop, streaming events, approval pause/resume and asynchronous cancellation.
+- Local filesystem/process/terminal/vcs/editor host tool contract.
+- artifact, checkpoint, file persistence and run/event/artifact queries.
+- in-process multi-agent task graph.
+- in-process remote worker/control plane objects and decoded HTTP transport boundaries.
+- deterministic replay cassette, filesystem snapshot/ref and divergence report.
 
-Still owned by the host product:
+Production integration that still needs to be done by the host product:
 
-- UI, CLI, IDE panels, and human interaction.
-- Real network server/client, worker auth, tenant/project isolation, and deployed control plane.
-- Product-level autonomous planner policy.
+- UI, CLI, IDE panels and human-computer interaction.
+- Real network server/client, worker auth, tenant/project isolation and deployment control plane.
+- Product-level autonomous planner strategy.
 - External database, object storage, or distributed multi-writer persistence backend.
-- Long-term operations for model provider behavior drift.
+- Long-term operation and maintenance of model provider's specific behavior drift.
 
-## Documentation
+## Applicable scenarios
 
-- [Chinese documentation center](docs/README.md)
-- [English documentation center](docs/README.en.md)
-- [English API index](docs/api/README.en.md)
-- [English guide index](docs/guide/README.en.md)
-- [English examples index](docs/case/README.en.md)
+Suitable:
 
-## Quick Compile Check
+- Agent runtime of AI IDE.
+- Claw-like command line autonomous agent.
+- Approvable, recoverable tool execution orchestration.
+- Multi-Agent task graph and local/remote worker scheduling.
+- Agent run artifacts, checkpoints, replays and audits.
 
-Run from the repository root:
+Not suitable directly as:
+
+- Complete AI IDE product.
+- Complete cloud control plane.
+- Replacement for model provider SDK.
+- Simple chat wrapper without auditing and recovery.
+
+## Document entry
+
+- [文档中心](docs/README.md)
+- [English README](README.en.md)
+- [API 文档索引](docs/api/README.md)
+- [教程索引](docs/guide/README.md)
+- [范例索引](docs/case/README.md)
+- [开发与设计资料](dev/docs/README.md)
+
+Recommended reading order:
+
+1. Read [文档中心](docs/README.md) first to confirm the document partition of xwork.
+2. Read [第一个 xwork 程序](docs/guide/first-xwork-program.md) again and understand the minimum runtime/workspace/run.
+3. If connected to AI IDE or claw, read [xllm 编排与工具循环](docs/guide/xllm-orchestrator-intro.md).
+4. If you need multiple Agents, remote Workers or replay, read the corresponding sample analysis.
+5. Finally check [API 文档索引](docs/api/README.md) and `xwork.h`.
+
+## Quick compile check
+
+Execute from the repository root directory:
 
 ```powershell
 gcc -std=c11 -Wall -Wextra -pedantic -c xwork.c
 ```
 
-Example build and run commands are documented in [examples/README.md](examples/README.md).
+For running examples, refer to [examples/README.md](examples/README.md).
 
 ## Dependencies
 
-| Dependency | Role |
+| Dependencies | Description |
 | --- | --- |
-| `xrt` | Base runtime, filesystem, process, terminal, and platform capabilities. |
-| `xllm` | Providers, model requests/responses, sessions, memory, and streaming events. |
-| `sqlite` | Local dependency used by examples and smoke tests. |
-| Platform libraries | Windows examples usually link `ws2_32`, `iphlpapi`, and related system libraries. |
+| `xrt` | Basic runtime, file, process, terminal and platform capabilities. |
+| `xllm` | provider, model request/response, session, memory and streaming events. |
+| `sqlite` | The current warehouse example and one of the local dependencies used by smoke. |
+| Platform Libraries | Windows examples typically link against system libraries such as `ws2_32`, `iphlpapi`, etc. |
 
-The repository `lib/` directory contains the dependency snapshot used by the current xwork build.
+The `lib/` directory of the repository holds a snapshot of dependencies required for the current xwork build.
 
-## Language Policy
+## Directory structure
 
-Chinese docs are the primary source. English `.en.md` files are translated from reviewed Chinese drafts and kept structurally aligned.
+```text
+xwork/
+  README.md
+  xwork.h
+  xwork.c
+  include/
+  src/
+  examples/
+  tests/
+  docs/
+    api/
+    guide/
+    case/
+  dev/
+```
+
+Key directory description:
+
+| Path | Description |
+| --- | --- |
+| `xwork.h` | Public API. |
+| `xwork.c` | Aggregation implementation entrance. |
+| `src/` | Implemented internally in each module. |
+| `examples/` | Runs the integration example. |
+| `tests/` | smoke and behavioral validation. |
+| `docs/` | Formal user-facing documentation. |
+| `dev/` | Design, development plans, historical tracking and internal instructions. |
+
+## Document language strategy
+
+The Chinese master draft of the document is first generated, and the English document is translated after manual review and stabilization.
+
+English documents use the `.en.md` suffix to maintain a one-to-one correspondence with Chinese documents; Chinese documents are the main source of subsequent changes.

@@ -1,27 +1,57 @@
 # Workspace Memory
 
-> Status: English draft, pending review.
+>Status: First draft in Chinese, awaiting review.
 
-Workspace memory connects `xwork_workspace` to `xllm_memory`, allowing host products to sync workspace context into model memory.
+xwork can synchronize workspace files to `xllm_memory`, allowing Agent to have project context before calling the model. xwork is responsible for the workspace side strategy, and the memory storage and retrieval semantics are provided by xllm.
 
-## Ownership
+## Enable memory
 
-`xwork_workspace_options::pMemory` is borrowed. The caller owns the `xllm_memory` object and must keep it alive longer than the workspace.
+```c
+xwork_workspace_options tWorkspace;
 
-## Flow
-
-```text
-create xllm_memory
-create xwork workspace with borrowed memory
-sync workspace root or selected files
-model turn reads memory context
+xwork_workspace_options_init(&tWorkspace);
+tWorkspace.sWorkspaceId = "main";
+tWorkspace.sRootPath = "D:/git/project";
+tWorkspace.bEnableMemory = true;
+tWorkspace.pMemory = pMemory; /* borrowed xllm_memory* */
+tWorkspace.sMemorySyncAllowedExtensions = ".c,.h,.md";
+tWorkspace.sMemorySyncIgnoredDirectories = ".git,build";
+tWorkspace.iMemorySyncMaxFileBytes = 1024 * 1024;
 ```
 
-## Recovery
+`pMemory` is borrowed and must outlive the workspace.
 
-Run snapshots do not recreate memory objects. The host must recreate or load compatible memory before recovering runs that reference it.
+## Synchronize the entire workspace
 
-## Next
+```c
+xwork_workspace_memory_sync_summary tSummary;
 
-- [Workspace API](../api/api-workspace.en.md)
-- [xllm Integration API](../api/api-xllm-integration.en.md)
+xwork_workspace_memory_sync_summary_init(&tSummary);
+status = xwork_workspace_sync_memory(pWorkspace, &tSummary);
+```
+
+summary contains counts of visited, ingested, created, updated, skipped, failed, etc.
+
+## Synchronize a single file
+
+```c
+xwork_workspace_memory_file_sync_summary tSummary;
+
+xwork_workspace_memory_file_sync_summary_init(&tSummary);
+status = xwork_workspace_sync_memory_file(pWorkspace, "src/main.c", &tSummary);
+```
+
+Suitable for file saving and incremental updates after patch application.
+
+## Strategy suggestions
+
+- Use extension allowlist to avoid sending binary files into memory.
+- Set `iMemorySyncMaxFileBytes` to avoid large files polluting the context.
+- Ignore `.git`, build, cache, vendor directories.
+- Re-register workspace and memory before restoring run; snapshot does not restore live `xllm_memory *`.
+
+## Next step
+
+- [Workspace API](../api/api-workspace.md)
+- [xllm Integration API](../api/api-xllm-integration.md)
+- [xllm Orchestration and Tool Loop](xllm-orchestrator-intro.md)

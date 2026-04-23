@@ -1,82 +1,103 @@
-#妯″桡钖?API
+#Module name API
 
-> 鐢ㄤ竴鍙ヨ瘽璇ancun槑杩掎釜妯″桡诺ｅ喅浠€涔堥棶棰普€?
-[杩斿洖 API 绱㈠紩](README.md) | [鐩稿叧鏁欑▼](../guide/README.md) | [鐩稿叧妗堜緥](../case/README.md)
+> Use one sentence to explain what problem this module solves.
 
----
-
-## 鐩綍
-
-- [妯″潡瀹氫綅](#妯″潡瀹氫綅)
-- [甯搁噺涓庡畯](#甯搁噺涓庡畯)
-- [鍏叡绫诲瀷](#鍏叡绫诲瀷)
-- [鏍囧噯璋冪敤椤哄簭](#鏍囧噯璋冪敤椤哄簭)
-- [鍔熻兘鍒嗙粍涓€](#鍔熻兘鍒嗙粍涓€)
-- [甯歌鐢ㄦ硶](#甯歌鐢ㄦ硶)
-- [甯歌閿欒](#甯歌閿欒)
-- [鐩稿叧绀轰緥](#鐩稿叧绀轰緥)
+[Back to API Index](README.md) | [Related Tutorials](../guide/README.md) | [Related Cases](../case/README.md)
 
 ---
 
-##妯″潡瀹hydrogen綅
+## Table of contents
 
-Runtime/workspace/run/tool/persistence绛夊叾浠栨ā鍧楃殑村戈gui暫抆?
+- [Module Positioning](#Module Positioning)
+- [Constants and Macros](#Constants and Macros)
+- [Public Types](#Public Types)
+- [Standard Call Order](#Standard Call Order)
+- [Function Group One](#Function Group One)
+- [Common Usage](#Common Usage)
+- [Common Mistakes](#Common Mistakes)
+- [Related Examples](#Related Examples)
+
 ---
 
-## Ning put 庺涓庡篯
+## Module positioning
 
-| 钖苟О | Chain?|
+Explain what problems this module solves, what problems it does not solve, and its boundaries with other modules such as runtime/workspace/run/tool/persistence.
+
+---
+
+## Constants and macros
+
+| name | value | description | when to use |
 | --- | --- | --- | --- |
-| `NAME` |
+| `NAME` | `value` | Description | Usage scenarios |
 
 ---
 
-## 鍏Rui Ling Hao Yan
+## Public type
 
 ### `type_name`
 
-Xuan Cunmu呮槸钖﹂渶丶人洺掺ュ垱夤heng€丸垵洮嫔寲銆乺eset鎴?destroy銆?
-| 瀛楁 /chain?| 绫淲瀷 /chain?|
+Indicates what this type represents and whether the caller needs to create, initialize, reset, or destroy it directly.
+
+| Field/Value | Type/Value | Default Value | Description | Ownership |
 | --- | --- | --- | --- | --- |
 | `field` | `type` |
 
 ---
 
-## 啙囧哳咋卂敤椤 coax 簭
+## Standard calling sequence
 
-1. What are the options? 2. What are the options? 5. reset/free/destroy?
+1. Initialize options or input objects.
+2. Create or register resources.
+3. Call the main API.
+4. Read the results.
+5. reset/free/destroy.
+
 ---
 
-## 锷绻兘卒噙獍涓€
+## Function group one
 
 ### `xwork_function_name`
 
-涓€鍙ヨ瘽璇ancun槑杩掎掎釉鍑 mustard隟銆?
-**锷绻兘锛?*
+Describe this function in one sentence.
 
-Xuan Cun槑杩欎Kekeo鍑獑cauldronHydrogen粈涔嬬纴阃effect掎鍦ㄥ涓怀酅Jiao鐢纴涓嶉€effect掎诺ｅ喅浠€涔堥棶棰 Pu€?
-**What's the point?*
+**Function:**
+
+Explain what this function does, in which scenarios it is suitable to be used, and what problems it is not suitable to solve.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_function_name(type *pArg);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-| 鍙四暟 | 鏂gui悜 | 鏄惁鍙negative `NULL` |
+| Parameters | Direction | Whether it can be `NULL` | Description |
 | --- | --- | --- | --- |
-|鍙四暟钖箟銆佺擓forge borrow 懆chain熴€佹卍chain夋潈銆佹湁鏁飠甲quench€丸崟嶅拋氨樿chain?|
+| `pArg` | Input/Output | No | Parameter meaning, lifetime, ownership, valid range, units and default values |
 
-**杩斿洴 alkali fine**
+**Return value:**
 
-- `XWORK_OK`鏏多粬阌澾珹寜鍑 mustard隟璇箟鍒楀嚭銆?
-**璧勬簮褰掎睘锛?*
+- `XWORK_OK`: Success.
+- `XWORK_ERROR_INVALID_ARGUMENT`: Invalid parameter.
+- Other error codes are listed by function semantics.
 
-- `reset` / `destroy`鍑 must隟娓呯把抆? - 璇cum槑杩洖鎸Back拡銄?borrowed銆乷wned 杩樻槸鐢?runtime 铓樼銆?
-**Chen ュ Pang Xuan cun 槑?*
+**Resource ownership:**
 
-- Persistence/recovery Persistence/recovery orkspace tool鎴?replay 宸緺銆?-鍏 fried镐у拰鐗徟湰娉ㄦ剰浜嬮‖銆?
-**锣冧緥締ｇ爜锛?*
+- Indicates whether this function allocates resources.
+- Specify which `reset` / `destroy` function the caller should use to clean up.
+- Indicates whether the returned pointer is borrowed, owned, or managed by the runtime.
+
+**Additional Note:**
+
+- Calling order requirements.
+- Thread safety and re-entry considerations.
+- persistence/recovery boundaries.
+- profile, workspace, host tool or replay differences.
+- Compatibility and version notes.
+
+**Example code:**
 
 ```c
 #include "xwork.h"
@@ -87,21 +108,22 @@ int main(void)
 }
 ```
 
-**What is the API?*
+**Related API:**
 
 - `related_function`
 
 ---
 
-## 宁歌鐢ㄦ綶
+## Common usage
 
-It’s a good place to start a business.
-## Ning Ge阌澾
+Explain the 2-3 most common combinations of this module.
 
-| 闂 | 铡熷洜 | 澶勭悊邂rose spinning |
+## Common mistakes
+
+| Problem | Cause | Solution |
 | --- | --- | --- |
-| 阌澾饜鈶 | Ningge铡熷洜 | 姝ｇ‘Guo氭綶 |
+| Error phenomena | Common causes | Correct practices |
 
-## The manuscript is full of cyanosis
+## Related examples
 
 - `examples\...`

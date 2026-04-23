@@ -1,21 +1,27 @@
-# xwork Guides
+# xwork tutorial index
 
-> English guide index. Chinese documents remain the source of truth until this translation set is reviewed.
+The tutorial is oriented to the question of "how to integrate xwork into products", giving priority to explaining object relationships, calling sequences and extension points.
 
-Recommended order:
+English version: [xwork Guides](README.en.md)
 
-1. [First xwork program](first-xwork-program.en.md)
-2. [xllm orchestration and tool loop](xllm-orchestrator-intro.en.md)
-3. [Tools, approval, and artifacts](tool-approval-artifact-intro.en.md)
-4. [Persistence, checkpoint, and replay](persistence-replay-intro.en.md)
-5. [Multi-agent task graph](multi-agent-intro.en.md)
-6. [Remote worker and control plane](remote-worker-intro.en.md)
-7. [Profile selection](profile-intro.en.md)
-8. [Local Host Tools](local-host-tools-intro.en.md)
-9. [Async execution and cancellation](async-run-cancel-intro.en.md)
-10. [Workspace Memory](workspace-memory-intro.en.md)
-11. [Artifact queries](artifact-query-intro.en.md)
-12. [Provider smoke](provider-smoke-intro.en.md)
-13. [Code snippet maintenance](CODE_SNIPPETS.en.md)
+## Recommended order
 
-Guides focus on integration flow and object relationships. For exact fields and ownership, use the [API index](../api/README.en.md) and [`xwork.h`](../../xwork.h).
+1. [First xwork Program](first-xwork-program.md)
+2. [xllm Orchestration and Tool Loop](xllm-orchestrator-intro.md)
+3. [Tools, Approval, and Artifacts](tool-approval-artifact-intro.md)
+4. [Persistence, Checkpoints, and Replay](persistence-replay-intro.md)
+5. [Multi-Agent Task Graph](multi-agent-intro.md)
+6. [Remote Worker and Control Plane](remote-worker-intro.md)
+7. [Profile Selection](profile-intro.md)
+8. [Local Host Tools](local-host-tools-intro.md)
+9. [Async Execution and Cancellation](async-run-cancel-intro.md)
+10. [Workspace Memory](workspace-memory-intro.md)
+11. [Artifact Query](artifact-query-intro.md)
+12. [Provider Smoke](provider-smoke-intro.md)
+13. [Tutorial Code Snippet Maintenance Notes](CODE_SNIPPETS.md)
+
+## Tutorial Boundary
+
+The tutorial does not expand all API parameters item by item; look up [API Reference Index](../api/README.md) and [`xwork.h`](../../xwork.h) when precise fields are required.
+
+Tutorials also do not record development plans and historical progress; these are retained in `dev/`.
