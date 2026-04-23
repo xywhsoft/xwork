@@ -2,7 +2,7 @@
 
 >Status: First draft in Chinese, awaiting review.
 
-This article explains xworkâ€™s current source-level integration methods, dependency snapshots, and update rules.
+This article explains xwork¡¯s current source-level integration methods, dependency snapshots, and update rules.
 
 ## Public Surface
 
@@ -22,7 +22,29 @@ Consumers should not compile both `xwork.c` and `src/xwork_*/*.c` unless explici
 gcc -std=c11 -Wall -Wextra -pedantic -c xwork.c
 ```
 
-Examples or tests that require sqlite-backed file persistence often additionally compile sqlite amalgamation:
+Single-header package:
+
+```powershell
+.\build_single_head.bat
+```
+
+This writes `singlehead/xwork.h`. The file contains the public API plus the
+xwork implementation when `XWORK_IMPLEMENTATION` is defined. It intentionally
+does not embed external dependencies; keep `xrt.h`, `xllm.h`,
+`xllm-session.h`, `xllm-memory.h`, and sqlite available to the consumer build.
+
+Minimal single-header smoke:
+
+```c
+#define XRT_IMPLEMENTATION
+#include "xrt.h"
+#define XLLM_SESSION_IMPLEMENTATION
+#include "xllm-session.h"
+#define XLLM_MEMORY_IMPLEMENTATION
+#include "xllm-memory.h"
+#define XWORK_IMPLEMENTATION
+#include "xwork.h"
+```
 
 ```powershell
 gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_orchestrator_smoke.c lib\sqlite\sqlite3.c -o tests\xwork_orchestrator_smoke.exe -lws2_32 -liphlpapi
@@ -39,7 +61,7 @@ gcc -std=c11 -Wall -Wextra -pedantic -Ilib\sqlite tests\xwork_orchestrator_smoke
 
 ## Version rules
 
-public versionï¼š
+public version£º
 
 - `XWORK_VERSION_MAJOR`
 - `XWORK_VERSION_MINOR`

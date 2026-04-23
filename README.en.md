@@ -73,20 +73,20 @@ Not suitable directly as:
 
 ## Document entry
 
-- [æ–‡æ¡£ä¸­å¿ƒ](docs/README.md)
+- [ÎÄµµÖĞĞÄ](docs/README.md)
 - [English README](README.en.md)
-- [API æ–‡æ¡£ç´¢å¼•](docs/api/README.md)
-- [æ•™ç¨‹ç´¢å¼•](docs/guide/README.md)
-- [èŒƒä¾‹ç´¢å¼•](docs/case/README.md)
-- [å¼€å‘ä¸è®¾è®¡èµ„æ–™](dev/docs/README.md)
+- [API ÎÄµµË÷Òı](docs/api/README.md)
+- [½Ì³ÌË÷Òı](docs/guide/README.md)
+- [·¶ÀıË÷Òı](docs/case/README.md)
+- [¿ª·¢ÓëÉè¼Æ×ÊÁÏ](dev/docs/README.md)
 
 Recommended reading order:
 
-1. Read [æ–‡æ¡£ä¸­å¿ƒ](docs/README.md) first to confirm the document partition of xwork.
-2. Read [ç¬¬ä¸€ä¸ª xwork ç¨‹åº](docs/guide/first-xwork-program.md) again and understand the minimum runtime/workspace/run.
-3. If connected to AI IDE or claw, read [xllm ç¼–æ’ä¸å·¥å…·å¾ªç¯](docs/guide/xllm-orchestrator-intro.md).
+1. Read [ÎÄµµÖĞĞÄ](docs/README.md) first to confirm the document partition of xwork.
+2. Read [µÚÒ»¸ö xwork ³ÌĞò](docs/guide/first-xwork-program.md) again and understand the minimum runtime/workspace/run.
+3. If connected to AI IDE or claw, read [xllm ±àÅÅÓë¹¤¾ßÑ­»·](docs/guide/xllm-orchestrator-intro.md).
 4. If you need multiple Agents, remote Workers or replay, read the corresponding sample analysis.
-5. Finally check [API æ–‡æ¡£ç´¢å¼•](docs/api/README.md) and `xwork.h`.
+5. Finally check [API ÎÄµµË÷Òı](docs/api/README.md) and `xwork.h`.
 
 ## Quick compile check
 
@@ -96,7 +96,20 @@ Execute from the repository root directory:
 gcc -std=c11 -Wall -Wextra -pedantic -c xwork.c
 ```
 
-For running examples, refer to [examples/README.md](examples/README.md).
+## Single Header
+
+Generate the single-header distribution:
+
+```powershell
+.\build_single_head.bat
+```
+
+The generated file is `singlehead/xwork.h`. Define `XWORK_IMPLEMENTATION`
+in exactly one translation unit before including it. The single header embeds
+only xwork itself; provide `xrt`, `xllm`, and `sqlite` according to your build
+layout.
+
+Example build and run commands are documented in [examples/README.md](examples/README.md).
 
 ## Dependencies
 
