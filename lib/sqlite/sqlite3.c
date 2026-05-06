@@ -22,6 +22,12 @@
 **
 **    
 */
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#endif
+
 #ifndef SQLITE_AMALGAMATION
 #define SQLITE_CORE 1
 #define SQLITE_AMALGAMATION 1
@@ -262855,4 +262861,9 @@ SQLITE_API int sqlite3_stmt_init(
 /* Return the source-id for this library */
 SQLITE_API const char *sqlite3_sourceid(void){ return SQLITE_SOURCE_ID; }
 #endif /* SQLITE_AMALGAMATION */
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
 /************************** End of sqlite3.c ******************************/

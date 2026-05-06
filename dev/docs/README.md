@@ -1,10 +1,14 @@
-# xwork 内部与历史文档
+# xwork Internal and Historical Documents
 
-> 本目录保存开发过程中的设计记录、内部 contract、兼容性说明和历史跟踪资料。正式用户文档入口在 [`../../docs/README.md`](../../docs/README.md)。
+This directory stores design notes, internal contracts, compatibility notes,
+and historical tracking material from xwork development. The formal user
+documentation entry point is [`../../docs/README.md`](../../docs/README.md).
 
-这些文档可以作为正式文档的来源材料，但不作为用户主入口。稳定内容需要提炼到 `docs/` 下的 API、教程或范例文档中。
+These documents may be used as source material for formal documentation, but
+they are not the primary user-facing entry point. Stable content should be
+promoted into API, guide, or case documentation under `docs/`.
 
-Current documents:
+## Current Documents
 
 - [PACKAGING.md](PACKAGING.md): source-level packaging, aggregate `xwork.c` usage, include/lib layout, and version rule.
 - [COMPATIBILITY.md](COMPATIBILITY.md): current xwork/xllm/xrt/sqlite compatibility snapshot and dependency update rule.
@@ -18,9 +22,6 @@ Current documents:
 - [REPLAY.md](REPLAY.md): deterministic replay entry/event schema, divergence behavior, and terminal replay boundary.
 - [PROVIDER_SMOKE.md](PROVIDER_SMOKE.md): optional real-provider smoke runbook and provider drift log template.
 
-The detailed event, tool, and profile contracts are currently documented in
-[`../../README.md`](../../README.md),
-these internal notes, and the public documentation under [`../../docs/README.md`](../../docs/README.md).
-
-The current API reference rewrite is tracked in
-[`../API_REFERENCE_SPEC.md`](../API_REFERENCE_SPEC.md).
+The detailed event, tool, and profile contracts are documented in these
+internal notes and in the public documentation under
+[`../../docs/README.md`](../../docs/README.md).

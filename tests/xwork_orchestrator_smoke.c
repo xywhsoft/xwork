@@ -4393,11 +4393,18 @@ int main(void)
           iAsyncObserverIndex < 4u;
           ++iAsyncObserverIndex ) {
         aAsyncObserverCtx[iAsyncObserverIndex].pAsync = pAsync;
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
         aAsyncObserverThreads[iAsyncObserverIndex] = xrtThreadCreate(
             (ptr)xwork_async_observer_thread,
             &aAsyncObserverCtx[iAsyncObserverIndex],
             0u
         );
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
         assert(aAsyncObserverThreads[iAsyncObserverIndex] != NULL);
     }
     for ( iAsyncObserverIndex = 0u;

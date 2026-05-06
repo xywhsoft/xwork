@@ -7,6 +7,10 @@
 #define XWORK_EXAMPLE_MOCK_ADAPTER "example_ai_ide_mock"
 #define XWORK_EXAMPLE_MOCK_PROFILE "example-ai-ide-mock"
 
+typedef struct {
+    size_t iTurnCount;
+} xwork_example_mock_ctx;
+
 static int xwork_example_check(xwork_status iStatus, const char *sStep)
 {
     if ( iStatus == XWORK_OK ) {
@@ -118,8 +122,8 @@ static int xwork_example_mock_chat(
     xllm_error *pError
 )
 {
+    xwork_example_mock_ctx *pMockCtx = (xwork_example_mock_ctx *)pCtx;
     const char *sProfileId = pProfile && pProfile->sId ? pProfile->sId : XWORK_EXAMPLE_MOCK_PROFILE;
-    (void)pCtx;
     (void)pOptions;
     (void)pError;
 
@@ -127,14 +131,14 @@ static int xwork_example_mock_chat(
         return XRT_NET_ERROR;
     }
     *ppResponse = NULL;
-    if ( pRequest->iMessageCount <= 2u ) {
+    if ( pMockCtx && pMockCtx->iTurnCount++ == 0u ) {
         *ppResponse = xwork_example_build_tool_call_response(
             sProfileId,
             "example-approval-request-response",
             XWORK_TOOL_FILESYSTEM_APPLY_PATCH,
-            "{\"path\":\"README.md\",\"old_text\":\"# xwork\\n\","
-            "\"new_text\":\"# xwork\\n\\n"
-            "AI IDE agents can emit dry-run patch artifacts before user approval.\\n\","
+            "{\"path\":\"README.md\",\"old_text\":\"# xwork\\r\\n\","
+            "\"new_text\":\"# xwork\\r\\n\\r\\n"
+            "AI IDE agents can emit dry-run patch artifacts before user approval.\\r\\n\","
             "\"dry_run\":true}"
         );
     } else {
@@ -151,6 +155,7 @@ int main(void)
     xllm_runtime_options tLlmRuntimeOptions;
     xllm_runtime *pLlmRuntime = NULL;
     xllm_adapter tAdapter;
+    xwork_example_mock_ctx tMockCtx;
     xllm_profile tLlmProfile;
     xwork_profile tProfile;
     xwork_local_host tHost;
@@ -200,6 +205,7 @@ int main(void)
         "{\"title\":\"prepare patch\",\"status\":\"completed\"}]}";
 
     xllm_runtime_options_init(&tLlmRuntimeOptions);
+    memset(&tMockCtx, 0, sizeof(tMockCtx));
     xllm_profile_init(&tLlmProfile);
     xwork_profile_init(&tProfile);
     xwork_local_host_init(&tHost);
@@ -225,6 +231,7 @@ int main(void)
     memset(&tAdapter, 0, sizeof(tAdapter));
     tAdapter.sName = XWORK_EXAMPLE_MOCK_ADAPTER;
     tAdapter.pfnChat = xwork_example_mock_chat;
+    tAdapter.pCtx = &tMockCtx;
     if ( xllm_register_adapter(pLlmRuntime, &tAdapter) != XRT_NET_OK ) {
         fprintf(stderr, "register mock xllm adapter failed\n");
         goto cleanup;

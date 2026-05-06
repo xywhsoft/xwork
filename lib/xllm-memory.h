@@ -12,6 +12,11 @@
 #ifndef XLLM_MEMORY_H
 #define XLLM_MEMORY_H
 
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+
 #if defined(XLLM_MEMORY_IMPLEMENTATION) && !defined(XLLM_IMPLEMENTATION)
 #define XLLM__MEMORY_BRIDGED_IMPLEMENTATION
 #define XLLM_IMPLEMENTATION
@@ -33058,7 +33063,7 @@ static char *xllm__memory_dup_relative_dir_for_file(
 }
 
 static int xllm__memory_collect_gitignore_recursive_callback(
-    const char *sPath,
+    str sScanPath,
     size_t iPathLength,
     int bDir,
     void *pData,
@@ -33066,6 +33071,7 @@ static int xllm__memory_collect_gitignore_recursive_callback(
 )
 {
     xllm__memory_ignore_file_scan_state *pState = (xllm__memory_ignore_file_scan_state *)pParam;
+    const char *sPath = (const char *)sScanPath;
     const char *sName;
     char *sBasePrefix = NULL;
     int iStatus;
@@ -33170,12 +33176,7 @@ static int xllm__memory_build_workspace_ignore_patterns(
         tState.psPatterns = &sPatterns;
         tState.piLength = &iLength;
         tState.piCapacity = &iCapacity;
-        xrtDirScan(
-            (str)pOptions->sPath,
-            TRUE,
-            (xrtDirScanProc)xllm__memory_collect_gitignore_recursive_callback,
-            &tState
-        );
+        xrtDirScan((str)pOptions->sPath, TRUE, xllm__memory_collect_gitignore_recursive_callback, &tState);
         if ( tState.bOutOfMemory ) {
             goto oom;
         }
@@ -34106,7 +34107,7 @@ static int xllm__memory_emit_ingest_progress(
 }
 
 static int xllm__memory_ingest_directory_callback(
-    const char *sPath,
+    str sScanPath,
     size_t iPathLength,
     int bDir,
     void *pData,
@@ -34115,6 +34116,7 @@ static int xllm__memory_ingest_directory_callback(
 {
     xllm__memory_directory_ingest_state *pState = (xllm__memory_directory_ingest_state *)pParam;
     xllm_memory_ingest_file_options tFileOptions;
+    const char *sPath = (const char *)sScanPath;
     const char *sAllowedExtensions;
     const char *sIgnoredDirectories;
     const char *sIgnoredExtensions;
@@ -54929,7 +54931,7 @@ XLLM_API int xllm_memory_ingest_directory(
     xrtDirScan(
         (str)pUseOptions->sPath,
         pUseOptions->bRecursive ? 1 : 0,
-        (xrtDirScanProc)xllm__memory_ingest_directory_callback,
+        xllm__memory_ingest_directory_callback,
         &tState
     );
 
@@ -57453,6 +57455,10 @@ XLLM_API int xllm_memory_watcher_worker_run_loop(
 /* ===== end: D:/git/xllm/src/xllm_memory/xllm_memory.c ===== */
 #endif
 
+#endif
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
 #endif
 
 /* ===== end: D:/git/xllm/xllm-memory.h ===== */
