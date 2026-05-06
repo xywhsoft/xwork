@@ -1,72 +1,81 @@
-# xwork API Reference Index
+# xwork API document index
 
-> API docs are organized by usage model, not by declaration order in `xwork.h`. This index follows the `xllm` API reference standard.
+> API documentation is organized using a mental model rather than a mechanical expansion of the declaration order of `xwork.h`.
 
-## Writing Standard
+English version: [xwork API Index](README.en.md)
 
-Every public function declared with `XWORK_API` in `xwork.h` must have an independent `### function_name` section in exactly one API page.
+## Current public API scope
 
-Each function section must include:
+`xwork.h` has covered the following core objects:
 
-- **Purpose:** what the function does and when to use it.
-- **Prototype:** the exact declaration from `xwork.h`.
-- **Parameters:** direction, nullability, lifetime, ownership, unit, range, and defaults.
-- **Return Value:** all common `xwork_status` values or returned pointer/value semantics.
-- **Ownership:** who owns returned objects, buffers, strings, handles, and reset/destroy obligations.
-- **Notes:** call ordering, thread boundary, recovery boundary, side effects, and compatibility constraints.
-- **Example:** minimal compilable C snippet when practical.
-- **Related APIs:** neighboring init/reset/destroy/query functions.
-
-Pages may additionally document constants, macros, enums, structs, opaque types, module lifecycle, common errors, thread boundaries, and recovery boundaries.
-
-An API page is considered complete only when every function assigned to that page is covered by an independent section and the documented prototypes match `xwork.h`.
-
-## Public API Scope
-
-| Module | Main Objects / Capabilities |
+| Module | Main Objects/Capabilities |
 | --- | --- |
-| Common types | Status codes, versions, naming, and init/reset rules. |
-| Runtime | `xwork_runtime`, runtime options, profiles, and `xllm` bootstrap. |
-| Workspace | `xwork_workspace`, workspace roots, and workspace memory sync. |
-| Tools | `xwork_tool_def`, tool registry, executors, and host-service bridge. |
-| Run lifecycle | `xwork_run`, state, step, event, summary, sync/async execution. |
-| Orchestrator | `xllm` model turn, tool loop, stream events, cancel, approval pause/resume. |
-| Policy / Approval | `xwork_approval_request`, autonomy, filesystem/process/network policies. |
-| Artifacts | `xwork_artifact`, summaries, typed metadata, reports, patches, and outputs. |
-| Persistence | `xwork_persistence_backend`, snapshots, checkpoints, event/artifact queries. |
-| Profiles | `xcode` and `xclaw` profile defaults and boundaries. |
-| Multi-Agent | `xwork_agent_pool`, `xwork_task_graph`, dependencies, handoff, recovery. |
-| Remote Worker | `xwork_control_plane`, workers, remote tasks, leases, chunks. |
-| Replay | `xwork_replay_engine`, entries, manifest, filesystem refs, divergence. |
-| xllm integration | Borrowed/owned `xllm_runtime`, sessions, memory, and cancel tokens. |
-| Local host | Local filesystem/process/terminal boundaries built on host services and xrt. |
+| Basic runtime | `xwork_runtime`, status code, version, profile, xllm bootstrap. |
+| workspace | `xwork_workspace`, workspace memory sync, workspace root and policy boundaries. |
+| Tool system | `xwork_tool_def`, tool registration, tool executor, host service bridge. |
+| Run life cycle | `xwork_run`, run state, step, event, summary, synchronous/asynchronous execution. |
+| Orchestrator | xllm model turn, tool loop, streaming events, cancellation, approval pause/resume. |
+| Approval and Policy | `xwork_approval_request`, automation mode, filesystem/process/network policy. |
+| Artifact | `xwork_artifact`, artifact summary, patch/report/command/output typed metadata. |
+| Persistence | `xwork_persistence_backend`, run snapshot, checkpoint, event/artifact query. |
+| Multi-Agent | `xwork_agent_pool`, `xwork_task_graph`, task dependency, handoff, graph recovery. |
+| Remote Worker | `xwork_control_plane`, worker, remote task, lease, output/blob chunk. |
+| Replay | `xwork_replay_engine`, replay entry, manifest, filesystem ref, divergence report. |
 
-## API Pages
+## API reading path
 
-- [API Page Template](API_PAGE_TEMPLATE.en.md)
-- [Common Types](types.en.md)
-- [Runtime API](api-runtime.en.md)
-- [Workspace API](api-workspace.en.md)
-- [Tool API](api-tools.en.md)
-- [Run API](api-run.en.md)
-- [Orchestrator API](api-orchestrator.en.md)
-- [Policy / Approval API](api-policy-approval.en.md)
-- [Artifact API](api-artifacts.en.md)
-- [Persistence API](api-persistence.en.md)
-- [Host Tools API](api-host-tools.en.md)
-- [Profiles API](api-profiles.en.md)
-- [Multi-Agent API](api-multi-agent.en.md)
-- [Remote Worker API](api-remote-worker.en.md)
-- [Replay API](api-replay.en.md)
-- [xllm Integration API](api-xllm-integration.en.md)
-- [Local Host API](api-local-host.en.md)
+1. First read the public contract description at the top of `xwork.h` to confirm object ownership, borrowing relationships, and thread safety boundaries.
+2. Press the current task again to select the module document.
+3. When writing integration code, give priority to using `*_init()` to initialize the option/result structure, and use the corresponding `*_reset()` to release the deep copy result.
+4. When you need to save the state across processes or versions, confirm `XWORK_PERSISTENCE_FORMAT_VERSION` and `XWORK_REMOTE_PROTOCOL_VERSION_CURRENT`.
 
-## Reading Rules
+The error code is based on the top public contract of `xwork.h` and [Common Types and Conventions](types.md). The module page only supplements the most common error sources of the module and does not redefine the error code semantics.
 
-1. Read the public contract at the top of [`xwork.h`](../../xwork.h) first.
-2. Use `*_init()` before filling option/result structs.
-3. Use matching `*_reset()` for result structs that own deep-copied data.
-4. Use matching `*_destroy()` for opaque owned objects.
-5. Treat getter-returned `const char *` and `const xwork_tool_def *` as borrowed unless documented otherwise.
+## API page
 
-Error semantics are defined by `xwork.h` and [Common Types](types.en.md). Module pages only describe common module-specific causes.
+Basic page:
+
+- [API Page Template](API_PAGE_TEMPLATE.md)
+- [Common Types and Conventions](types.md)
+- [Runtime API](api-runtime.md)
+- [Workspace API](api-workspace.md)
+- [Tool API](api-tools.md)
+- [Run API](api-run.md)
+- [Orchestrator API](api-orchestrator.md)
+
+Subsequent pages:
+
+- [Policy / Approval API](api-policy-approval.md)
+- [Artifact API](api-artifacts.md)
+- [Persistence API](api-persistence.md)
+- [Host Tools API](api-host-tools.md)
+- [Profiles API](api-profiles.md)
+- [Multi-Agent API](api-multi-agent.md)
+- [Remote Worker API](api-remote-worker.md)
+- [Replay API](api-replay.md)
+- [xllm Integration API](api-xllm-integration.md)
+- [Local Host API](api-local-host.md)
+
+## API documentation writing standards
+
+API documentation must be written at the granularity of `D:\git\xllm\docs\api`. You can't just do a module overview, and you can't just list function names.
+
+Each module page contains at least:
+
+- Description of constants, macros, enumerations and structures.
+- API directory grouped by functionality.
+- Separate section for each exposing `XWORK_API` functions.
+- Function prototype, parameters, return value, resource ownership, supplementary instructions and sample code.
+- Common errors, related APIs, related tutorials and related cases.
+
+Each function section contains at least:
+
+- **Function**: What problem does this function solve and when to use it.
+- **Function Prototype**: Exact C prototype copied from `xwork.h`.
+- **Parameters**: Explanation of input/output direction, possible `NULL`, lifetime, ownership, units, scope and default value one by one.
+- **Return value**: success/failure semantics, error code, whether partial results are possible.
+- **Resource ownership**: Who allocates, who releases, and which `reset` / `destroy` function is used to clean up.
+- **Additional Notes**: Call order, thread safety, recovery boundaries, profile/workspace/host/replay differences and compatibility considerations.
+- **Sample code**: Try to give small code snippets that can be directly learned; complex processes can be linked to `case/`.
+
+Only when an API page covers all public `XWORK_API` functions assigned to the module, and each function has the above, can it be marked complete in the API reference rewrite spec.

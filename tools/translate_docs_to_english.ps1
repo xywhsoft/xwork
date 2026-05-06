@@ -144,7 +144,7 @@ $MarkdownFiles += Get-ChildItem -LiteralPath (Join-Path $Root "dev") -Recurse -F
 $MarkdownFiles = $MarkdownFiles | Sort-Object -Unique
 
 foreach ($Path in $MarkdownFiles) {
-    $Text = Get-Content -LiteralPath $Path -Raw
+    $Text = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
     if (-not (Has-Han $Text)) {
         continue
     }

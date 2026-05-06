@@ -1,8 +1,10 @@
 # Local Host API
 
-> What is the role of the clock?
-Local Host API 鄄? ?`xwork_host_services`?
-## 鐩 manuscript 婧澹版槑
+>Status: First draft in Chinese, awaiting review.
+
+Local Host API is a local host service helper provided by xwork, which is used to link filesystem, process, terminal, vcs and editor-buffer capabilities to `xwork_host_services` of runtime.
+
+## Related Statements
 
 - `xwork_local_host_options`
 - `xwork_local_host`
@@ -13,27 +15,30 @@ Local Host API 鄄? ?`xwork_host_services`?
 - `xwork_host_services`
 - `xwork_host_services_init()`
 
-##妯″潡瀹hydrogen綅
+## Module positioning
 
-local host 銄湰鍦mix鹘绋嫔唴 helper鈆 Effect畠阃 Effect掎 examples鈆ﹻmoke銆丄I IDE/claw Chain management, host services, JSON contract, JSON contract鍜?artifact璇箟銆?
-##閰玖江瀛楁
+local host is a local in-process helper. It is suitable for examples, smoke, AI IDE/claw local execution baseline. Production products can still implement their own host services as long as they adhere to the same JSON contract, policy, and artifact semantics.
 
-| Yingqi | Xuan Cunmu |
+## Configuration fields
+
+| Field | Description |
 | --- | --- |
-|
-|
-| `psFilesystemAllowPathPrefixes` | allow prefix?|
-| `psFilesystemDenyPathPrefixes` | Deny prefix?|
-| `psCommandAllowPatterns` | forged ring guard allow pattern?|
-| `psCommandDenyPatterns` | Forged Ring Deny pattern?|
-|
-| `iMaxReadBytes` |
-|
-|
-| `iMaxProcessOutputBytes` | process output 涓婇檺銆?|
+| `sDefaultWorkingDirectory` | Default working directory. |
+| `bEnforceFilesystemRoot` | Whether to force path to stay under root. |
+| `psFilesystemAllowPathPrefixes` | File path allow prefix. |
+| `psFilesystemDenyPathPrefixes` | File path deny prefix. |
+| `psCommandAllowPatterns` | Command allow pattern. |
+| `psCommandDenyPatterns` | Command deny pattern. |
+| `bDenyDestructiveCommands` | Reject destructive commands before spawning. |
+| `iMaxReadBytes` | File reading limit. |
+| `iMaxProcessInputBytes` | stdin_text upper limit. |
+| `iMaxProcessEnvEntries` | env entry limit. |
+| `iMaxProcessOutputBytes` | process output upper limit. |
 
-The file system read/write process executes the CS status/diff/log/branch editor buffers.
-## The chain €恏濛利烃?
+Capability switches include filesystem read/write, process exec, VCS status/diff/log/branch and editor buffers.
+
+## Minimal configuration
+
 ```c
 xwork_local_host_options tOptions;
 xwork_local_host tHost;
@@ -53,40 +58,48 @@ tOptions.bEnableVcsStatus = true;
 status = xwork_local_host_configure_services(&tHost, &tOptions, &tServices);
 ```
 
-`xwork_runtime_options::pHostServices` `tServices` `tHost` callback user data runtime is the host service?
-## 阃愬嚱鏁mix鄄?
+`xwork_runtime_options::pHostServices` will copy `tServices` by value, but `tHost` is the actual owner of the callback user data and must live until the runtime no longer calls the host service.
+
+## Function-by-function description
+
 ### xwork_host_service_init
 
-What is the host service?
-**锷绻兘锛?*
+Initialize a single host service.
 
-`xwork_host_service`
-**What's the point?*
+**Function:**
+
+Clear `xwork_host_service` and prepare to populate operation callback, user data and capability description.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_host_service_init(xwork_host_service *pService);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pService`?`NULL`?
-**杩斿洴 alkali fine**
+- `pService`: The service to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰嶈祫婧愶禂 callback鍜?user data鍧囩啱咋卂椤鏂gui鐞嗐€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-鐢綶瀹瀹 boast rich 鍙 mutual trickle rugged local host锛叀濿掺ュ～鍏呰嚜宸箑 `xwork_host_service`銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated; both callback and user data are managed by the caller.
+
+**Additional Note:**
+
+The production host can directly fill in its own `xwork_host_service` without local host.
+
+**Example code:**
 
 ```c
 xwork_host_service service;
 xwork_host_service_init(&service);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_host_services_init`
 
@@ -94,36 +107,42 @@ xwork_host_service_init(&service);
 
 ### xwork_host_services_init
 
-What is the host service?
-**锷绻兘锛?*
+Initialize the host services collection.
 
-`xwork_host_services` host service
-**What's the point?*
+**Function:**
+
+Initialize all host service slots in `xwork_host_services` to empty.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_host_services_init(xwork_host_services *pServices);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pServices`?`NULL`?
-**杩斿洴 alkali fine**
+- `pServices`: services to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰嶈祫婧愶绂 services 缁撴瀯寯撶敱咋卂敤揂guigul嫢夈€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-浼犵粰 runtime options 钖庯紴 鎸夊€ fried鍒?services锛朜allback user data 鄄勭铓forge borrowed the chain 熶粛颐 graduate皟鐢ㄦnanqi濊抆銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated; the services structure is owned by the caller.
+
+**Additional Note:**
+
+After passing to runtime options, runtime copies services by value; the life cycle of callback user data is still guaranteed by the caller.
+
+**Example code:**
 
 ```c
 xwork_host_services services;
 xwork_host_services_init(&services);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_local_host_configure_services`
 
@@ -131,29 +150,35 @@ xwork_host_services_init(&services);
 
 ### xwork_local_host_options_init
 
-What are the local host options?
-**锷绻兘锛?*
+Initialize local host options.
 
-What is the host service helper?
-**What's the point?*
+**Function:**
+
+Set the default security and capabilities configuration of the local host service helper.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_local_host_options_init(xwork_local_host_options *pOptions);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions`?`NULL`?
-**杩斿洴 alkali fine**
+- `pOptions`: options to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_local_host_configure_services` filesystem filesystem filesystem editor-buffer
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The filesystem, process, terminal, vcs or editor-buffer capabilities that need to be exposed should be explicitly enabled before calling `xwork_local_host_configure_services`.
+
+**Example code:**
 
 ```c
 xwork_local_host_options opts;
@@ -161,7 +186,7 @@ xwork_local_host_options_init(&opts);
 opts.bEnableProcessExec = true;
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_local_host_configure_services`
 
@@ -169,36 +194,42 @@ opts.bEnableProcessExec = true;
 
 ### xwork_local_host_init
 
-What is the local host helper?
-**锷绻兘锛?*
+Initialize local host helper.
 
-鍑嗗涓€涓皟鐢ㄦ南鎸丹湹湁鄄?
-**What's the point?*
+**Function:**
+
+Prepare an `xwork_local_host` held by the caller to carry host service callback user data.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_local_host_init(xwork_local_host *pHost);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pHost`?`NULL`?
-**杩斿洴 alkali fine**
+- `pHost`: The host to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-The host is the host.
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-閰浯獒?runtime閖庯纴`pHost`鈇呴　娲沲匌 runtime银嶅啀咋卂椤host service銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No long-term resources are allocated; the host structure is owned by the caller.
+
+**Additional Note:**
+
+After being configured to the runtime, `pHost` must survive until the runtime no longer calls the host service.
+
+**Example code:**
 
 ```c
 xwork_local_host host;
 xwork_local_host_init(&host);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_local_host_reset`
 
@@ -206,35 +237,41 @@ xwork_local_host_init(&host);
 
 ### xwork_local_host_reset
 
-Read the local host helper?
-**锷绻兘锛?*
+Release local host helper.
 
-荐婃斁 local host 卐呴儴澶嶅埗镄啄勮羰寰勩乤llow/deny 鍒楄〃銆乼erminal/session 鍍呴璧勬簮銆?
-**What's the point?*
+**Function:**
+
+Release the path, allow/deny list, terminal/session status and other resources copied within the local host.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_local_host_reset(xwork_local_host *pHost);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--`pHost`?`NULL`?host?
-**杩斿洴 alkali fine**
+- `pHost`: The host to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read婃斁捍呴儴璧勬簮锛屼笉Read僃斁缁撴瀯钴湰韬€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-What is the runtime value of the host service?reset?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases internal resources but does not release the structure itself.
+
+**Additional Note:**
+
+Do not reset when the runtime may still call the host service.
+
+**Example code:**
 
 ```c
 xwork_local_host_reset(&host);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_local_host_init`
 
@@ -242,11 +279,13 @@ xwork_local_host_reset(&host);
 
 ### xwork_local_host_configure_services
 
-鰰浰江 local host services銆?
-**锷绻兘锛?*
+Configure local host services.
 
-What is the local host options?host helper?filesystem/process/terminal/vcs/editor-buffer callback?`xwork_host_services`?
-**What's the point?*
+**Function:**
+
+Initialize the host helper according to local host options and hook the filesystem/process/terminal/vcs/editor-buffer callback to `xwork_host_services`.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_local_host_configure_services(
@@ -256,25 +295,31 @@ XWORK_API xwork_status xwork_local_host_configure_services(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pServices`?services?init?
-**杩斿洴 alkali fine**
+- `pHost`: local host helper owned by the caller.
+- `pOptions`: Configuration parameters.
+- `pServices`: Output services; should be init before calling.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-XWorkPLACEHOLDER0TOKEN
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-local
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+`pHost` saves a copy of the configuration as callback user data; `pServices` does not own `pHost`.
+
+**Additional Note:**
+
+local `process.exec` go xrt subprocess. The terminal session is a live local resource and will not be automatically restored by snapshot.
+
+**Example code:**
 
 ```c
 xwork_local_host_configure_services(&host, &opts, &services);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_create`
 
@@ -282,11 +327,13 @@ xwork_local_host_configure_services(&host, &opts, &services);
 
 ### xwork_host_invoke_context_should_cancel
 
-What’s the host service?
-**锷绻兘锛?*
+Check if the host service call should be canceled.
 
-The host service is the host service. The host service is the host service. Cancel token is the runtime.
-**What's the point?*
+**Function:**
+
+Have long-running host services check for cancel token or runtime interruption status at stage boundaries.
+
+**Function prototype:**
 
 ```c
 XWORK_API bool xwork_host_invoke_context_should_cancel(
@@ -295,19 +342,24 @@ XWORK_API bool xwork_host_invoke_context_should_cancel(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pContext` is the most invoke context.
-**杩斿洴 alkali fine**
+- `pContext`: host invoke context; can be `NULL`.
+- `sPhase`: Optional stage name, used for diagnostics.
 
-`false`?`false`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-`sPhase`?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `true` if cancellation is expected; otherwise returns `false`.
 
-host service 搴斿湪 spawn 铓嶃€両/O 寰円銆云瓑寰哙杩涚▼銆䷷笂浼?chunk 绛夐Stack娈典富锷ㄦ镆ャ€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Do not allocate resources; do not take over `sPhase`.
+
+**Additional Note:**
+
+The host service should be actively checked before spawning, during I/O loops, waiting for child processes, and uploading chunks.
+
+**Example code:**
 
 ```c
 if (xwork_host_invoke_context_should_cancel(ctx, "before-spawn")) {
@@ -315,7 +367,7 @@ if (xwork_host_invoke_context_should_cancel(ctx, "before-spawn")) {
 }
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_tool_exec_context_should_cancel`
 
@@ -323,36 +375,45 @@ if (xwork_host_invoke_context_should_cancel(ctx, "before-spawn")) {
 
 ## process.exec
 
-local `process.exec` 璧?
--cwd override
+local `process.exec` takes the xrt subprocess path and does not depend on shell `popen`. It supports:
+
+- cwd override
 - stdin_text
 - env list
 - timeout_ms
-- timeout_stopinterrupt/terminate/kill/kill_tree
+- timeout_stop：interrupt / terminate / kill / kill_tree
 - allow_nonzero_exit
 - merge_stderr
--include_events
+- include_events
 - max_output_bytes
--terminal mode
+- terminal mode
 
-缁撴灉鍖卭惈 stdout/stderr銆乪xit code鈹韅鏂鈣灁璁両/O 缁絻銆乼imeout/cancel/stop reason鍜屽彲阃?ordered events銆?
+Results include stdout/stderr, exit code, truncation flags, I/O statistics, timeout/cancel/stop reason, and optional ordered events.
+
 ## interactive terminal
 
-local host 退寔锛?
--`process.start_terminal`
--`process.list_terminals`
--`process.terminal_read`
--`process.terminal_write`
--`process.terminal_resize`
--`process.terminal_stop`
+local host supports:
 
-terminal session 鄄?live local resource锛屼笉浼氲法杩涚▼ restart 镊姩鎭㈠銆四寔涔呭寲 artifact 鍙瀬瀛?transcript/state/inventory 璁 Board綍銆?
-## 瀹夊叏夤hong
+- `process.start_terminal`
+- `process.list_terminals`
+- `process.terminal_read`
+- `process.terminal_write`
+- `process.terminal_resize`
+- `process.terminal_stop`
 
-- `bEnforceFilesystemRoot` - `bEnforceFilesystemRoot` - `bEnforceFilesystemRoot` - `bEnforceFilesystemRoot` pattern?- 瀵?destructive command?
-## The manuscript is 叧鏂囨.
+The terminal session is a live local resource and will not be automatically restored across process restarts. The persistence artifact only saves transcript/state/inventory records.
+
+## Security recommendations
+
+- `bEnforceFilesystemRoot` is enabled by default.
+- Use dry-run or approve for write, delete, move, apply_patch.
+- Configure allow/deny pattern on process.exec.
+- Turn on `bDenyDestructiveCommands` for destructive command.
+- Network capabilities are deny-by-default by default.
+
+## Related documents
 
 - [Host Tools API](api-host-tools.md)
 - [Policy / Approval API](api-policy-approval.md)
-- [claw 鑷富 Agent 鑼冧緥](../case/claw-autonomous-agent.md)
-- [鍐呴儴 host tool contract](../../dev/docs/HOST_TOOL_CONTRACTS.md)
+- [claw Autonomous Agent Example](../case/claw-autonomous-agent.md)
+- [Internal host tool contract](../../dev/docs/HOST_TOOL_CONTRACTS.md)

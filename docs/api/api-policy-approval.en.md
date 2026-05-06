@@ -1,58 +1,72 @@
 # Policy / Approval API
 
-> Zhong Ruo €侊 fine Juan 枃 阬嚱鏁鏁 Board 嬬Key 溴纴寰呬Hanchen ュ阒呫€?
-Policy / Approval API 瀹hydrogen箟铓綔鐢ㄤ箣铓瓓殑缁綶竴瀹夊叏揈gui櫫銆?
-##妯″潡瀹hydrogen綅
+> Status: Chinese function-by-function reference, waiting for manual review.
 
-Policy Policy揆effect仠钖庢毚hiddenstubble粰浜уfan UI醆丆LI锴栬嚜锷ㄧ瓥鐣ョ殑瀹¤瀵 silicon thin銆抆曛湰妯″潡涓嶅疄鐜?UI銆佽处鍙鍙潈闄愩€亀orker 璁よ玴?socket What is the value of the product?
-## chain
+The Policy / Approval API defines xwork's unified security boundaries before executing files, processes, networks, remote workers, and replay side effects.
 
-| 绫淲埆 | 澹典槑 |
+## Module positioning
+
+Policy determines "whether it is allowed, whether it requires approval, and whether it can be automatically approved." An Approval request is an audit object exposed to the product UI, CLI, or automated policies after the run is paused. This module does not implement UI, account permissions, worker authentication, or socket access control; these are still the responsibility of the host product.
+
+## This page covers the statement
+
+| Category | Statement |
 | --- | --- |
-| `xwork_policy_options`, `xwork_approval_eval_input`, `xwork_approval_decision`, `xwork_network_policy_eval_input`,
-| `xwork_policy_options_init`, `xwork_approval_eval_input_init`, `xwork_approval_decision_init`, `xwork_network_policy_eval_input_init`, `xwork_network_policy_decision_init`, `xwork_policy_evaluate_network_access` |
+| Structure | `xwork_policy_options`, `xwork_approval_eval_input`, `xwork_approval_decision`,
+| Function | `xwork_policy_options_init`, `xwork_approval_eval_input_init`, `xwork_approval_decision_init`,
 
-## 镙 manuscript results Jiangzhiwei
+## Core Strategy
 
-| Yingqi/瀵 silicon thin | Xuan Cunmu |
+| Field/Object | Description |
 | --- | --- |
-| `eAutoApproveRiskLimit` |
-|
-|
-|
-| `xwork_approval_decision` |
-| `xwork_approval_request` | run
+| `eAutoApproveRiskLimit` | Highest risk level allowed for automatic approval. |
+| `psNetworkAllowHostPatterns` | network host allowlist. Both arrays and strings are borrowed. |
+| `psNetworkDenyHostPatterns` | Network host denylist, takes precedence over allowlist. |
+| `bDenyNetworkByDefault` | None Whether to deny network access by default when allowlist is hit. |
+| `xwork_approval_decision` | Allow/require approval/risk/scope/reason after evaluation. |
+| |
 
-## gallium€chain勋戋戁诺勫寯
+## Ownership Rules
 
-- policy options runtime/control-plane options allow/deny pattern allow/deny pattern borrowed - eval input tool id銆乻cope銆乺eason銆乁RL銆乭ost 绛夊瓧绗︿cover閮 mustard槸 borrowed銆?-decision涓殑瀛楃涓fork寚閖戦run昐佹枃 chain枨 input-owned override - approval request init涓嶅垎閰制祫婧愶禂镆ヨ/锷纺水尰楀埌鄄?request 鎷ユ恁 deep-copy 瀛楁锛屼小鐢ㄥ恗湇呴』 reset銆?
+- Policy options will be copied by value to options such as runtime/control-plane, but allow/deny pattern arrays and strings are borrowed.
+- Strings such as tool id, scope, reason, URL, and host in eval input are all borrowed.
+- Strings in decision point to static text or input-owned override text; the caller should make a copy if long-term preservation is required.
+- Approval request init does not allocate resources; the request obtained from query/load has a deep-copy field and must be reset after use.
+
 ---
 
 ### xwork_policy_options_init
 
-What are the policy options?
-**锷绻兘锛?*
+Initialize policy options.
 
-鐢ㄤ簬鍒涘笶runtime銆乧ontrol plane 鴴揫嫭磔嬭瘎浼栠璁璁秠稿瀀夏绛栫暐抆?
-**What's the point?*
+**Function:**
+
+Used to set the default security policy before creating a runtime, control plane, or independent assessment.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_policy_options_init(xwork_policy_options *pOptions);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions` is not the same as `NULL` is `NULL` is the policy?
-**杩斿洴 alkali fine**
+- `pOptions`: Output parameter. Can be `NULL`; write default policy when not `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-鍑 must掟涓嶅垎閰嶈祫婧橩€俛llow/deny 鏁衣粍瀛楁稿 ?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- init profile init profile Hazelnuts绛栫暐昃effect掎寮€鍙戞捩捩 Hongwai锛屼笉搴旀浛浠ｄ簁鍝丶缁矚畕鍏ㄧ瓥鐣ャ€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Functions do not allocate resources. The allow/deny array field defaults to `NULL`, which is subsequently provided by the caller and maintained in the life cycle.
+
+**Additional Note:**
+
+- It is recommended to init first, then apply the profile, and then cover according to product security requirements.
+- The default policy is appropriate for the development baseline and should not replace the final product security policy.
+
+**Example code:**
 
 ```c
 #include "xwork.h"
@@ -65,7 +79,7 @@ int main(void) {
 }
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_policy_evaluate_approval`
 - `xwork_policy_evaluate_network_access`
@@ -74,29 +88,35 @@ int main(void) {
 
 ### xwork_approval_eval_input_init
 
-鍒濆鍖栧gallium silicon阎浼mix緷鍏ャ€?
-**锷绻兘锛?*
+Initialize approval evaluation input.
 
-What is the side effect?
-**What's the point?*
+**Function:**
+
+Used to describe the approval context of a tool, remote task, or side effect.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_approval_eval_input_init(xwork_approval_eval_input *pInput);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pInput` is not the same as the original version.鍜?risk銆?
-**杩斿洴 alkali fine**
+- `pInput`: Output parameter. Can be `NULL`; writes default autonomy, approval mode, side effect and risk when not `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the value of the product?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- Risk override side-effect side-effect
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Functions do not allocate resources. String fields in the input are borrowed from the caller.
+
+**Additional Note:**
+
+- The risk override field can provide a more accurate description of risk than the default side-effect mapping.
+
+**Example code:**
 
 ```c
 xwork_approval_eval_input input;
@@ -104,7 +124,7 @@ xwork_approval_eval_input_init(&input);
 input.eSideEffect = XWORK_SIDE_EFFECT_PROCESS_EXEC;
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_policy_evaluate_approval`
 
@@ -112,36 +132,42 @@ input.eSideEffect = XWORK_SIDE_EFFECT_PROCESS_EXEC;
 
 ### xwork_approval_decision_init
 
-鍒濆鍖栧gallium silicon 阎浼貨鋋濿€?
-**锷绻兘锛?*
+Initialize approval evaluation results.
 
-鍑嗗鎺ユ湕`xwork_policy_evaluate_approval`鄄勮緭鍑heng€?
-**What's the point?*
+**Function:**
+
+Prepare to receive output from `xwork_policy_evaluate_approval`.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_approval_decision_init(xwork_approval_decision *pDecision);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pDecision` is not the same as `NULL` The rudder and the board are stamped with furrows and stilts?
-**杩斿洴 alkali fine**
+- `pDecision`: Output parameter. Can be `NULL`; cleared and written to default risk level when not `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-鍑簟暟涓嶅垎閰制祫婧橩€俤ecision 瀛楃涓铋negative borrowed銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- decision 涓嶉涶肖?reset銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Functions do not allocate resources. The decision string is borrowed.
+
+**Additional Note:**
+
+- decision does not require reset.
+
+**Example code:**
 
 ```c
 xwork_approval_decision decision;
 xwork_approval_decision_init(&decision);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_policy_evaluate_approval`
 
@@ -149,11 +175,13 @@ xwork_approval_decision_init(&decision);
 
 ### xwork_network_policy_eval_input_init
 
-鍒濆鍖栫embroidery缁MI瓥鐣ヨ瘎浼mix緭鍏ャ€?
-**锷绻兘锛?*
+Initialize network policy evaluation input.
 
-鐢ㄤ簬鎻忚凯涓€娆＄Embroidery缁滆闂姹傜殑 URL/host 涓娄笅鏂囥€?
-**What's the point?*
+**Function:**
+
+The URL/host context used to describe a network access request.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_network_policy_eval_input_init(
@@ -161,19 +189,23 @@ XWORK_API void xwork_network_policy_eval_input_init(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pInput` is not the same as `NULL` is `NULL` is it?
-**杩斿洴 alkali fine**
+- `pInput`: Output parameter. Can be `NULL`; cleared if not `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-The host is the host of the host.
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- The chain is the same as the embroidered one.
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Functions do not allocate resources. The URL and host strings are borrowed from the caller.
+
+**Additional Note:**
+
+- Assessments are usually allowed to pass when network access is not requested.
+
+**Example code:**
 
 ```c
 xwork_network_policy_eval_input input;
@@ -182,7 +214,7 @@ input.bNetworkAccessRequested = true;
 input.sHost = "api.example.com";
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_policy_evaluate_network_access`
 
@@ -190,11 +222,13 @@ input.sHost = "api.example.com";
 
 ### xwork_network_policy_decision_init
 
-鍒濆鍖栫embroidery缁簥铥鐣ヨ瘎浼貨鋋溿€?
-**锷绻兘锛?*
+Initialize network policy evaluation results.
 
-鍑嗗鎺ユ湕`xwork_policy_evaluate_network_access`鄄勮緭鍑heng€?
-**What's the point?*
+**Function:**
+
+Prepare to receive output from `xwork_policy_evaluate_network_access`.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_network_policy_decision_init(
@@ -202,26 +236,30 @@ XWORK_API void xwork_network_policy_decision_init(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pDecision` is not the same as `NULL` The rudder and the board are stamped with furrows and stilts?
-**杩斿洴 alkali fine**
+- `pDecision`: Output parameter. Can be `NULL`; cleared and written to default risk level when not `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-鍑簟暟涓嶅垎閰制祫婧橩€俤ecision 瀛楃涓铋negative borrowed銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- decision 涓嶉涶肖?reset銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Functions do not allocate resources. The decision string is borrowed.
+
+**Additional Note:**
+
+- decision does not require reset.
+
+**Example code:**
 
 ```c
 xwork_network_policy_decision decision;
 xwork_network_policy_decision_init(&decision);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_policy_evaluate_network_access`
 
@@ -229,29 +267,35 @@ xwork_network_policy_decision_init(&decision);
 
 ### xwork_approval_request_init
 
-Is there an approval request?
-**锷绻兘锛?*
+Initialize approval request.
 
-鍑嗗鎺ユ敹 run 鎴?persistence 杩洿洴鄄勫gallium silicon姹 umbrella€?
-**What's the point?*
+**Function:**
+
+Prepare to receive approval requests returned by run or persistence.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_approval_request_init(xwork_approval_request *pRequest);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pRequest` `NULL` `NULL`
-**杩斿洴 alkali fine**
+- `pRequest`: Output parameter. Can be `NULL`; cleared if not `NULL` and set default risk/status.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-鍑 must掟涓嶅垎閰嶈祫婧愩€ effect～鍏呭怗镄?request 鎷ユ湁 deep-copy 瀛楁锛屼蕉鐢ㄥ悗璋卂捤 `xwork_approval_request_reset`銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- request 鏄璁″璞★纴阃氩father丞弚缁?UI/CLI閖庣敱浜уfan璋卂椤 `xwork_run_submit_approval`銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Functions do not allocate resources. The filled request has a deep-copy field, which is used to call `xwork_approval_request_reset`.
+
+**Additional Note:**
+
+- request is an audit object, usually exposed to UI/CLI and then called by the product `xwork_run_submit_approval`.
+
+**Example code:**
 
 ```c
 xwork_approval_request request;
@@ -259,7 +303,7 @@ xwork_approval_request_init(&request);
 xwork_approval_request_reset(&request);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_run_get_last_approval_request`
 - `xwork_approval_request_reset`
@@ -268,35 +312,41 @@ xwork_approval_request_reset(&request);
 
 ### xwork_approval_request_reset
 
-Read the request? Approval request?
-**锷绻兘锛?*
+Release and reset the approval request.
 
-Read the request 涓殑 id銆乺un id銆乼ool id銆乺eason銆乻cope銆乤ction summary 绛?deep-copy 瀛楁銆?
-**What's the point?*
+**Function:**
+
+Release the id, run id, tool id, reason, scope, action summary and other deep-copy fields in the request.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_approval_request_reset(xwork_approval_request *pRequest);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pRequest`?`NULL`?
-**杩斿洴 alkali fine**
+- `pRequest`: input/output parameters. Can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read the request to read the request.
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-- reset 钖?request 锲炲韌 init Zhong Ruo€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the copy of the string owned by request.
+
+**Additional Note:**
+
+- After reset, the request returns to the init state.
+
+**Example code:**
 
 ```c
 xwork_approval_request_reset(&request);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_approval_request_init`
 
@@ -304,11 +354,13 @@ xwork_approval_request_reset(&request);
 
 ### xwork_policy_evaluate_approval
 
-What is the side effect?
-**锷绻兘锛?*
+Evaluate whether a side effect is allowed or requires approval.
 
-The standard is the autonomy, the pproval mode, the ide effect, the isk override and the auto-approve limit.
-**What's the point?*
+**Function:**
+
+Generate unified approval decisions based on autonomy, approval mode, side effect, risk override and auto-approve limit.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_policy_evaluate_approval(
@@ -318,19 +370,28 @@ XWORK_API xwork_status xwork_policy_evaluate_approval(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pInput` `NULL`?
-**杩斿洴 alkali fine**
+- `pPolicy`: input parameters. Can be `NULL`; `NULL` uses the default policy.
+- `pInput`: input parameters. Must not be `NULL`.
+- `pDecision`: Output parameter. Must not be `NULL`.
 
--
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-decision 瀛楃涓cruci槸 borrowed锛涘嚱鏁issued笉鍒嗛狠狠在eh?
-**Chen ュ Pang Xuan cun 槑?*
+- `XWORK_OK`: Evaluation successful.
+- `XWORK_ERROR_INVALID_ARGUMENT`: input or decision is empty, or the enumeration value is invalid.
 
-- `XWORK_APPROVAL_ALWAYS` - `XWORK_APPROVAL_NEVER` `XWORK_APPROVAL_DEFAULT`鍜岄闄╅槇駇瞞鏂€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The decision string is borrowed; the function does not allocate resources that need to be released by the caller.
+
+**Additional Note:**
+
+- `XWORK_APPROVAL_ALWAYS` will force approval.
+- `XWORK_APPROVAL_NEVER` will skip approval, but additional gates can still be added to the product layer.
+- `XWORK_APPROVAL_DEFAULT` will combine autonomy, side effect and risk threshold judgment.
+
+**Example code:**
 
 ```c
 xwork_policy_options policy;
@@ -346,7 +407,7 @@ input.eSideEffect = XWORK_SIDE_EFFECT_WORKSPACE_WRITE;
 (void)xwork_policy_evaluate_approval(&policy, &input, &decision);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_run_submit_approval`
 - `xwork_policy_evaluate_network_access`
@@ -355,11 +416,13 @@ input.eSideEffect = XWORK_SIDE_EFFECT_WORKSPACE_WRITE;
 
 ### xwork_policy_evaluate_network_access
 
-璇勪和涓€娆＄Embroidered缁细闂槸钖﹀玑璁做€?
-**锷绻兘锛?*
+Evaluate whether a network access is allowed.
 
-镙尧偁 network requested镙囧综合銆乁RL/host銆乨enylist銆乤llowlist鍜岄粯璁ゆ嫆缁濈瓥飣ョ拓掴愮embroidery缁细闂喅笛栥€?
-**What's the point?*
+**Function:**
+
+Generate network access decisions based on network requested flag, URL/host, denylist, allowlist, and default deny policy.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_policy_evaluate_network_access(
@@ -369,19 +432,28 @@ XWORK_API xwork_status xwork_policy_evaluate_network_access(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pInput` `NULL`?
-**杩斿洴 alkali fine**
+- `pPolicy`: input parameters. Can be `NULL`; `NULL` uses the default policy.
+- `pInput`: input parameters. Must not be `NULL`.
+- `pDecision`: Output parameter. Must not be `NULL`.
 
--
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-decision 瀛楃涓cruci槸 borrowed锛涘嚱鏁issued笉鍒嗛狠狠在eh?
-**Chen ュ Pang Xuan cun 槑?*
+- `XWORK_OK`: Evaluation successful.
+- `XWORK_ERROR_INVALID_ARGUMENT`: input or decision is empty.
 
-- deny patterns 浼华厛浜?allow patterns銆?-閰浰江 allow patterns閖庯纴host雇呴　 forging ringfu allowlist銆?-chain利缃?allow patterns镞锺彇鍐成鰬 `bDenyNetworkByDefault`銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The decision string is borrowed; the function does not allocate resources that need to be released by the caller.
+
+**Additional Note:**
+
+- deny patterns take precedence over allow patterns.
+- After configuring allow patterns, the host must match the allowlist.
+- Depends on `bDenyNetworkByDefault` when allow patterns is not configured.
+
+**Example code:**
 
 ```c
 xwork_network_policy_eval_input input;
@@ -395,24 +467,29 @@ input.sHost = "api.example.com";
 (void)xwork_policy_evaluate_network_access(NULL, &input, &decision);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_policy_options_init`
 - `xwork_policy_evaluate_approval`
 
-## 阌澾澶拭把
+## Error handling
 
-- `XWORK_ERROR_NOT_FOUND` `XWORK_ERROR_NOT_FOUND` `XWORK_ERROR_NOT_FOUND`
-## 鎭㈠杈Guihu
+- `XWORK_ERROR_INVALID_ARGUMENT`: Invalid policy/input/decision pointer or invalid enum.
+- `XWORK_ERROR_INVALID_STATE`: The current status of run cannot be submitted for approval.
+- `XWORK_ERROR_NOT_FOUND`: There are no approval requests to submit.
 
-approval request run snapshot/persistence run snapshot/persistence callback Zhongduo€and€佤掴鴴莴璇濆拰琐﹀佛鉉冮檺涓嶅睘浜?xwork 鎭㈠锣娨洿銆?
-## 绾cross▼杈爈晫
+## Restore boundaries
 
-policy evaluate鍑 mustard 暓涓Brand 退 Rose 叏灞€Zhong rudder €侊绂骞彂彂瀊叏鍙栧姜浜庤皟Policy/input storage?
-## The manuscript is 叧鏂囨.
+The approval request can be restored as an audit object by running snapshot/persistence. Policy callbacks, UI states, user sessions, and account permissions are not within the scope of xwork recovery.
+
+## Thread boundaries
+
+The policy evaluate function does not modify global state; concurrency safety depends on whether the caller concurrently modifies the incoming policy/input storage.
+
+## Related documents
 
 - [Tool API](api-tools.md)
 - [Run API](api-run.md)
 - [Orchestrator API](api-orchestrator.md)
-- [宸ュ叿銆佸鎵逛笌 artifact](../guide/tool-approval-artifact-intro.md)
-- [鍐呴儴 policy contract](../../dev/docs/POLICY_APPROVAL.md)
+- [Tools, Approval, and Artifacts](../guide/tool-approval-artifact-intro.md)
+- [Internal policy contract](../../dev/docs/POLICY_APPROVAL.md)

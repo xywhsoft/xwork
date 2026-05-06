@@ -1,20 +1,26 @@
 # Remote Worker API
 
-Remote Worker API, control plane, orker registry, ease, assignment queue, emote task, rtifact blob chunk, output chunk, output chunk, and output chunk. Worker Galliumц锛屽铓铓锣椤彲瀹¤銆丸彲鎭㈠鄄勪锷锷＄姸镐 and €?
-##妯″桡杈戈晫
+The Remote Worker API provides public objects for control plane, worker registry, lease, assignment queue, remote task, artifact blob chunk, and output chunk. It is used to offload agent work to local or remote workers for execution, while retaining auditable and recoverable task status.
 
-- `XWORK_REMOTE_TRANSPORT_IN_PROCESS` blob streaming鐢卞涓毲焄鐜综合€?- control plane 涓嶆彃姝?OS 杩涚▼锛屼篃涓嶆仮澶?live terminal/process handle锛泂napshot锭㈠镞?assigned/running task Orphaned control plane - control plane worker worker mutation control unit tart/stop/register/heartbeat/enqueue/claim/complete/fail/cancel/upload/query `1`?`XWORK_REMOTE_PROTOCOL_VERSION_CURRENT`?
-## gallium€chain夋戈绾﹀畾
+## Module boundaries
 
-| Silicon thin | Gallium chain |
+- `XWORK_REMOTE_TRANSPORT_IN_PROCESS` means the control plane and worker interact through in-memory APIs in the same process.
+- `XWORK_REMOTE_TRANSPORT_HTTP_BOUNDARY` only defines decoded control plane boundaries; networking, authentication, tenant isolation, retries and blob streaming are implemented by the host.
+- The control plane does not kill OS processes or restore live terminal/process handles; assigned/running tasks become orphaned during snapshot recovery.
+- Control plane and workers do not provide concurrent mutation container semantics; start/stop/register/heartbeat/enqueue/claim/complete/fail/cancel/upload/query should be serialized by the caller.
+- The current remote protocol version is `1`，corresponding to `XWORK_REMOTE_PROTOCOL_VERSION_CURRENT`。
+
+## Ownership agreement
+
+| Object | Ownership |
 | --- | --- |
-|
-|
-| options/result/upload/chunk 枈揆叆 |
-| summary/list/snapshot 枈揿吭 | 枈描缁洴瀯玷ユ恁 deep-copy 鍐呭锛屼婢ㄥ尮閰?
-| assignment |
+| `xwork_control_plane_create` | Return owned plane, use `xwork_control_plane_destroy` to release. |
+| `xwork_control_plane_register_worker` | The worker is owned by plane and returns the borrowed pointer. |
+| options/result/upload/chunk input | Copy the strings and arrays that need to be retained when calling the API; the runtime pointer is borrowed. |
+| summary/list/snapshot output | The output structure has deep-copy contents, freed using matching `*_reset`. |
+| assignment output | The output structure has deep-copy fields, released using `xwork_remote_task_assignment_reset`. |
 
-## 鏏毛瀷仙人▼
+## Typical process
 
 ```text
 xwork_control_plane_options_init
@@ -30,33 +36,39 @@ xwork_control_plane_get_snapshot
 xwork_control_plane_destroy
 ```
 
-## 鍒濆鍖栦笌笌笃惁API
+## Initialization and release API
 
 ### xwork_control_plane_options_init
 
-What is the control plane options?
-**锷绻兘锛?*
+Initialize control plane options.
 
-Control plane control plane
-**What's the point?*
+**Function:**
+
+Set control plane creation parameter default values.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_control_plane_options_init(xwork_control_plane_options *pOptions);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions`?`NULL`?
-**杩斿洴 alkali fine**
+- `pOptions`: options to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`sPlaneId`
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The default transport is in-process and the protocol version is the current version. A non-empty `sPlaneId` must be set before creating a plane.
+
+**Example code:**
 
 ```c
 xwork_control_plane_options opts;
@@ -65,7 +77,7 @@ opts.sPlaneId = "plane-1";
 opts.pRuntime = runtime;
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_create`
 
@@ -73,29 +85,35 @@ opts.pRuntime = runtime;
 
 ### xwork_worker_options_init
 
-What are the worker options?
-**锷绻兘锛?*
+Initialize worker options.
 
-卑嗗 worker 剉ㄥ唽卙四暟銆?
-**What's the point?*
+**Function:**
+
+Prepare worker registration parameters.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_worker_options_init(xwork_worker_options *pOptions);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions`?`NULL`?
-**杩斿洴 alkali fine**
+- `pOptions`: options to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-The protocol version of the protocol version is the runtime. The plane runtime is the worker. The plane runtime is the worker.
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The default protocol version is the current version. `pRuntime` overrides the plane runtime; otherwise the worker uses the plane runtime.
+
+**Example code:**
 
 ```c
 xwork_worker_options opts;
@@ -104,7 +122,7 @@ opts.sWorkerId = "worker-1";
 opts.pRuntime = runtime;
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_register_worker`
 
@@ -112,36 +130,42 @@ opts.pRuntime = runtime;
 
 ### xwork_worker_summary_init
 
-What is the worker summary?
-**锷绻兘锛?*
+Initialize worker summary.
 
-鍑嗗 worker 镆ヨ缁撴灉缁撴瀯銆?
-**What's the point?*
+**Function:**
+
+Prepare worker query result structure.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_worker_summary_init(xwork_worker_summary *pSummary);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSummary`: summary to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`XWORK_WORKER_REGISTERED`?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The default state is `XWORK_WORKER_REGISTERED`.
+
+**Example code:**
 
 ```c
 xwork_worker_summary summary;
 xwork_worker_summary_init(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_list_workers`
 
@@ -149,35 +173,41 @@ xwork_worker_summary_init(&summary);
 
 ### xwork_worker_summary_reset
 
-Read the worker summary?
-**锷绻兘锛?*
+Release worker summary.
 
-Read the worker id, the worker ID, the endpoint, the deep-copy file, and the worker ID.
-**What's the point?*
+**Function:**
+
+Release deep-copy strings such as worker id, display name, endpoint, etc.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_worker_summary_reset(xwork_worker_summary *pSummary);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSummary`: summary to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read婃斁捍呴儴璧勬簮锛屼笉Read僃斁缁撴瀯钴湰韬€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-咋卂敤钖庢仮澶澶brandnegative init Zhong Ruo€and€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases internal resources but does not release the structure itself.
+
+**Additional Note:**
+
+Return to init state after calling.
+
+**Example code:**
 
 ```c
 xwork_worker_summary_reset(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_worker_summary_init`
 
@@ -185,36 +215,42 @@ xwork_worker_summary_reset(&summary);
 
 ### xwork_worker_summary_list_init
 
-鍒濆鍖?worker summary 鍒楄〃銆?
-**锷绻兘锛?*
+Initialize the worker summary list.
 
-Worker registry
-**What's the point?*
+**Function:**
+
+Prepare an empty list to receive worker registry query results.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_worker_summary_list_init(xwork_worker_summary_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?`NULL`?
-**杩斿洴 alkali fine**
+- `pList`: List to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-咋卂椤 `xwork_control_plane_list_workers` 铓嶅簲鍒捒濆鍖栥€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+It should be initialized before calling `xwork_control_plane_list_workers`.
+
+**Example code:**
 
 ```c
 xwork_worker_summary_list list;
 xwork_worker_summary_list_init(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_list_workers`
 
@@ -222,35 +258,41 @@ xwork_worker_summary_list_init(&list);
 
 ### xwork_worker_summary_list_reset
 
-荒婃恁 worker summary 鍒楄〃銆?
-**锷绻兘锛?*
+Release the worker summary list.
 
-Read the chain?worker summary 鍜屾暟缁卩€?
-**What's the point?*
+**Function:**
+
+Free all worker summary and arrays in the list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_worker_summary_list_reset(xwork_worker_summary_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?
-**杩斿洴 alkali fine**
+- `pList`: List to free; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read婃斁鍒楄〃鎷ユ湁镄勫崴瀹广€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-Reading婃斁钖庡垪曛ㄥ彲澶敤抆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the contents owned by the list.
+
+**Additional Note:**
+
+The list can be reused after it is released.
+
+**Example code:**
 
 ```c
 xwork_worker_summary_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_worker_summary_reset`
 
@@ -258,36 +300,42 @@ xwork_worker_summary_list_reset(&list);
 
 ### xwork_worker_snapshot_init
 
-What is the worker snapshot?
-**锷绻兘锛?*
+Initialize worker snapshot.
 
-What is the worker snapshot?worker registry?
-**What's the point?*
+**Function:**
+
+Prepare worker snapshot for restoring worker registry.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_worker_snapshot_init(xwork_worker_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-What is the protocol version of the protocol version?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The default protocol version is the current version, and the default status is registered.
+
+**Example code:**
 
 ```c
 xwork_worker_snapshot snapshot;
 xwork_worker_snapshot_init(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_get_snapshot`
 
@@ -295,35 +343,41 @@ xwork_worker_snapshot_init(&snapshot);
 
 ### xwork_worker_snapshot_reset
 
-Read the worker snapshot?
-**锷绻兘锛?*
+Release the worker snapshot.
 
-Read the worker snapshot.
-**What's the point?*
+**Function:**
+
+Release the string, capability array and label array in the worker snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_worker_snapshot_reset(xwork_worker_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Yue僃斁鍐呴儴 deep-copy 璧勬簮銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_control_plane_create_from_snapshot`
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Release internal deep-copy resources.
+
+**Additional Note:**
+
+`xwork_control_plane_create_from_snapshot` does not take over snapshot ownership.
+
+**Example code:**
 
 ```c
 xwork_worker_snapshot_reset(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_worker_snapshot_init`
 
@@ -331,36 +385,42 @@ xwork_worker_snapshot_reset(&snapshot);
 
 ### xwork_worker_snapshot_list_init
 
-鍒濆鍖?worker snapshot 鍒楄〃銆?
-**锷绻兘锛?*
+Initialize the worker snapshot list.
 
-What is the worker snapshot list?
-**What's the point?*
+**Function:**
+
+Prepare an empty worker snapshot list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_worker_snapshot_list_init(xwork_worker_snapshot_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?`NULL`?
-**杩斿洴 alkali fine**
+- `pList`: List to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_control_plane_snapshot.tWorkers` `xwork_control_plane_snapshot.tWorkers`?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+This list is typically used as `xwork_control_plane_snapshot.tWorkers`.
+
+**Example code:**
 
 ```c
 xwork_worker_snapshot_list list;
 xwork_worker_snapshot_list_init(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_worker_snapshot_list_reset`
 
@@ -368,35 +428,41 @@ xwork_worker_snapshot_list_init(&list);
 
 ### xwork_worker_snapshot_list_reset
 
-Yue僃斁 worker snapshot 鍒楄〃銆?
-**锷绻兘锛?*
+Release the worker snapshot list.
 
-Read this article
-**What's the point?*
+**Function:**
+
+Free each worker snapshot and array in the list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_worker_snapshot_list_reset(xwork_worker_snapshot_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?
-**杩斿洴 alkali fine**
+- `pList`: List to free; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read婃斁鍒楄〃鎷ユ湁镄勫崴瀹广€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_control_plane_snapshot_reset` 浼氶棿掺ヨ皟鐢ㄥ畠銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the contents owned by the list.
+
+**Additional Note:**
+
+`xwork_control_plane_snapshot_reset` calls it indirectly.
+
+**Example code:**
 
 ```c
 xwork_worker_snapshot_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_snapshot_reset`
 
@@ -404,29 +470,35 @@ xwork_worker_snapshot_list_reset(&list);
 
 ### xwork_remote_task_options_init
 
-What are the remote task options?
-**锷绻兘锛?*
+Initialize remote task options.
 
-Remote task?
-**What's the point?*
+**Function:**
+
+Prepare a remote task that can be enqueued.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_task_options_init(xwork_remote_task_options *pOptions);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions`?`NULL`?
-**杩斿洴 alkali fine**
+- `pOptions`: options to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-Task kind task type host tool host service process process task id task id request JSON ost tool operation id?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The default task kind is host tool, and the default host service is process. The task id and request JSON must be set before joining the queue; the host tool task must also set the operation id.
+
+**Example code:**
 
 ```c
 xwork_remote_task_options opts;
@@ -436,7 +508,7 @@ opts.sOperationId = XWORK_HOST_PROCESS_EXEC;
 opts.sRequestJson = "{\"cmd\":\"echo hi\"}";
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_enqueue_task`
 
@@ -444,36 +516,42 @@ opts.sRequestJson = "{\"cmd\":\"echo hi\"}";
 
 ### xwork_remote_task_summary_init
 
-What is the function of remote task summary?
-**锷绻兘锛?*
+Initialize remote task summary.
 
-What is the remote task?
-**What's the point?*
+**Function:**
+
+Prepare the remote task query result structure.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_task_summary_init(xwork_remote_task_summary *pSummary);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSummary`: summary to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-The task is kind and the host tool is queued?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The default task kind is host tool, and the default status is queued.
+
+**Example code:**
 
 ```c
 xwork_remote_task_summary summary;
 xwork_remote_task_summary_init(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_get_task_summary`
 
@@ -481,35 +559,41 @@ xwork_remote_task_summary_init(&summary);
 
 ### xwork_remote_task_summary_reset
 
-Read the remote task summary?
-**锷绻兘锛?*
+Release remote task summary.
 
-Read the task summary, the task summary is the output chunk, and the output chunk is the output chunk.
-**What's the point?*
+**Function:**
+
+Release the string, artifact summary array, and output chunk array in the task summary.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_task_summary_reset(xwork_remote_task_summary *pSummary);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSummary`: summary to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Yue僃恁 summary 鍍呴儴鎷ユ湁璧勬簮銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-阃傜敤浜?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the resources owned by summary internally.
+
+**Additional Note:**
+
+Applies to results of `get_task_summary` and `list_tasks` fills.
+
+**Example code:**
 
 ```c
 xwork_remote_task_summary_reset(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_remote_task_summary_init`
 
@@ -517,36 +601,42 @@ xwork_remote_task_summary_reset(&summary);
 
 ### xwork_remote_task_summary_list_init
 
-鍒濆鍖?remote task summary鍒楄〃銆?
-**锷绻兘锛?*
+Initialize the remote task summary list.
 
-鍑嗗绌?task summary list銆?
-**What's the point?*
+**Function:**
+
+Prepare an empty task summary list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_task_summary_list_init(xwork_remote_task_summary_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?`NULL`?
-**杩斿洴 alkali fine**
+- `pList`: List to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-咋卂椤 `xwork_control_plane_list_tasks` 铓嶅簲鍒捒濆鍖栥€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+It should be initialized before calling `xwork_control_plane_list_tasks`.
+
+**Example code:**
 
 ```c
 xwork_remote_task_summary_list list;
 xwork_remote_task_summary_list_init(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_list_tasks`
 
@@ -554,35 +644,41 @@ xwork_remote_task_summary_list_init(&list);
 
 ### xwork_remote_task_summary_list_reset
 
-Read the remote task summary 卒楄〃銆?
-**锷绻兘锛?*
+Release the remote task summary list.
 
-Read the link?task summary 鍜屾暟缁卩€?
-**What's the point?*
+**Function:**
+
+Release all task summaries and arrays in the list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_task_summary_list_reset(xwork_remote_task_summary_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?
-**杩斿洴 alkali fine**
+- `pList`: List to free; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read婃斁鍒楄〃鎷ユ湁镄勫崴瀹广€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-Reading婃斁钖庡垪曛ㄥ彲澶敤抆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the contents owned by the list.
+
+**Additional Note:**
+
+The list can be reused after it is released.
+
+**Example code:**
 
 ```c
 xwork_remote_task_summary_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_remote_task_summary_reset`
 
@@ -590,36 +686,42 @@ xwork_remote_task_summary_list_reset(&list);
 
 ### xwork_remote_task_snapshot_init
 
-What is the problem?remote task snapshot?
-**锷绻兘锛?*
+Initialize remote task snapshot.
 
-鍑嗗 task snapshot锛叀敤浜?control plane鎸䷷箙鍖栧拋鎭㈠銆?
-**What's the point?*
+**Function:**
+
+Prepare task snapshot for control plane persistence and recovery.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_task_snapshot_init(xwork_remote_task_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-What is the protocol version of the protocol?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The default protocol version is the current version, and the default status is queued.
+
+**Example code:**
 
 ```c
 xwork_remote_task_snapshot snapshot;
 xwork_remote_task_snapshot_init(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_get_snapshot`
 
@@ -627,35 +729,41 @@ xwork_remote_task_snapshot_init(&snapshot);
 
 ### xwork_remote_task_snapshot_reset
 
-How to read remote task snapshot?
-**锷绻兘锛?*
+Release the remote task snapshot.
 
-Read the task snapshot, the output chunk, and the output chunk.
-**What's the point?*
+**Function:**
+
+Release the string, artifact summary array and output chunk array in the task snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_task_snapshot_reset(xwork_remote_task_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read the snapshot 卍呴儴鎷ユ湁璧勬簮銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-What is the API API for?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Release resources owned by the snapshot.
+
+**Additional Note:**
+
+The recovery API does not take over the snapshot.
+
+**Example code:**
 
 ```c
 xwork_remote_task_snapshot_reset(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_remote_task_snapshot_init`
 
@@ -663,36 +771,42 @@ xwork_remote_task_snapshot_reset(&snapshot);
 
 ### xwork_remote_task_snapshot_list_init
 
-鍒濆鍖?remote task snapshot 鍒楄〃銆?
-**锷绻兘锛?*
+Initialize the remote task snapshot list.
 
-What is the task snapshot list?
-**What's the point?*
+**Function:**
+
+Prepare an empty task snapshot list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_task_snapshot_list_init(xwork_remote_task_snapshot_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?`NULL`?
-**杩斿洴 alkali fine**
+- `pList`: List to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_control_plane_snapshot.tTasks` `xwork_control_plane_snapshot.tTasks`?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+This list is typically used as `xwork_control_plane_snapshot.tTasks`.
+
+**Example code:**
 
 ```c
 xwork_remote_task_snapshot_list list;
 xwork_remote_task_snapshot_list_init(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_remote_task_snapshot_list_reset`
 
@@ -700,35 +814,41 @@ xwork_remote_task_snapshot_list_init(&list);
 
 ### xwork_remote_task_snapshot_list_reset
 
-Read remote task snapshot 卒楄〃銆?
-**锷绻兘锛?*
+Release the remote task snapshot list.
 
-Read the link?remote task snapshot 鍜屾暟缁卩€?
-**What's the point?*
+**Function:**
+
+Release all remote task snapshots and arrays in the list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_task_snapshot_list_reset(xwork_remote_task_snapshot_list *pList);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?
-**杩斿洴 alkali fine**
+- `pList`: List to free; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read婃斁鍒楄〃鎷ユ湁镄勫崴瀹广€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_control_plane_snapshot_reset` 浼氶棿掺ヨ皟鐢ㄥ畠銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the contents owned by the list.
+
+**Additional Note:**
+
+`xwork_control_plane_snapshot_reset` calls it indirectly.
+
+**Example code:**
 
 ```c
 xwork_remote_task_snapshot_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_snapshot_reset`
 
@@ -736,36 +856,42 @@ xwork_remote_task_snapshot_list_reset(&list);
 
 ### xwork_remote_task_assignment_init
 
-What is the remote task assignment?
-**锷绻兘锛?*
+Initialize remote task assignment.
 
-Worker claim task assignment assignment?
-**What's the point?*
+**Function:**
+
+Prepare the assignment output structure after the worker claim task.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_task_assignment_init(xwork_remote_task_assignment *pAssignment);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pAssignment`?`NULL`?
-**杩斿洴 alkali fine**
+- `pAssignment`: The assignment to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-咋卂椤 `xwork_control_plane_claim_task` 铓嶅簲鍒捒濆鍖栥€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+It should be initialized before calling `xwork_control_plane_claim_task`.
+
+**Example code:**
 
 ```c
 xwork_remote_task_assignment assignment;
 xwork_remote_task_assignment_init(&assignment);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_claim_task`
 
@@ -773,35 +899,41 @@ xwork_remote_task_assignment_init(&assignment);
 
 ### xwork_remote_task_assignment_reset
 
-Read the remote task assignment?
-**锷绻兘锛?*
+Release remote task assignment.
 
-Read assignment assignment task task id signaturessignment id orker id request JSON request?
-**What's the point?*
+**Function:**
+
+Release the task id, assignment id, worker id, request JSON and other strings in the assignment.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_task_assignment_reset(xwork_remote_task_assignment *pAssignment);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pAssignment`?`NULL`?
-**杩斿洴 alkali fine**
+- `pAssignment`: The assignment to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read assignment 卍呴儴鎷ユ湁璧勬簮銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-Worker
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases resources owned internally by the assignment.
+
+**Additional Note:**
+
+The worker should still reset the assignment output after completing the task.
+
+**Example code:**
 
 ```c
 xwork_remote_task_assignment_reset(&assignment);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_remote_task_assignment_init`
 
@@ -809,29 +941,35 @@ xwork_remote_task_assignment_reset(&assignment);
 
 ### xwork_remote_task_result_init
 
-What is the problem?remote task result?
-**锷绻兘锛?*
+Initialize remote task result.
 
-Worker
-**What's the point?*
+**Function:**
+
+Prepare the results submitted when the worker completes the task.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_task_result_init(xwork_remote_task_result *pResult);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pResult`?`NULL`?
-**杩斿洴 alkali fine**
+- `pResult`: result to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-`complete_task` `complete_task`
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`XWORK_OK`?Protocol version ?`XWORK_OK`?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated; what needs to be preserved is copied when `complete_task` is called.
+
+**Additional Note:**
+
+The default status code is `XWORK_OK`, and the default protocol version is the current version.
+
+**Example code:**
 
 ```c
 xwork_remote_task_result result;
@@ -839,7 +977,7 @@ xwork_remote_task_result_init(&result);
 result.sVisibleSummary = "done";
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_complete_task`
 
@@ -847,29 +985,35 @@ result.sVisibleSummary = "done";
 
 ### xwork_remote_output_chunk_init
 
-What is the remote output chunk?
-**锷绻兘锛?*
+Initialize remote output chunk.
 
-鍑嗗 stdout/stderr 邂囨湰 chunk 涓娄紶璇簇簰銆?
-**What's the point?*
+**Function:**
+
+Prepare stdout/stderr text chunk upload request.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_output_chunk_init(xwork_remote_output_chunk *pChunk);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pChunk`?`NULL`?
-**杩斿洴 alkali fine**
+- `pChunk`: chunk to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Control plane control plane
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-樿樿 stream 涓?stdout銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated; the control plane copies text and metadata when uploading.
+
+**Additional Note:**
+
+The default stream is stdout.
+
+**Example code:**
 
 ```c
 xwork_remote_output_chunk chunk;
@@ -879,7 +1023,7 @@ chunk.sWorkerId = "worker-1";
 chunk.sText = "line\n";
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_upload_output_chunk`
 
@@ -887,11 +1031,13 @@ chunk.sText = "line\n";
 
 ### xwork_remote_output_chunk_summary_init
 
-What is the output chunk summary?
-**锷绻兘锛?*
+Initialize output chunk summary.
 
-What is the output chunk of the output chunk?
-**What's the point?*
+**Function:**
+
+Prepare output chunk query/snapshot element.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_output_chunk_summary_init(
@@ -899,26 +1045,30 @@ XWORK_API void xwork_remote_output_chunk_summary_init(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSummary`: summary to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-樿樿 stream 涓?stdout銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The default stream is stdout.
+
+**Example code:**
 
 ```c
 xwork_remote_output_chunk_summary summary;
 xwork_remote_output_chunk_summary_init(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_remote_output_chunk_summary_reset`
 
@@ -926,11 +1076,13 @@ xwork_remote_output_chunk_summary_init(&summary);
 
 ### xwork_remote_output_chunk_summary_reset
 
-Read the output chunk summary?
-**锷绻兘锛?*
+Release output chunk summary.
 
-Read content hash 鍜屾枃chain婴瀹广€?
-**What's the point?*
+**Function:**
+
+Release the content hash and text content.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_output_chunk_summary_reset(
@@ -938,25 +1090,29 @@ XWORK_API void xwork_remote_output_chunk_summary_reset(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSummary`: summary to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read 婃斁鍐呴儴 deep-copy 瀛楃涓layer€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-Remote task summary/snapshot
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Free the internal deep-copy string.
+
+**Additional Note:**
+
+This structure is also nested within the remote task summary/snapshot.
+
+**Example code:**
 
 ```c
 xwork_remote_output_chunk_summary_reset(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_remote_output_chunk_summary_init`
 
@@ -964,11 +1120,13 @@ xwork_remote_output_chunk_summary_reset(&summary);
 
 ### xwork_remote_output_chunk_summary_list_init
 
-鍒濆鍖?output chunk summary 鍒楄〃銆?
-**锷绻兘锛?*
+Initialize the output chunk summary list.
 
-鍑嗗绌?output chunk summary list銆?
-**What's the point?*
+**Function:**
+
+Prepare an empty output chunk summary list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_output_chunk_summary_list_init(
@@ -976,26 +1134,30 @@ XWORK_API void xwork_remote_output_chunk_summary_list_init(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?`NULL`?
-**杩斿洴 alkali fine**
+- `pList`: List to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-鍒楄〃鍏卂礌阃氩father鉉ヨ嚜 task summary鴴?snapshot銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+List elements usually come from task summary or snapshot.
+
+**Example code:**
 
 ```c
 xwork_remote_output_chunk_summary_list list;
 xwork_remote_output_chunk_summary_list_init(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_remote_output_chunk_summary_list_reset`
 
@@ -1003,11 +1165,13 @@ xwork_remote_output_chunk_summary_list_init(&list);
 
 ### xwork_remote_output_chunk_summary_list_reset
 
-Read output chunk summary 卒楄〃銆?
-**锷绻兘锛?*
+Release the output chunk summary list.
 
-Read the link?output chunk summary 鍜屾暟缁卩€?
-**What's the point?*
+**Function:**
+
+Free all output chunk summaries and arrays in the list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_output_chunk_summary_list_reset(
@@ -1015,25 +1179,29 @@ XWORK_API void xwork_remote_output_chunk_summary_list_reset(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?
-**杩斿洴 alkali fine**
+- `pList`: List to free; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read婃斁鍒楄〃鎷ユ湁镄勫崴瀹广€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-Yue僃斁钖庡彽澶涶敤銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the contents owned by the list.
+
+**Additional Note:**
+
+Can be reused after release.
+
+**Example code:**
 
 ```c
 xwork_remote_output_chunk_summary_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_remote_output_chunk_summary_reset`
 
@@ -1041,11 +1209,13 @@ xwork_remote_output_chunk_summary_list_reset(&list);
 
 ### xwork_remote_blob_chunk_summary_init
 
-What is the artifact blob chunk summary?
-**锷绻兘锛?*
+Initialize artifact blob chunk summary.
 
-What is the artifact blob chunk?
-**What's the point?*
+**Function:**
+
+Prepare artifact blob chunk query result elements.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_blob_chunk_summary_init(
@@ -1053,26 +1223,30 @@ XWORK_API void xwork_remote_blob_chunk_summary_init(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSummary`: summary to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-blob block
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The blob chunk can save the binary data pointer and size; the data in the query result is held by summary.
+
+**Example code:**
 
 ```c
 xwork_remote_blob_chunk_summary summary;
 xwork_remote_blob_chunk_summary_init(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_list_artifact_blobs`
 
@@ -1080,11 +1254,13 @@ xwork_remote_blob_chunk_summary_init(&summary);
 
 ### xwork_remote_blob_chunk_summary_reset
 
-Read artifact blob chunk summary?
-**锷绻兘锛?*
+Release artifact blob chunk summary.
 
-Read the task/assignment/worker/artifact/blob/hash function.
-**What's the point?*
+**Function:**
+
+Release task/assignment/worker/artifact/blob/hash string and chunk data copies.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_blob_chunk_summary_reset(
@@ -1092,25 +1268,29 @@ XWORK_API void xwork_remote_blob_chunk_summary_reset(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSummary`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSummary`: summary to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Yue僃斁鍐呴儴 deep-copy 璧勬簮銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-咋卂敤钖?summary 锲炲韌 init Zhong Ruo€and€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Release internal deep-copy resources.
+
+**Additional Note:**
+
+After calling summary returns to init state.
+
+**Example code:**
 
 ```c
 xwork_remote_blob_chunk_summary_reset(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_remote_blob_chunk_summary_init`
 
@@ -1118,11 +1298,13 @@ xwork_remote_blob_chunk_summary_reset(&summary);
 
 ### xwork_remote_blob_chunk_summary_list_init
 
-鍒濆鍖?artifact blob chunk summary鍒楄〃銆?
-**锷绻兘锛?*
+Initialize the artifact blob chunk summary list.
 
-鍑嗗绌?blob chunk summary list銆?
-**What's the point?*
+**Function:**
+
+Prepare an empty blob chunk summary list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_blob_chunk_summary_list_init(
@@ -1130,26 +1312,30 @@ XWORK_API void xwork_remote_blob_chunk_summary_list_init(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?`NULL`?
-**杩斿洴 alkali fine**
+- `pList`: List to initialize; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-咋卂椤 `xwork_control_plane_list_artifact_blobs` 铓嶅簲鍒捒濆鍖栥€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+It should be initialized before calling `xwork_control_plane_list_artifact_blobs`.
+
+**Example code:**
 
 ```c
 xwork_remote_blob_chunk_summary_list list;
 xwork_remote_blob_chunk_summary_list_init(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_list_artifact_blobs`
 
@@ -1157,11 +1343,13 @@ xwork_remote_blob_chunk_summary_list_init(&list);
 
 ### xwork_remote_blob_chunk_summary_list_reset
 
-译婃斁 artifact blob chunk summary 鍒楄〃銆?
-**锷绻兘锛?*
+Release the artifact blob chunk summary list.
 
-Read the link? blob chunk summary 鍜屾暟缁卩€?
-**What's the point?*
+**Function:**
+
+Free all blob chunk summaries and arrays in the list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_blob_chunk_summary_list_reset(
@@ -1169,25 +1357,29 @@ XWORK_API void xwork_remote_blob_chunk_summary_list_reset(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pList`?
-**杩斿洴 alkali fine**
+- `pList`: List to free; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read婃斁鍒楄〃鎷ユ湁镄勫崴瀹广€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-`xwork_control_plane_snapshot_reset` 捼氶 spray鏀?snapshot 鍍呯殑 blob chunk 鍒楄〃銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases the contents owned by the list.
+
+**Additional Note:**
+
+`xwork_control_plane_snapshot_reset` will release the blob chunk list in the snapshot.
+
+**Example code:**
 
 ```c
 xwork_remote_blob_chunk_summary_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_remote_blob_chunk_summary_reset`
 
@@ -1195,29 +1387,35 @@ xwork_remote_blob_chunk_summary_list_reset(&list);
 
 ### xwork_remote_artifact_upload_init
 
-How to use remote artifact upload?
-**锷绻兘锛?*
+Initialize remote artifact upload.
 
-鍑嗗 artifact summary 涓?blob chunk 涓娄綶璇簇眰銆?
-**What's the point?*
+**Function:**
+
+Prepare artifact summary and blob chunk upload request.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_remote_artifact_upload_init(xwork_remote_artifact_upload *pUpload);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pUpload`?`NULL`?
-**杩斿洴 alkali fine**
+- `pUpload`: upload to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Control plane Artifact summary Chunk Chunk
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-蹇呴　璁魔典 task id銆亀orker id銆乤rtifact summary锛涙湁 chunk 铁版遁镞?`pChunkData`鍜?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated; the control plane copies artifact summary and chunk data when uploading.
+
+**Additional Note:**
+
+Task id, worker id, and artifact summary must be set; when there is chunk data, `pChunkData` and `iChunkSize` must match.
+
+**Example code:**
 
 ```c
 xwork_remote_artifact_upload upload;
@@ -1227,7 +1425,7 @@ upload.sWorkerId = "worker-1";
 upload.pArtifact = &artifactSummary;
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_upload_artifact`
 
@@ -1235,36 +1433,42 @@ upload.pArtifact = &artifactSummary;
 
 ### xwork_control_plane_snapshot_init
 
-What is the control plane snapshot?
-**锷绻兘锛?*
+Initialize control plane snapshot.
 
-Control plane snapshot control plane snapshot worker worker ask blob chunk block
-**What's the point?*
+**Function:**
+
+Prepare a control plane snapshot to save worker, task and blob chunk status.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_control_plane_snapshot_init(xwork_control_plane_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be initialized; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-涓樿 transport 涓?in-process 锛宲rotocol version 涓涋铓瓓皓皗increasing chain€?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+The default transport is in-process and the protocol version is the current version.
+
+**Example code:**
 
 ```c
 xwork_control_plane_snapshot snapshot;
 xwork_control_plane_snapshot_init(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_get_snapshot`
 
@@ -1272,49 +1476,57 @@ xwork_control_plane_snapshot_init(&snapshot);
 
 ### xwork_control_plane_snapshot_reset
 
-Read the control plane snapshot?
-**锷绻兘锛?*
+Release the control plane snapshot.
 
-View plane id, orker snapshot list, emote task snapshot list, blob chunk list, etc.
-**What's the point?*
+**Function:**
+
+Release plane id, worker snapshot list, remote task snapshot list and blob chunk list.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_control_plane_snapshot_reset(xwork_control_plane_snapshot *pSnapshot);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pSnapshot`?`NULL`?
-**杩斿洴 alkali fine**
+- `pSnapshot`: snapshot to be released; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Read the snapshot 卍呴儴鎷ユ湁璧勬簮銆?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-What is the API API for?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Release resources owned by the snapshot.
+
+**Additional Note:**
+
+The recovery API does not take over the snapshot.
+
+**Example code:**
 
 ```c
 xwork_control_plane_snapshot_reset(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_create_from_snapshot`
 
 ---
 
-## Control Plane
+## Control Plane life cycle
 
 ### xwork_control_plane_create
 
-What is the control plane?
-**锷绻兘锛?*
+Create a control plane.
 
-鍒涘 slowly 杩出▼浠氲姟玺у埗鞞枛簼值瀛?worker registry銆佷change锷￠槦鍒楀拋涓娄紶鏁版偁銆?
-**What's the point?*
+**Function:**
+
+Create a remote task control plane and save worker registry, task queue and upload data.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_create(
@@ -1323,19 +1535,24 @@ XWORK_API xwork_status xwork_control_plane_create(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pOptions`
-**杩斿洴 alkali fine**
+- `pOptions`: Creation parameter; must contain non-empty `sPlaneId`.
+- `ppPlane`: Output owned plane.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-`*ppPlane` `*ppPlane` `*ppPlane`
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-Protocol version
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+After success, `*ppPlane` is owned by the caller and released with `xwork_control_plane_destroy`; the runtime is borrowed.
+
+**Additional Note:**
+
+protocol version must be supported; allowed capability allowlist will be copied.
+
+**Example code:**
 
 ```c
 xwork_control_plane *plane = NULL;
@@ -1346,7 +1563,7 @@ opts.pRuntime = runtime;
 xwork_control_plane_create(&opts, &plane);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_destroy`
 - `xwork_control_plane_start`
@@ -1355,11 +1572,13 @@ xwork_control_plane_create(&opts, &plane);
 
 ### xwork_control_plane_create_from_snapshot
 
-浠?snapshot 鎭㈠ control plane銆?
-**锷绻兘锛?*
+Restore the control plane from snapshot.
 
-Worker registry, ask queue, esult, utput chunk, blob chunk?
-**What's the point?*
+**Function:**
+
+Rebuild the worker registry, task queue, result, output chunk and blob chunk.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_create_from_snapshot(
@@ -1369,26 +1588,32 @@ XWORK_API xwork_status xwork_control_plane_create_from_snapshot(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pOptions` `pSnapshot` is a snapshot file - `ppPlane` is a plane owned plane?
-**杩斿洴 alkali fine**
+- `pOptions`: Optional recovery parameters; can cover runtime, plane id, transport, policy and other operating environments.
+- `pSnapshot`: source snapshot.
+- `ppPlane`: Output owned plane.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-鎴湬姛钖?plane 褰掕皟鐢ㄨ€呮卍chain夛绂snapshot 涓嶈玺ョ銆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-Assigned/running task `XWORK_REMOTE_TASK_ORPHANED`?cancelled?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+After success, the plane is owned by the caller; the snapshot is not taken over.
+
+**Additional Note:**
+
+During recovery, the assigned/running task will be marked as `XWORK_REMOTE_TASK_ORPHANED`, the status code is canceled, and the orphaned error message will be logged.
+
+**Example code:**
 
 ```c
 xwork_control_plane *plane = NULL;
 xwork_control_plane_create_from_snapshot(&opts, &snapshot, &plane);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_get_snapshot`
 
@@ -1396,35 +1621,41 @@ xwork_control_plane_create_from_snapshot(&opts, &snapshot, &plane);
 
 ### xwork_control_plane_destroy
 
-阌€姣?control plane銆?
-**锷绻兘锛?*
+Destroy the control plane.
 
-Check the plane, the orker registry, the ask records, the lob chunks, the capability allowlist, and the query.
-**What's the point?*
+**Function:**
+
+Release plane, worker registry, task records, blob chunks, and capability allowlist.
+
+**Function prototype:**
 
 ```c
 XWORK_API void xwork_control_plane_destroy(xwork_control_plane *pPlane);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pPlane`?`NULL`?
-**杩斿洴 alkali fine**
+- `pPlane`: The plane to be destroyed; can be `NULL`.
 
-镞畮€?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-Yue僃斁 plane 鎷ユ湁璧勬簮锛涗笉浼氶氶氀?borrowed What is the runtime like?
-**Chen ュ Pang Xuan cun 槑?*
+none.
 
-Transport?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+Releases resources owned by a plane; it does not release the borrowed runtime and does not kill external processes or network connections.
+
+**Additional Note:**
+
+The external transport should be stopped by the host before destruction.
+
+**Example code:**
 
 ```c
 xwork_control_plane_destroy(plane);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_create`
 
@@ -1432,35 +1663,41 @@ xwork_control_plane_destroy(plane);
 
 ### xwork_control_plane_start
 
-What is the control plane?
-**锷绻兘锛?*
+Start the control plane scheduling state.
 
-What is the worker claim queued task?
-**What's the point?*
+**Function:**
+
+Allow workers to claim queued tasks.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_start(xwork_control_plane *pPlane);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pPlane`?plane銆?
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
 
-`XWORK_OK` `XWORK_ERROR_INVALID_ARGUMENT`
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or `XWORK_ERROR_INVALID_ARGUMENT`.
 
-start the server
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+start only changes the memory scheduling flag and does not start the network server.
+
+**Example code:**
 
 ```c
 xwork_control_plane_start(plane);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_stop`
 - `xwork_control_plane_claim_task`
@@ -1469,35 +1706,41 @@ xwork_control_plane_start(plane);
 
 ### xwork_control_plane_stop
 
-Guocang control plane?
-**锷绻兘锛?*
+Stop the control plane scheduling state.
 
-绂佹鏂谂讑 claim 缁х画镮峰彇浠氲姟銆?
-**What's the point?*
+**Function:**
+
+Prevent new claims from continuing to obtain tasks.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_stop(xwork_control_plane *pPlane);
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pPlane`?plane銆?
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
 
-`XWORK_OK` `XWORK_ERROR_INVALID_ARGUMENT`
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or `XWORK_ERROR_INVALID_ARGUMENT`.
 
-stop 涓嶅彇娑埚fan缁?assigned/running 鄄勪 Change 锷★纴涔熶笉笉Guocang OS 杩涚▼銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+stop does not cancel assigned/running tasks or stop OS processes.
+
+**Example code:**
 
 ```c
 xwork_control_plane_stop(plane);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_start`
 
@@ -1505,11 +1748,13 @@ xwork_control_plane_stop(plane);
 
 ### xwork_control_plane_set_time
 
-Control plane control plane?
-**锷绻兘锛?*
+Set the control plane current time.
 
-`nowMs` plane `nowMs`
-**What's the point?*
+**Function:**
+
+Update plane internal `nowMs` for lease, heartbeat and snapshot.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_set_time(
@@ -1518,25 +1763,30 @@ XWORK_API xwork_status xwork_control_plane_set_time(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `iNowMs`: Current time, in milliseconds, provided by the host.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-xwork
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+xwork does not read the system clock; the host is responsible for providing monotonic or business time.
+
+**Example code:**
 
 ```c
 xwork_control_plane_set_time(plane, nowMs);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_worker_heartbeat`
 - `xwork_control_plane_sweep_stale`
@@ -1547,11 +1797,13 @@ xwork_control_plane_set_time(plane, nowMs);
 
 ### xwork_control_plane_register_worker
 
-剉ㄥ唽worker銆?
-**锷绻兘锛?*
+Register worker.
 
-Worker control plane registry control plane registry lease control plane registry
-**What's the point?*
+**Function:**
+
+Add the worker to the control plane registry and initialize the lease state.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_register_worker(
@@ -1561,19 +1813,25 @@ XWORK_API xwork_status xwork_control_plane_register_worker(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pPlane` `ppWorker`?borrowed worker?
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `pOptions`: worker parameter; must contain non-empty `sWorkerId`.
+- `ppWorker`: Optional output borrowed worker.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-worker plane
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-worker protocol version
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The worker is owned by plane; the return pointer cannot be released and will become invalid after unregister/destroy.
+
+**Additional Note:**
+
+The worker protocol version must match the plane; when the capability allowlist is enabled, the worker capability must be allowed.
+
+**Example code:**
 
 ```c
 xwork_worker *worker = NULL;
@@ -1583,7 +1841,7 @@ opts.sWorkerId = "worker-1";
 xwork_control_plane_register_worker(plane, &opts, &worker);
 ```
 
-**What is the API?*
+**Related APIs:**
 
 - `xwork_control_plane_worker_heartbeat`
 - `xwork_control_plane_unregister_worker`
@@ -1592,11 +1850,13 @@ xwork_control_plane_register_worker(plane, &opts, &worker);
 
 ### xwork_control_plane_unregister_worker
 
-What is the worker?
-**锷绻兘锛?*
+Log out of the worker.
 
-Worker Unregistered
-**What's the point?*
+**Function:**
+
+Mark the worker as unregistered.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_unregister_worker(
@@ -1605,25 +1865,30 @@ XWORK_API xwork_status xwork_control_plane_unregister_worker(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `sWorkerId`: worker id.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶉谀退?plane 涓?worker 璁扉綍簛屼玎 Xuancun把中銉锟斤拷．
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-Sweep/cancel sweep/cancel sweep/cancel sweep/cancel sweep/cancel sweep/cancel sweep/cancel sweep/cancel sweep/cancel sweep/cancel sweep
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The worker records in the plane are not released, only the status is updated.
+
+**Additional Note:**
+
+Logging off does not automatically cancel assigned tasks; the caller should handle this in conjunction with the sweep/cancel strategy.
+
+**Example code:**
 
 ```c
 xwork_control_plane_unregister_worker(plane, "worker-1");
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_sweep_stale`
 
@@ -1631,11 +1896,13 @@ xwork_control_plane_unregister_worker(plane, "worker-1");
 
 ### xwork_control_plane_worker_heartbeat
 
-Worker heartbeat?
-**锷绻兘锛?*
+Update worker heartbeat.
 
-鍒 Feng把 worker 鄄?last heartbeat銆乴ease expires锛屽苟皏噙姸阐人江涓?online銆?
-**What's the point?*
+**Function:**
+
+Refresh the worker's last heartbeat, lease expires, and set the status to online.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_worker_heartbeat(
@@ -1645,25 +1912,31 @@ XWORK_API xwork_status xwork_control_plane_worker_heartbeat(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `sWorkerId`: worker id.
+- `iNowMs`: current time in milliseconds.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓嶅垎閰制祫婧橩€?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-unregistered worker 涓嶈兘 heartbeat銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No resources are allocated.
+
+**Additional Note:**
+
+unregistered worker cannot heartbeat.
+
+**Example code:**
 
 ```c
 xwork_control_plane_worker_heartbeat(plane, "worker-1", nowMs);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_sweep_stale`
 
@@ -1671,11 +1944,13 @@ xwork_control_plane_worker_heartbeat(plane, "worker-1", nowMs);
 
 ### xwork_control_plane_sweep_stale
 
-娓咯悊恩囨模 worker抆?
-**锷绻兘锛?*
+Clean up expired workers.
 
-镙管偁 lease 杩囨湡镞枿镙拷错笇 stale worker锛屽苟灏嗗叾 assigned/running 浠淲姟枞negative orphaned銆?
-**What's the point?*
+**Function:**
+
+Mark stale workers based on lease expiration time and convert their assigned/running tasks to orphaned.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_sweep_stale(
@@ -1685,26 +1960,32 @@ XWORK_API xwork_status xwork_control_plane_sweep_stale(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-– `pPlane` `piOrphanedCount`?orphaned task?
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `iNowMs`: current time in milliseconds.
+- `piOrphanedCount`: Optional output of the number of orphaned tasks this time.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-涓制父绉画卢墋勋戈抆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-璇?API 鄄仮澶嶅拰 worker lease 砠＄愄勄勬牳蹇冭窭琣狋牂orphaned钖庣敕瀹praised the rich?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+No transfer of title.
+
+**Additional Note:**
+
+This API is the core boundary for recovery and worker lease management; after orphaned it is up to the host to retry, cancel, or handle manually.
+
+**Example code:**
 
 ```c
 size_t orphaned = 0;
 xwork_control_plane_sweep_stale(plane, nowMs, &orphaned);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_worker_heartbeat`
 
@@ -1712,11 +1993,13 @@ xwork_control_plane_sweep_stale(plane, nowMs, &orphaned);
 
 ### xwork_control_plane_list_workers
 
-Worker?
-**锷绻兘锛?*
+List workers.
 
-Control plane control plane worker registry Worker registry
-**What's the point?*
+**Function:**
+
+Get a summary list of worker registries in the control plane.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_list_workers(
@@ -1725,19 +2008,24 @@ XWORK_API xwork_status xwork_control_plane_list_workers(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pPlane`: source plane.
+- `pList`: Output list; should be init before calling.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-鍒楄〃鎷ユ湁 deep-copy 鍍呭锛倀椤
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-What's the point?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The list has deep-copy contents, released with `xwork_worker_summary_list_reset`.
+
+**Additional Note:**
+
+The function resets the output list to its old contents.
+
+**Example code:**
 
 ```c
 xwork_worker_summary_list list;
@@ -1746,21 +2034,23 @@ xwork_control_plane_list_workers(plane, &list);
 xwork_worker_summary_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_worker_summary_list_reset`
 
 ---
 
-## Remote Task 鐢熷懡综合ㄦ桡
+## Remote Task life cycle
 
 ### xwork_control_plane_enqueue_task
 
-鍏ラ槦 remote task銆?
-**锷绻兘锛?*
+Enqueue remote task.
 
-Remote task control plane control plane worker claim?
-**What's the point?*
+**Function:**
+
+Put the remote task into the control plane queue and wait for worker claim.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_enqueue_task(
@@ -1769,19 +2059,24 @@ XWORK_API xwork_status xwork_control_plane_enqueue_task(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `pOptions`: Task parameters; must contain task id and request JSON.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-plane task task
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-What is the function of the capability allowlist and the ask policy and the network policy?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+plane copies the task field; `pUserData` is borrowed.
+
+**Additional Note:**
+
+Capability allowlist, task policy, and network policy checks are performed. `XWORK_REMOTE_TASK_PROCESS_EXEC` will be mapped to process host service.
+
+**Example code:**
 
 ```c
 xwork_remote_task_options task;
@@ -1792,7 +2087,7 @@ task.sRequestJson = "{}";
 xwork_control_plane_enqueue_task(plane, &task);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_claim_task`
 
@@ -1800,11 +2095,13 @@ xwork_control_plane_enqueue_task(plane, &task);
 
 ### xwork_control_plane_claim_task
 
-worker?
-**锷绻兘锛?*
+The worker receives the task.
 
-涓?online worker 镆ユ鍖鍖综合 镄?queued task锛倀铓鴴?assignment銆鄄?
-**What's the point?*
+**Function:**
+
+Find queued tasks matching capability for online workers and generate assignments.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_claim_task(
@@ -1814,19 +2111,25 @@ XWORK_API xwork_status xwork_control_plane_claim_task(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pAssignment`?assignment?init?
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `sWorkerId`: worker id to receive the task.
+- `pAssignment`: Output assignment; should be init before calling.
 
-`XWORK_OK`?XWORK_ERROR_NOT_FOUND`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-assignment 鎷ユ湁 deep-copy 瀛楁锛妀椤
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK`, `XWORK_ERROR_NOT_FOUND`, or other error codes.
 
-plane 谇呴　　　?start锛泈orker 鑇呴‖ online锛涙椤鍙鍙栦change锷℃椂杩濿洖 not found銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+assignment has deep-copy fields, released with `xwork_remote_task_assignment_reset`.
+
+**Additional Note:**
+
+The plane must have been started; the worker must be online; if there is no task to receive, it will return not found.
+
+**Example code:**
 
 ```c
 xwork_remote_task_assignment assignment;
@@ -1835,7 +2138,7 @@ xwork_control_plane_claim_task(plane, "worker-1", &assignment);
 xwork_remote_task_assignment_reset(&assignment);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_complete_task`
 
@@ -1843,11 +2146,13 @@ xwork_remote_task_assignment_reset(&assignment);
 
 ### xwork_control_plane_complete_task
 
-What is the remote task?
-**锷绻兘锛?*
+Complete remote task.
 
-镕码嵁 assignment id 鎻愪helila浵氲姟缁洴灉锛屽苟银娄 Change锷℃爣灁狠negative completed鎴?failed銆?
-**What's the point?*
+**Function:**
+
+Submit task results based on assignment id and mark the task as completed or failed.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_complete_task(
@@ -1857,19 +2162,25 @@ XWORK_API xwork_status xwork_control_plane_complete_task(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `sAssignmentId`: assignment id.
+- `pResult`: task result.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-plane 澶嶅埗 output銆乻ummary銆鈪rror鍜?artifact summary銆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-`iStatus == XWORK_OK` protocol version
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+plane copies output, summary, error, and artifact summary.
+
+**Additional Note:**
+
+The result protocol version must be consistent with the task; when `iStatus == XWORK_OK`, the task is completed, otherwise it fails.
+
+**Example code:**
 
 ```c
 xwork_remote_task_result result;
@@ -1878,7 +2189,7 @@ result.sVisibleSummary = "completed";
 xwork_control_plane_complete_task(plane, assignment.sAssignmentId, &result);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_fail_task`
 
@@ -1886,11 +2197,13 @@ xwork_control_plane_complete_task(plane, assignment.sAssignmentId, &result);
 
 ### xwork_control_plane_fail_task
 
-What is the remote task?
-**锷绻兘锛?*
+Quickly mark remote task failure.
 
-鐢ㄩ敊璇枃chain瀯阃犳爣鍑?remote task result锛屽苟鎻愪helium涓 coaxけLUョ粨鋋濿€?
-**What's the point?*
+**Function:**
+
+Constructs a standard remote task result with the error text and submits it as a failed result.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_fail_task(
@@ -1901,25 +2214,32 @@ XWORK_API xwork_status xwork_control_plane_fail_task(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `bRetryable`唛氭槸钖﹀璁璁t璇曘€?
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `sAssignmentId`: assignment id.
+- `sErrorText`: error text; can be `NULL`.
+- `bRetryable`: Whether to recommend retrying.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-What is the task record?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-`XWORK_ERROR_EXTERNAL_FAILURE`?complete result?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The error text will be copied to the task record.
+
+**Additional Note:**
+
+This API is equivalent to submitting the complete result of `XWORK_ERROR_EXTERNAL_FAILURE`.
+
+**Example code:**
 
 ```c
 xwork_control_plane_fail_task(plane, assignmentId, "tool failed", true);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_complete_task`
 
@@ -1927,11 +2247,13 @@ xwork_control_plane_fail_task(plane, assignmentId, "tool failed", true);
 
 ### xwork_control_plane_cancel_task
 
-What is the remote task?
-**锷绻兘锛?*
+Cancel remote task.
 
-The task id is canceled?
-**What's the point?*
+**Function:**
+
+Mark non-final tasks as canceled by task id.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_cancel_task(
@@ -1941,25 +2263,31 @@ XWORK_API xwork_status xwork_control_plane_cancel_task(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- XWORKPLACEHOLDER0 TOKEN
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `sTaskId`: task id.
+- `sReason`: Optional cancellation reason.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-plane 澶嶅埗鍙栨秷铡緷洜鍒?task 阌澾Q℃伅銆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-鍙栨秷涓気氻尢?worker 閖姩鄄勄閮?OS 杩涚▼锛泈orker/transport What's the point of the story?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+plane copies the cancellation reason to the task error message.
+
+**Additional Note:**
+
+Cancellation does not stop external OS processes that have been started by the worker; the worker/transport needs to receive and perform the cancellation itself.
+
+**Example code:**
 
 ```c
 xwork_control_plane_cancel_task(plane, "task-1", "user cancelled");
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_get_task_summary`
 
@@ -1967,11 +2295,13 @@ xwork_control_plane_cancel_task(plane, "task-1", "user cancelled");
 
 ### xwork_control_plane_execute_next_local
 
-What is the worker runtime?
-**锷绻兘锛?*
+Execute the next task on the local worker runtime.
 
-What is the claim error?worker runtime host service error and complete/fail error?
-**What's the point?*
+**Function:**
+
+Encapsulate claim, call worker runtime host service, complete/fail local shortcut path.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_execute_next_local(
@@ -1981,19 +2311,25 @@ XWORK_API xwork_status xwork_control_plane_execute_next_local(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pPlane`?plane?- `pAssignment`曰氩彲阃夎緭鍑瀄焄闄呮墽chen倛怀殑 assignment銆?
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `sWorkerId`: local worker id.
+- `pAssignment`: Optional output of the actual assignment performed.
 
-杩斿洖host service 铓ц中间€佹娨 control plane 阌澾鉌鈥?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-捈描暭 assignment 濡坝濉平曰倀敱咋啂敕敤Key?reset銆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns host service execution status or control plane error code.
 
-Worker function is used to implement runtime and API functions in-process worker mock and agent shell.
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The output assignment, if populated, is reset by the caller.
+
+**Additional Note:**
+
+The worker must be registered and own the runtime. This API is suitable for in-process worker mocking, testing, and stand-alone agent shells.
+
+**Example code:**
 
 ```c
 xwork_remote_task_assignment assignment;
@@ -2002,7 +2338,7 @@ xwork_control_plane_execute_next_local(plane, "worker-1", &assignment);
 xwork_remote_task_assignment_reset(&assignment);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_runtime_invoke_host_service`
 
@@ -2010,11 +2346,13 @@ xwork_remote_task_assignment_reset(&assignment);
 
 ### xwork_control_plane_get_task_summary
 
-What is the remote task?
-**锷绻兘锛?*
+Query a single remote task.
 
-鎸?task id 銮峰彇浠氲槟中鰰€and€乤ssignment銆佺粨鋋溿€乤rtifact 鍜?output chunk 鎽樿銆?
-**What's the point?*
+**Function:**
+
+Get task status, assignment, results, artifact and output chunk summary by task id.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_get_task_summary(
@@ -2024,19 +2362,25 @@ XWORK_API xwork_status xwork_control_plane_get_task_summary(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pPlane`: source plane.
+- `sTaskId`: task id.
+- `pSummary`: Output summary; should be init before calling.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-summary 鎷ユ湁 deep-copy 鍍呭锛倀椤
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-鍑 mustard
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+summary has deep-copy content, released with `xwork_remote_task_summary_reset`.
+
+**Additional Note:**
+
+The function resets the output summary to the old content.
+
+**Example code:**
 
 ```c
 xwork_remote_task_summary summary;
@@ -2045,7 +2389,7 @@ xwork_control_plane_get_task_summary(plane, "task-1", &summary);
 xwork_remote_task_summary_reset(&summary);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_list_tasks`
 
@@ -2053,11 +2397,13 @@ xwork_remote_task_summary_reset(&summary);
 
 ### xwork_control_plane_list_tasks
 
-What is the remote task?
-**锷绻兘锛?*
+List remote tasks.
 
-What is the control plane?
-**What's the point?*
+**Function:**
+
+Get a summary list of all tasks in the control plane.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_list_tasks(
@@ -2066,19 +2412,24 @@ XWORK_API xwork_status xwork_control_plane_list_tasks(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pPlane`: source plane.
+- `pList`: Output list; should be init before calling.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-鍒楄〃鎷ユ湁 deep-copy 鍍呭锛倀椤
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-What is the user interface for?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The list has deep-copy contents, released with `xwork_remote_task_summary_list_reset`.
+
+**Additional Note:**
+
+Used for UI queue panels, recovery diagnostics, and test assertions.
+
+**Example code:**
 
 ```c
 xwork_remote_task_summary_list list;
@@ -2087,21 +2438,23 @@ xwork_control_plane_list_tasks(plane, &list);
 xwork_remote_task_summary_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_get_task_summary`
 
 ---
 
-## Artifact涓?Output涓娄綶
+## Artifact and Output upload
 
 ### xwork_control_plane_upload_artifact
 
-What is the remote artifact?
-**锷绻兘锛?*
+Upload remote artifact.
 
-涓?remote task 枩 borrow姞鴴栨洿鏂?artifact summary锛屽Gouqi濆瓧鍙€?blob chunk銆?
-**What's the point?*
+**Function:**
+
+Append or update artifact summary for remote task and save optional blob chunk.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_upload_artifact(
@@ -2110,19 +2463,24 @@ XWORK_API xwork_status xwork_control_plane_upload_artifact(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `pUpload`: Upload request; must include task id, worker id, and artifact summary.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-plane 澶嶅埗 artifact summary銆乥lob metadata鍜?chunk 铁版偁銆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-浠淲槟涶嶶嶶涴尰 queued銆乧ancelled鎴?orphaned锛昘ssignment id 濡傛彁渚涳綴紇呴　鍖 Return 浠淲槟褰揿姠 assignment銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+plane copies artifact summary, blob metadata, and chunk data.
+
+**Additional Note:**
+
+The task cannot be queued, canceled, or orphaned; the assignment id, if provided, must match the task's current assignment.
+
+**Example code:**
 
 ```c
 xwork_remote_artifact_upload upload;
@@ -2133,7 +2491,7 @@ upload.pArtifact = &artifactSummary;
 xwork_control_plane_upload_artifact(plane, &upload);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_list_artifact_blobs`
 
@@ -2141,11 +2499,13 @@ xwork_control_plane_upload_artifact(plane, &upload);
 
 ### xwork_control_plane_upload_output_chunk
 
-What is the remote output chunk?
-**锷绻兘锛?*
+Upload remote output chunk.
 
-涓?remote task? stdout/stderr 邂囨湰chunk?
-**What's the point?*
+**Function:**
+
+Append stdout/stderr text chunk for remote task.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_upload_output_chunk(
@@ -2154,19 +2514,24 @@ XWORK_API xwork_status xwork_control_plane_upload_output_chunk(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- `pPlane`?plane?-
-**杩斿洴 alkali fine**
+- `pPlane`: Target plane.
+- `pChunk`: Output chunk; must contain task id, worker id and text.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-plane 澶嶅埗鏂囨湰銆乭ash鍜?chunk metadata銆?
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-浠淲槟涶嶶嶶涴尪簬 queued銆乧ancelled 鴴?orphaned锛沘ssignment id 濡傛彁涚涳纴呴　鍖Guili銆?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+plane copies text, hash and chunk metadata.
+
+**Additional Note:**
+
+Task cannot be queued, canceled, or orphaned; assignment id, if provided, must match.
+
+**Example code:**
 
 ```c
 xwork_remote_output_chunk chunk;
@@ -2177,7 +2542,7 @@ chunk.sText = "stdout line\n";
 xwork_control_plane_upload_output_chunk(plane, &chunk);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_remote_output_chunk_init`
 
@@ -2185,11 +2550,13 @@ xwork_control_plane_upload_output_chunk(plane, &chunk);
 
 ### xwork_control_plane_list_artifact_blobs
 
-What are artifact blob chunks?
-**锷绻兘锛?*
+List artifact blob chunks.
 
-Task id Artifact id blob chunk?
-**What's the point?*
+**Function:**
+
+Query uploaded blob chunks by task id and optional artifact id.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_list_artifact_blobs(
@@ -2200,19 +2567,26 @@ XWORK_API xwork_status xwork_control_plane_list_artifact_blobs(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
-- What is the chain?blob chunk?-`pList`?
-**杩斿洴 alkali fine**
+- `pPlane`: source plane.
+- `sTaskId`: task id.
+- `sArtifactId`: Optional artifact id; when empty, returns all blob chunks for this task.
+- `pList`: output list; should be init before calling.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-鍒楄〃鎷ユ湁 deep-copy 鍍呭锛倀椤
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-The API is the artifact blob?
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The list has deep-copy contents, released with `xwork_remote_blob_chunk_summary_list_reset`.
+
+**Additional Note:**
+
+The API can be used to restore artifact blobs, debug upload sequences, or build download responses.
+
+**Example code:**
 
 ```c
 xwork_remote_blob_chunk_summary_list list;
@@ -2221,7 +2595,7 @@ xwork_control_plane_list_artifact_blobs(plane, "task-1", NULL, &list);
 xwork_remote_blob_chunk_summary_list_reset(&list);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_upload_artifact`
 
@@ -2231,11 +2605,13 @@ xwork_remote_blob_chunk_summary_list_reset(&list);
 
 ### xwork_control_plane_get_snapshot
 
-銮峰彇control plane snapshot銆?
-**锷绻兘锛?*
+Get control plane snapshot.
 
-Control plane, worker registry, ask, control plane, worker registry, blob chunks, etc.
-**What's the point?*
+**Function:**
+
+Deep copies the control plane's worker registry, task status, and blob chunks.
+
+**Function prototype:**
 
 ```c
 XWORK_API xwork_status xwork_control_plane_get_snapshot(
@@ -2244,19 +2620,24 @@ XWORK_API xwork_status xwork_control_plane_get_snapshot(
 );
 ```
 
-**卙四暟锛?*
+**parameter:**
 
--
-**杩斿洴 alkali fine**
+- `pPlane`: source plane.
+- `pSnapshot`: output snapshot; should be init before calling.
 
-`XWORK_OK` `XWORK_OK`?
-**璧勬簮褰掎睘锛?*
+**Return value:**
 
-snapshot 鎷ユ湁 deep-copy 鍍呭锛妀椤
-**Chen ュ Pang Xuan cun 槑?*
+Returns `XWORK_OK` or error code.
 
-snapshot, live network connection, thread, process, terminal handle, etc.
-**锣冧緥締ｇ爜锛?*
+**Resource ownership:**
+
+The snapshot has deep-copy content and is released with `xwork_control_plane_snapshot_reset`.
+
+**Additional Notes:**
+
+snapshot does not contain a live network connection, thread, process, or terminal handle.
+
+**Example code:**
 
 ```c
 xwork_control_plane_snapshot snapshot;
@@ -2265,16 +2646,16 @@ xwork_control_plane_get_snapshot(plane, &snapshot);
 xwork_control_plane_snapshot_reset(&snapshot);
 ```
 
-**What is the API?*
+**Related API:**
 
 - `xwork_control_plane_create_from_snapshot`
 
 ---
 
-## The manuscript is 叧鏂囨.
+## Related documents
 
 - [Host Tools API](api-host-tools.md)
 - [Policy / Approval API](api-policy-approval.md)
-- [杩滅▼ Worker 涓庢帶鍒跺钩闈(../guide/remote-worker-intro.md)
-- [Remote Worker Agent 鑼冧緥](../case/remote-worker-agent.md)
-- [鍐呴儴 remote worker contract](../../dev/docs/REMOTE_WORKER.md)
+- [Remote Worker and Control Plane](../guide/remote-worker-intro.md)
+- [Remote Worker Agent Example](../case/remote-worker-agent.md)
+- [Internal remote worker contract](../../dev/docs/REMOTE_WORKER.md)
