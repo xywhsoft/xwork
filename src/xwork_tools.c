@@ -1330,7 +1330,11 @@ static xwork_result xwork__tool_exec_command(
     char* sResolvedCwd = NULL;
     bool bValid;
     bool bMerge;
+    bool bExpectedExit;
     uint64_t uTimeout;
+    uint32_t i;
+    uint32_t iExpectedCount = 0u;
+    xvalue tExpectedExitCodes;
     xprocessconfig tConfig;
     xprocessresult tProcess;
     xwork_buf tOutput = {0};
@@ -1346,6 +1350,27 @@ static xwork_result xwork__tool_exec_command(
     if ( !bValid || uTimeout == 0u || uTimeout > 3600000u ) { eResult = xwork__tool_fail(pOutput, "timeout_ms must be between 1 and 3600000"); goto cleanup; }
     bMerge = xwork__json_bool(tArgs, "merge_stderr", true, &bValid);
     if ( !bValid ) { eResult = xwork__tool_fail(pOutput, "merge_stderr must be boolean"); goto cleanup; }
+    tExpectedExitCodes = xwork__json_get(tArgs, "expected_exit_codes");
+    if ( tExpectedExitCodes ) {
+        if ( xvoType(tExpectedExitCodes) != XVO_DT_ARRAY ) {
+            eResult = xwork__tool_fail(pOutput, "expected_exit_codes must be a non-empty array of integers"); goto cleanup;
+        }
+        iExpectedCount = xvoArrayItemCount(tExpectedExitCodes);
+        if ( iExpectedCount == 0u || iExpectedCount > 32u ) {
+            eResult = xwork__tool_fail(pOutput, "expected_exit_codes must contain between 1 and 32 integers"); goto cleanup;
+        }
+        for ( i = 0u; i < iExpectedCount; ++i ) {
+            xvalue tCode = xvoArrayGetValue(tExpectedExitCodes, i);
+            int64_t iCode;
+            if ( !tCode || xvoType(tCode) != XVO_DT_INT ) {
+                eResult = xwork__tool_fail(pOutput, "expected_exit_codes must contain only integers"); goto cleanup;
+            }
+            iCode = xvoGetInt(tCode);
+            if ( iCode < -2147483647LL - 1LL || iCode > 2147483647LL ) {
+                eResult = xwork__tool_fail(pOutput, "expected_exit_codes values must fit in a signed 32-bit exit code"); goto cleanup;
+            }
+        }
+    }
     sResolvedCwd = xwork__resolve_path(pAgent, sCwd, pError);
     if ( !sResolvedCwd ) { eResult = xwork__tool_fail(pOutput, pError && pError->sMessage[0] ? pError->sMessage : "cwd denied"); goto cleanup; }
     if ( !xrtDirExists((str)sResolvedCwd) ) { eResult = xwork__tool_fail(pOutput, "cwd does not exist"); goto cleanup; }
@@ -1366,9 +1391,25 @@ static xwork_result xwork__tool_exec_command(
     if ( !xrtExecCapture(&tConfig, &tProcess, (uint32_t)uTimeout) ) {
         eResult = xwork__tool_fail(pOutput, "failed to start or capture command"); goto cleanup;
     }
-    if ( !xwork__buf_appendf(&tOutput, "$ %s\nexit_code: %d\nduration_ms: %llu%s\n",
+    bExpectedExit = tProcess.ExitInfo.iKind == XPROC_EXIT_NORMAL &&
+        !tProcess.ExitInfo.bTimedOut && !tProcess.ExitInfo.bCancelled;
+    if ( bExpectedExit ) {
+        if ( tExpectedExitCodes ) {
+            bExpectedExit = false;
+            for ( i = 0u; i < iExpectedCount; ++i ) {
+                if ( xvoGetInt(xvoArrayGetValue(tExpectedExitCodes, i)) == (int64_t)tProcess.iExitCode ) {
+                    bExpectedExit = true;
+                    break;
+                }
+            }
+        } else {
+            bExpectedExit = tProcess.iExitCode == 0;
+        }
+    }
+    if ( !xwork__buf_appendf(&tOutput, "$ %s\nexit_code: %d\nexit_expected: %s\nduration_ms: %llu%s\n",
             sCommand,
             tProcess.iExitCode,
+            bExpectedExit ? "true" : "false",
             (unsigned long long)tProcess.iDurationMs,
             tProcess.ExitInfo.bTimedOut ? " (timed out)" : "") ) goto oom;
     if ( tProcess.iStdoutSize ) {
@@ -1384,7 +1425,7 @@ static xwork_result xwork__tool_exec_command(
     if ( tProcess.bStdoutTruncated || tProcess.bStderrTruncated ) {
         if ( !xwork__buf_append_cstr(&tOutput, "[process capture was truncated by the configured capture limit]\n") ) goto oom;
     }
-    if ( !xworkToolOutputSet(pOutput, xrtProcessResultSuccess(&tProcess), tOutput.pData ? tOutput.pData : "") ) goto oom;
+    if ( !xworkToolOutputSet(pOutput, bExpectedExit, tOutput.pData ? tOutput.pData : "") ) goto oom;
     eResult = XWORK_RESULT_OK;
     goto cleanup;
 oom:
@@ -1462,8 +1503,8 @@ bool xworkAgentRegisterBuiltinTools(xwork_agent* pAgent, xwork_error* pError)
         },
         {
             "exec_command",
-            "Run a non-interactive command in a workspace directory and capture stdout, stderr, exit code, duration, and timeout state.",
-            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"cwd\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":3600000},\"merge_stderr\":{\"type\":\"boolean\"}},\"required\":[\"command\"],\"additionalProperties\":false}",
+            "Run a non-interactive command in a workspace directory and capture stdout, stderr, exit code, duration, and timeout state. For negative tests, pass expected_exit_codes so an intentional nonzero exit is treated as success; the default is [0].",
+            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"cwd\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":3600000},\"merge_stderr\":{\"type\":\"boolean\"},\"expected_exit_codes\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":32,\"items\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}}},\"required\":[\"command\"],\"additionalProperties\":false}",
             true, XWORK_TOOL_EFFECT_PROCESS, xwork__tool_exec_command, NULL
         }
     };

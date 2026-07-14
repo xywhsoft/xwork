@@ -51,7 +51,7 @@ Built-in tools:
 | `write_file` | Create, overwrite, or append files, optionally creating parents. |
 | `replace_text` | Exact conflict-detecting text replacement. |
 | `apply_patch` | Validate and transactionally apply multi-file create/replace/delete edits; each file is replaced atomically and earlier writes roll back on failure. |
-| `exec_command` | Run a non-interactive shell command with cwd, timeout, exit metadata, and bounded capture. |
+| `exec_command` | Run a non-interactive shell command with cwd, timeout, exit metadata, bounded capture, and optional `expected_exit_codes` for negative tests. |
 | `start_process` | Start a bounded-capture long-running process and return a stable process ID. |
 | `poll_process` | Wait briefly and consume incremental stdout/stderr plus exit status. |
 | `write_process` | Write text to process stdin or close stdin. |
@@ -60,6 +60,8 @@ Built-in tools:
 Filesystem tools reject paths outside the configured workspace. `exec_command` starts inside the workspace, but it is a real shell and is not an OS sandbox. Hosts that do not fully trust commands should use `XWORK_APPROVAL_CALLBACK` or `XWORK_APPROVAL_READ_ONLY`.
 
 Managed process IDs live for the lifetime of one `xwork_agent`. They intentionally are not serialized into the session checkpoint because OS process handles cannot be recovered safely after a host restart. Destroying the agent stops and releases every remaining managed process.
+
+`exec_command` treats only exit code `0` as success by default. For a command that is expected to reject invalid input, pass a non-empty `expected_exit_codes` array such as `[1, 2]`; a normal exit matching the array is successful, while timeouts, cancellation, signals, and other abnormal exits remain failures.
 
 Interrupted tool recovery is intentionally at-least-once: if a process stops after a side effect completes but before its result reaches the journal, that call is still pending and may be retried. Permission and hook checks run again. Hosts should favor idempotent operations and transactional `apply_patch` edits; managed OS processes cannot be reattached after restart. Recovery conservatively requires a fresh successful verification command before accepting completion.
 

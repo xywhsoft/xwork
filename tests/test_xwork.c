@@ -273,6 +273,7 @@ static void test_agent_loop(void)
     const xwork_tool_entry* pStartTool;
     const xwork_tool_entry* pWriteProcessTool;
     const xwork_tool_entry* pPollTool;
+    const xwork_tool_entry* pExecTool;
     xwork_tool_context tPatchContext;
     xwork_tool_output tPatchOutput;
     xwork_tool_output tProcessOutput;
@@ -390,6 +391,45 @@ static void test_agent_loop(void)
             "managed process poll returns incremental output and final exit state");
         CHECK(pAgent->iProcessCount == 0u, "released managed process leaves no live registry entry");
     }
+    xworkToolOutputUnit(&tProcessOutput);
+
+    pExecTool = xwork__find_tool(pAgent, "exec_command");
+    xworkToolOutputInit(&tProcessOutput);
+#if defined(_WIN32)
+    CHECK(pExecTool && pExecTool->OnExecute(pExecTool->pUserData, &tPatchContext,
+        "{\"command\":\"cmd /c exit 7\",\"expected_exit_codes\":[7]}",
+        &tProcessOutput, &tError) == XWORK_RESULT_OK && tProcessOutput.bSuccess &&
+        tProcessOutput.sContent && strstr(tProcessOutput.sContent, "exit_code: 7") &&
+        strstr(tProcessOutput.sContent, "exit_expected: true"),
+        "exec command accepts an explicitly expected nonzero exit code");
+#else
+    CHECK(pExecTool && pExecTool->OnExecute(pExecTool->pUserData, &tPatchContext,
+        "{\"command\":\"sh -c 'exit 7'\",\"expected_exit_codes\":[7]}",
+        &tProcessOutput, &tError) == XWORK_RESULT_OK && tProcessOutput.bSuccess &&
+        tProcessOutput.sContent && strstr(tProcessOutput.sContent, "exit_code: 7") &&
+        strstr(tProcessOutput.sContent, "exit_expected: true"),
+        "exec command accepts an explicitly expected nonzero exit code");
+#endif
+    xworkToolOutputUnit(&tProcessOutput);
+    xworkToolOutputInit(&tProcessOutput);
+#if defined(_WIN32)
+    CHECK(pExecTool && pExecTool->OnExecute(pExecTool->pUserData, &tPatchContext,
+        "{\"command\":\"cmd /c exit 7\"}", &tProcessOutput, &tError) == XWORK_RESULT_OK &&
+        !tProcessOutput.bSuccess && tProcessOutput.sContent && strstr(tProcessOutput.sContent, "exit_expected: false"),
+        "exec command still rejects a nonzero exit code by default");
+#else
+    CHECK(pExecTool && pExecTool->OnExecute(pExecTool->pUserData, &tPatchContext,
+        "{\"command\":\"sh -c 'exit 7'\"}", &tProcessOutput, &tError) == XWORK_RESULT_OK &&
+        !tProcessOutput.bSuccess && tProcessOutput.sContent && strstr(tProcessOutput.sContent, "exit_expected: false"),
+        "exec command still rejects a nonzero exit code by default");
+#endif
+    xworkToolOutputUnit(&tProcessOutput);
+    xworkToolOutputInit(&tProcessOutput);
+    CHECK(pExecTool && pExecTool->OnExecute(pExecTool->pUserData, &tPatchContext,
+        "{\"command\":\"echo invalid\",\"expected_exit_codes\":[]}",
+        &tProcessOutput, &tError) == XWORK_RESULT_OK && !tProcessOutput.bSuccess &&
+        tProcessOutput.sContent && strstr(tProcessOutput.sContent, "between 1 and 32"),
+        "exec command rejects an empty expected exit-code contract");
     xworkToolOutputUnit(&tProcessOutput);
 
     if ( tEvents.sLastArtifact[0] ) {
