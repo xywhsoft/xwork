@@ -107,4 +107,13 @@ From the repository root on Windows with GCC available:
 build.bat
 ```
 
+On Linux or macOS (set `CC` to select GCC, Clang, or a cross compiler):
+
+```sh
+sh build.sh
+```
+
+Cross builds use `RUN_TESTS=0`; sibling locations and flags are overrideable through
+`XLLM_DIR`, `XRT_DIR`, `BUILD_DIR`, `RELEASE_DIR`, `CFLAGS`, `LDFLAGS`, and `LIBS`.
+
 The optimized warning-as-error suite covers a forced context compaction followed by a multi-turn workflow using the built-in tools, transactional multi-file editing and rollback, managed-process stdin/output, artifact spill, session persistence, interrupted parallel-tool recovery, duplicate-prompt rejection, and a rejected workspace escape.
