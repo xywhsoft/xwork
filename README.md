@@ -45,6 +45,7 @@ Built-in tools:
 | `search_text` | Literal text search with path, wildcard, depth, and result limits. |
 | `write_file` | Create, overwrite, or append files, optionally creating parents. |
 | `replace_text` | Exact conflict-detecting text replacement. |
+| `apply_patch` | Validate and transactionally apply multi-file create/replace/delete edits; each file is replaced atomically and earlier writes roll back on failure. |
 | `exec_command` | Run a non-interactive shell command with cwd, timeout, exit metadata, and bounded capture. |
 
 Filesystem tools reject paths outside the configured workspace. `exec_command` starts inside the workspace, but it is a real shell and is not an OS sandbox. Hosts that do not fully trust commands should use `XWORK_APPROVAL_CALLBACK` or `XWORK_APPROVAL_READ_ONLY`.
@@ -85,4 +86,4 @@ From the repository root on Windows with GCC available:
 build.bat
 ```
 
-The optimized warning-as-error suite covers a forced context compaction followed by a multi-turn workflow using all six built-in tools, artifact spill, session persistence, and a rejected workspace escape.
+The optimized warning-as-error suite covers a forced context compaction followed by a multi-turn workflow using all seven built-in tools, transactional multi-file editing, artifact spill, session persistence, and a rejected workspace escape.

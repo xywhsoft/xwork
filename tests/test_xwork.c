@@ -107,13 +107,13 @@ static xllm_result mock_complete(
         );
     } else {
         ++pMock->uAgentCalls;
-        pMock->bSawTools = pRequest->iToolCount == 6u;
+        pMock->bSawTools = pRequest->iToolCount == 7u;
         pMock->bSawParallel = pRequest->bParallelToolCalls;
         if ( pMock->uAgentCalls > 1u && request_has_role(pRequest, XLLM_ROLE_TOOL, 1u) ) pMock->bSawToolResults = true;
         if ( request_has_text(pRequest, "Objective: test the xwork tool loop after compaction") ) pMock->bSawCompactionSummary = true;
         if ( pMock->uAgentCalls == 1u ) {
             xwork_buf tArgs = {0};
-            pResponse = mock_response("", 5u);
+            pResponse = mock_response("", 6u);
             if ( !pResponse ) return XLLM_RESULT_ERROR;
             if ( !xwork__buf_append_cstr(&tArgs, "{\"path\":\"sandbox/note.txt\",\"content\":\"hello-") ) goto oom;
             for ( i = 0u; i < 1600u; ++i ) if ( !xwork__buf_append_char(&tArgs, (char)('a' + (i % 26u))) ) goto oom;
@@ -124,11 +124,12 @@ static xllm_result mock_complete(
                  !mock_set_call(pResponse, 1u, "call_read", "read_file", "{\"path\":\"sandbox/note.txt\",\"max_lines\":20}") ||
                  !mock_set_call(pResponse, 2u, "call_escape", "read_file", "{\"path\":\"../outside.txt\"}") ||
                  !mock_set_call(pResponse, 3u, "call_list", "list_files", "{\"path\":\"sandbox\",\"recursive\":true}") ||
-                 !mock_set_call(pResponse, 4u, "call_search", "search_text", "{\"query\":\"hello-\",\"path\":\"sandbox\",\"pattern\":\"*.txt\"}") ) goto oom;
+                 !mock_set_call(pResponse, 4u, "call_search", "search_text", "{\"query\":\"hello-\",\"path\":\"sandbox\",\"pattern\":\"*.txt\"}") ||
+                 !mock_set_call(pResponse, 5u, "call_replace", "replace_text", "{\"path\":\"sandbox/note.txt\",\"old_text\":\"hello-\",\"new_text\":\"HELLO-\"}") ) goto oom;
         } else if ( pMock->uAgentCalls == 2u ) {
             pResponse = mock_response("", 1u);
-            if ( !pResponse || !mock_set_call(pResponse, 0u, "call_replace", "replace_text",
-                    "{\"path\":\"sandbox/note.txt\",\"old_text\":\"hello-\",\"new_text\":\"HELLO-\"}") ) goto oom;
+            if ( !pResponse || !mock_set_call(pResponse, 0u, "call_patch", "apply_patch",
+                    "{\"changes\":[{\"path\":\"sandbox/note.txt\",\"operation\":\"replace\",\"old_text\":\"HELLO-\",\"new_text\":\"PATCHED-\"},{\"path\":\"sandbox/extra.txt\",\"operation\":\"create\",\"content\":\"transaction created this file\\n\"}]}") ) goto oom;
         } else if ( pMock->uAgentCalls == 3u ) {
             pResponse = mock_response("", 1u);
             if ( !pResponse || !mock_set_call(pResponse, 0u, "call_exec", "exec_command",
@@ -232,6 +233,10 @@ static void test_agent_loop(void)
     char* sFile = NULL;
     char* sArtifactAbsolute = NULL;
     size_t iFileSize = 0u;
+    uint32_t uCompactionsBeforeExplicit = 0u;
+    const xwork_tool_entry* pPatchTool;
+    xwork_tool_context tPatchContext;
+    xwork_tool_output tPatchOutput;
     unsigned i;
 
     memset(&tMock, 0, sizeof(tMock));
@@ -271,31 +276,46 @@ static void test_agent_loop(void)
     tAgentConfig.iMaxInlineToolBytes = 300u;
     pAgent = xworkAgentCreate(&tAgentConfig, &tError);
     CHECK(pAgent != NULL, "agent creates with injected model boundary");
-    CHECK(pAgent && xworkAgentToolCount(pAgent) == 6u, "six practical builtin tools registered");
+    CHECK(pAgent && xworkAgentToolCount(pAgent) == 7u, "seven practical builtin tools registered");
     if ( !pAgent ) goto cleanup;
 
     CHECK(xworkAgentRun(pAgent, "Create and verify the requested note file.", &tResult, &tError) == XWORK_RESULT_OK, "multi-turn tool loop completes");
     CHECK(tResult.sFinalText && strstr(tResult.sFinalText, "verified"), "final assistant response returned");
-    CHECK(tResult.uAgentTurns == 4u && tResult.uToolCalls == 7u, "four model turns and seven tool calls recorded");
-    CHECK(tResult.uCompactions == 1u && tMock.uCompactionCalls == 1u, "one context compaction occurred before tool work");
-    CHECK(tEvents.uCompactions == 1u && tEvents.uErrors == 0u, "compaction event emitted without agent errors");
+    CHECK(tResult.uAgentTurns == 4u && tResult.uToolCalls == 8u, "four model turns and eight tool calls recorded");
+    CHECK(tResult.uCompactions >= 1u && tMock.uCompactionCalls == tResult.uCompactions, "context compaction occurred before or during tool work");
+    CHECK(tEvents.uCompactions == tResult.uCompactions && tEvents.uErrors == 0u, "compaction events emitted without agent errors");
     CHECK(tMock.bSawTools && tMock.bSawParallel && tMock.bSawToolResults, "tool definitions, parallel flag, and continuity reach model");
     CHECK(tMock.bSawCompactionSummary, "post-compaction model turns receive the summary checkpoint");
-    CHECK(tEvents.uToolStarts == 7u && tEvents.uToolDone == 7u, "tool lifecycle events are balanced");
-    CHECK(tEvents.uToolSuccess == 6u && tEvents.uToolFailure == 1u, "six builtin operations succeed and escape is a tool-level failure");
+    CHECK(tEvents.uToolStarts == 8u && tEvents.uToolDone == 8u, "tool lifecycle events are balanced");
+    CHECK(tEvents.uToolSuccess == 7u && tEvents.uToolFailure == 1u, "seven builtin operations succeed and escape is a tool-level failure");
     CHECK(tEvents.sLastArtifact[0] != '\0', "oversized tool output spills to an artifact");
     CHECK(xrtFileExists((str)sSessionPath), "session autosaves atomically during the run");
 
+    memset(&tPatchContext, 0, sizeof(tPatchContext));
+    xworkToolOutputInit(&tPatchOutput);
+    pPatchTool = xwork__find_tool(pAgent, "apply_patch");
+    tPatchContext.pAgent = pAgent;
+    CHECK(pPatchTool && pPatchTool->OnExecute(pPatchTool->pUserData, &tPatchContext,
+        "{\"changes\":[{\"path\":\"sandbox/note.txt\",\"operation\":\"replace\",\"old_text\":\"PATCHED-\",\"new_text\":\"BROKEN-\"},{\"path\":\"sandbox/note.txt/child.txt\",\"operation\":\"create\",\"content\":\"must fail\"}]}",
+        &tPatchOutput, &tError) == XWORK_RESULT_OK && !tPatchOutput.bSuccess,
+        "failed multi-file transaction is reported as a tool-level failure");
+    CHECK(tPatchOutput.sContent && strstr(tPatchOutput.sContent, "rollback completed"), "failed transaction reports successful rollback");
+    xworkToolOutputUnit(&tPatchOutput);
+
     sFile = (char*)xrtFileReadAll((str)"tests/tmp_xwork/sandbox/note.txt", XRT_CP_UTF8, &iFileSize);
-    CHECK(sFile && iFileSize > 1600u && strncmp(sFile, "HELLO-", 6u) == 0, "workspace file was created then precisely edited");
+    CHECK(sFile && iFileSize > 1600u && strncmp(sFile, "PATCHED-", 8u) == 0, "workspace file was created then edited by both edit tools");
+    CHECK(xrtFileExists((str)"tests/tmp_xwork/sandbox/extra.txt"), "multi-file patch transaction created its second target");
+    CHECK(!xrtFileExists((str)"tests/tmp_xwork/sandbox/note.txt/child.txt"), "failed transaction left no partial target behind");
     if ( tEvents.sLastArtifact[0] ) {
         sArtifactAbsolute = (char*)xrtPathJoin(2u, sWorkspace, tEvents.sLastArtifact);
         CHECK(sArtifactAbsolute && xrtFileExists((str)sArtifactAbsolute), "full oversized output artifact exists");
     }
     CHECK(!xrtFileExists((str)"tests/outside.txt"), "workspace escape tool call could not access outside path");
     CHECK(tError.eCode == XWORK_ERROR_NONE, "successful run does not leak a stale recoverable tool error");
+    uCompactionsBeforeExplicit = tMock.uCompactionCalls;
     CHECK(xworkAgentCompact(pAgent, &tError) == XWORK_RESULT_OK, "explicit safe-prefix compaction completes after the run");
-    CHECK(tMock.uCompactionCalls == 2u && tEvents.uCompactions == 2u, "explicit compaction uses model summary and emits lifecycle event");
+    CHECK(tMock.uCompactionCalls == uCompactionsBeforeExplicit + 1u && tEvents.uCompactions == tMock.uCompactionCalls,
+        "explicit compaction adds one model summary and lifecycle event");
 
     xworkRunResultUnit(&tResult);
     xworkAgentDestroy(pAgent);
