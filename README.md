@@ -29,6 +29,7 @@ xcode CLI / IDE host
 - automatic context-pressure checks and transactional summary compaction;
 - explicit `xworkAgentCompact()` for a host-controlled safe compaction checkpoint;
 - journal-backed atomic session checkpoints after prompts, assistant responses, tool batches, and compaction;
+- explicit `xworkAgentResume()` recovery for interrupted model calls and partially completed tool batches, without appending a duplicate user prompt;
 - streaming text/reasoning, model, tool, compaction, completion, and error events;
 - cooperative cancellation;
 - managed long-running processes with stable IDs, incremental output, stdin, stop, and cleanup;
@@ -60,6 +61,8 @@ Filesystem tools reject paths outside the configured workspace. `exec_command` s
 
 Managed process IDs live for the lifetime of one `xwork_agent`. They intentionally are not serialized into the session checkpoint because OS process handles cannot be recovered safely after a host restart. Destroying the agent stops and releases every remaining managed process.
 
+Interrupted tool recovery is intentionally at-least-once: if a process stops after a side effect completes but before its result reaches the journal, that call is still pending and may be retried. Permission and hook checks run again. Hosts should favor idempotent operations and transactional `apply_patch` edits; managed OS processes cannot be reattached after restart. Recovery conservatively requires a fresh successful verification command before accepting completion.
+
 ## Minimal host setup
 
 ```c
@@ -88,6 +91,8 @@ xworkAgentDestroy(agent);
 
 The product host should render `xwork_event` values and install its own approval callback where human confirmation is required.
 
+If startup inspection reports an interrupted durable run, call `xworkAgentResume(agent, &result, &error)` before accepting another prompt. A normal `xworkAgentRun` refuses to append new user input while the durable tail is waiting for a model response or has unresolved tool calls.
+
 For finer control, set `OnPermission` in `xwork_agent_config`. It receives an `xwork_permission_request` for every tool call permitted by the hard read-only ceiling and may return `XWORK_PERMISSION_ALLOW`, `XWORK_PERMISSION_DENY`, or `XWORK_PERMISSION_DEFAULT` to fall back to the approval mode. `OnHook` brackets permitted tool execution; before-tool denial prevents execution, while after-tool denial marks the result failed and explicitly warns that completed side effects are not reversible. Transactional file rollback remains the responsibility of `apply_patch`.
 
 `bRequireVerificationAfterWrite` is enabled by default. When a run mutates the workspace and then tries to finish without a successful `exec_command` after the latest edit, xwork appends a durable verification prompt and continues. `uCompletionVerificationRetries` bounds repeated premature completion attempts without imposing a general Agent turn limit.
@@ -100,4 +105,4 @@ From the repository root on Windows with GCC available:
 build.bat
 ```
 
-The optimized warning-as-error suite covers a forced context compaction followed by a multi-turn workflow using the built-in tools, transactional multi-file editing and rollback, managed-process stdin/output, artifact spill, session persistence, and a rejected workspace escape.
+The optimized warning-as-error suite covers a forced context compaction followed by a multi-turn workflow using the built-in tools, transactional multi-file editing and rollback, managed-process stdin/output, artifact spill, session persistence, interrupted parallel-tool recovery, duplicate-prompt rejection, and a rejected workspace escape.

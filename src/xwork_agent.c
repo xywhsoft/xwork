@@ -514,7 +514,35 @@ static void xwork__emit_error(xwork_agent* pAgent, uint64_t uTurn, const xwork_e
     (void)xwork__emit(pAgent, &tEvent);
 }
 
-xwork_result xworkAgentRun(xwork_agent* pAgent, const char* sPrompt, xwork_run_result* pResult, xwork_error* pError)
+typedef enum xwork_resume_state {
+    XWORK_RESUME_ERROR = -1,
+    XWORK_RESUME_IDLE = 0,
+    XWORK_RESUME_MODEL_SAME_TURN,
+    XWORK_RESUME_MODEL_NEW_TURN,
+    XWORK_RESUME_PENDING_TOOLS
+} xwork_resume_state;
+
+static xwork_resume_state xwork__resume_state(xwork_agent* pAgent, xwork_error* pError)
+{
+    xllm_session_tail tTail;
+    if ( xllmSessionPendingToolCallCount(pAgent->pSession) != 0u ) return XWORK_RESUME_PENDING_TOOLS;
+    if ( !xllmSessionGetTail(pAgent->pSession, &tTail) ) {
+        xwork__set_error(pError, XWORK_ERROR_CONTEXT, "failed to inspect the durable session tail");
+        return XWORK_RESUME_ERROR;
+    }
+    if ( !tTail.bHasMessage ) return XWORK_RESUME_IDLE;
+    if ( tTail.eRole == XLLM_ROLE_USER ) return XWORK_RESUME_MODEL_SAME_TURN;
+    if ( tTail.eRole == XLLM_ROLE_TOOL ) return XWORK_RESUME_MODEL_NEW_TURN;
+    return XWORK_RESUME_IDLE;
+}
+
+static xwork_result xwork__agent_run(
+    xwork_agent* pAgent,
+    const char* sPrompt,
+    bool bResume,
+    xwork_run_result* pResult,
+    xwork_error* pError
+)
 {
     uint64_t uTurn = 0u;
     uint64_t uPreviousBatchHash = 0u;
@@ -522,16 +550,19 @@ xwork_result xworkAgentRun(xwork_agent* pAgent, const char* sPrompt, xwork_run_r
     uint32_t uConsecutiveToolFailures = 0u;
     uint32_t uVerificationPrompts = 0u;
     bool bNeedNewTurn = false;
+    bool bRecoverPendingTools = false;
     bool bWorkspaceChanged = false;
     bool bVerifiedAfterChange = false;
+    xwork_resume_state eResumeState;
     xwork_result eResult = XWORK_RESULT_ERROR;
     xwork_run_result tRun;
     xwork_event tEvent;
     if ( pResult ) memset(pResult, 0, sizeof(*pResult));
     memset(&tRun, 0, sizeof(tRun));
     xworkErrorInit(pError);
-    if ( !pAgent || !sPrompt || !sPrompt[0] || !pResult ) {
-        xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "agent, prompt, and result are required");
+    if ( !pAgent || (!bResume && (!sPrompt || !sPrompt[0])) || !pResult ) {
+        xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT,
+            bResume ? "agent and result are required" : "agent, prompt, and result are required");
         return XWORK_RESULT_ERROR;
     }
     if ( pAgent->bRunning ) {
@@ -542,17 +573,37 @@ xwork_result xworkAgentRun(xwork_agent* pAgent, const char* sPrompt, xwork_run_r
     xwork__atomic_store(&pAgent->iCancelled, 0);
     ++pAgent->uRunSequence;
     pAgent->uArtifactSequence = 0u;
-    uTurn = xllmSessionBeginTurn(pAgent->pSession);
-    if ( !uTurn || !xllmSessionAddText(pAgent->pSession, uTurn, XLLM_ROLE_USER, sPrompt, 0u) ) {
-        xwork__set_error(pError, XWORK_ERROR_CONTEXT, "failed to add user prompt to session");
-        goto cleanup;
+    eResumeState = xwork__resume_state(pAgent, pError);
+    if ( eResumeState == XWORK_RESUME_ERROR ) goto cleanup;
+    if ( bResume ) {
+        if ( eResumeState == XWORK_RESUME_IDLE ) {
+            xwork__set_error(pError, XWORK_ERROR_CONTEXT, "durable session has no interrupted run to resume");
+            goto cleanup;
+        }
+        uTurn = xllmSessionCurrentTurn(pAgent->pSession);
+        bRecoverPendingTools = eResumeState == XWORK_RESUME_PENDING_TOOLS;
+        bNeedNewTurn = eResumeState == XWORK_RESUME_MODEL_NEW_TURN;
+        /* The previous process may have applied a write immediately before it
+         * stopped. Conservatively require a fresh successful verification. */
+        bWorkspaceChanged = true;
+    } else {
+        if ( eResumeState != XWORK_RESUME_IDLE ) {
+            xwork__set_error(pError, XWORK_ERROR_CONTEXT,
+                "durable session contains an interrupted run; resume it before adding another prompt");
+            goto cleanup;
+        }
+        uTurn = xllmSessionBeginTurn(pAgent->pSession);
+        if ( !uTurn || !xllmSessionAddText(pAgent->pSession, uTurn, XLLM_ROLE_USER, sPrompt, 0u) ) {
+            xwork__set_error(pError, XWORK_ERROR_CONTEXT, "failed to add user prompt to session");
+            goto cleanup;
+        }
+        if ( !xwork__save(pAgent, pError) ) goto cleanup;
     }
-    if ( !xwork__save(pAgent, pError) ) goto cleanup;
     memset(&tEvent, 0, sizeof(tEvent));
     tEvent.eKind = XWORK_EVENT_AGENT_START;
     tEvent.uAgentTurn = uTurn;
-    tEvent.sText = sPrompt;
-    tEvent.iTextLength = strlen(sPrompt);
+    tEvent.sText = bResume ? "Resuming interrupted durable agent run." : sPrompt;
+    tEvent.iTextLength = strlen(tEvent.sText);
     if ( !xwork__emit(pAgent, &tEvent) ) {
         xwork__set_error(pError, XWORK_ERROR_CANCELLED, "agent was cancelled at start");
         eResult = XWORK_RESULT_CANCELLED;
@@ -577,6 +628,59 @@ xwork_result xworkAgentRun(xwork_agent* pAgent, const char* sPrompt, xwork_run_r
             xwork__set_error(pError, XWORK_ERROR_LOOP_GUARD, "configured agent-turn limit reached");
             eResult = XWORK_RESULT_LIMIT;
             goto cleanup;
+        }
+        if ( bRecoverPendingTools ) {
+            while ( xllmSessionPendingToolCallCount(pAgent->pSession) != 0u ) {
+                xllm_pending_tool_call tPending;
+                xllm_tool_call tCall;
+                char* sToolResult = NULL;
+                bool bToolSuccess = false;
+                bool bToolEffectApplied = false;
+                const xwork_tool_entry* pExecutedTool;
+                if ( !xllmSessionPendingToolCallAt(pAgent->pSession, 0u, &tPending) ) {
+                    xwork__set_error(pError, XWORK_ERROR_CONTEXT, "failed to inspect a pending recovered tool call");
+                    eResult = XWORK_RESULT_ERROR;
+                    goto cleanup;
+                }
+                memset(&tCall, 0, sizeof(tCall));
+                tCall.sId = (char*)tPending.sId;
+                tCall.sName = (char*)tPending.sName;
+                tCall.sArgumentsJson = (char*)tPending.sArgumentsJson;
+                uTurn = tPending.uTurn;
+                pExecutedTool = xwork__find_tool(pAgent, tCall.sName ? tCall.sName : "");
+                eResult = xwork__execute_tool(pAgent, &tCall, uTurn, &sToolResult,
+                    &bToolSuccess, &bToolEffectApplied, pError);
+                if ( eResult != XWORK_RESULT_OK ) { free(sToolResult); goto cleanup; }
+                if ( !tCall.sId || !tCall.sId[0] ||
+                     !xllmSessionAddToolResult(pAgent->pSession, uTurn, tCall.sId, sToolResult) ) {
+                    free(sToolResult);
+                    xwork__set_error(pError, XWORK_ERROR_CONTEXT, "failed to append a recovered tool result to session");
+                    eResult = XWORK_RESULT_ERROR;
+                    goto cleanup;
+                }
+                free(sToolResult);
+                ++tRun.uToolCalls;
+                if ( bToolEffectApplied && pExecutedTool && pExecutedTool->eEffect == XWORK_TOOL_EFFECT_WORKSPACE_WRITE ) {
+                    bWorkspaceChanged = true;
+                    bVerifiedAfterChange = false;
+                }
+                if ( bToolSuccess ) {
+                    uConsecutiveToolFailures = 0u;
+                    if ( pExecutedTool && strcmp(pExecutedTool->sName, "exec_command") == 0 ) {
+                        bVerifiedAfterChange = true;
+                    }
+                } else {
+                    ++uConsecutiveToolFailures;
+                }
+                if ( !xwork__save(pAgent, pError) ) { eResult = XWORK_RESULT_ERROR; goto cleanup; }
+                if ( uConsecutiveToolFailures >= pAgent->uConsecutiveFailureLimit ) {
+                    xwork__set_error(pError, XWORK_ERROR_LOOP_GUARD, "too many consecutive recovered tool failures");
+                    eResult = XWORK_RESULT_LIMIT;
+                    goto cleanup;
+                }
+            }
+            bRecoverPendingTools = false;
+            bNeedNewTurn = true;
         }
         eResult = xwork__compact_if_needed(pAgent, uTurn, &tRun, false, pError);
         if ( eResult != XWORK_RESULT_OK ) goto cleanup;
@@ -771,6 +875,16 @@ cleanup:
     }
     pAgent->bRunning = false;
     return eResult;
+}
+
+xwork_result xworkAgentRun(xwork_agent* pAgent, const char* sPrompt, xwork_run_result* pResult, xwork_error* pError)
+{
+    return xwork__agent_run(pAgent, sPrompt, false, pResult, pError);
+}
+
+xwork_result xworkAgentResume(xwork_agent* pAgent, xwork_run_result* pResult, xwork_error* pError)
+{
+    return xwork__agent_run(pAgent, NULL, true, pResult, pError);
 }
 
 xwork_result xworkAgentCompact(xwork_agent* pAgent, xwork_error* pError)

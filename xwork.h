@@ -266,6 +266,10 @@ bool xworkAgentCancel(xwork_agent* pAgent);
 const char* xworkAgentWorkspaceRoot(const xwork_agent* pAgent);
 
 xwork_result xworkAgentRun(xwork_agent* pAgent, const char* sPrompt, xwork_run_result* pResult, xwork_error* pError);
+/* Resume an interrupted run without appending another user prompt. Pending
+ * tool calls are completed first; an interrupted model call is retried from
+ * the durable session tail. */
+xwork_result xworkAgentResume(xwork_agent* pAgent, xwork_run_result* pResult, xwork_error* pError);
 /* Force one safe-prefix summary compaction and persist the committed session. */
 xwork_result xworkAgentCompact(xwork_agent* pAgent, xwork_error* pError);
 void xworkRunResultUnit(xwork_run_result* pResult);

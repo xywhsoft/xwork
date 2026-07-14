@@ -277,6 +277,7 @@ static void test_agent_loop(void)
     xwork_tool_output tPatchOutput;
     xwork_tool_output tProcessOutput;
     unsigned long long uManagedId = 0u;
+    uint64_t uInterruptedTurn = 0u;
     unsigned i;
 
     memset(&tMock, 0, sizeof(tMock));
@@ -401,6 +402,47 @@ static void test_agent_loop(void)
     CHECK(xworkAgentCompact(pAgent, &tError) == XWORK_RESULT_OK, "explicit safe-prefix compaction completes after the run");
     CHECK(tMock.uCompactionCalls == uCompactionsBeforeExplicit + 1u && tEvents.uCompactions == tMock.uCompactionCalls,
         "explicit compaction adds one model summary and lifecycle event");
+
+    {
+        xllm_tool_call arrInterruptedCalls[2];
+        xllm_response tInterruptedResponse;
+        xllm_session_stats tInterruptedStats;
+        const char* sVerifyArgs;
+        memset(arrInterruptedCalls, 0, sizeof(arrInterruptedCalls));
+        memset(&tInterruptedResponse, 0, sizeof(tInterruptedResponse));
+        arrInterruptedCalls[0].sId = "call_recovered_list";
+        arrInterruptedCalls[0].sName = "list_files";
+        arrInterruptedCalls[0].sArgumentsJson = "{\"path\":\"sandbox\"}";
+        arrInterruptedCalls[1].sId = "call_recovered_verify";
+        arrInterruptedCalls[1].sName = "exec_command";
+#if defined(_WIN32)
+        sVerifyArgs = "{\"command\":\"type sandbox\\\\note.txt\"}";
+#else
+        sVerifyArgs = "{\"command\":\"cat sandbox/note.txt\"}";
+#endif
+        arrInterruptedCalls[1].sArgumentsJson = (char*)sVerifyArgs;
+        tInterruptedResponse.pToolCalls = arrInterruptedCalls;
+        tInterruptedResponse.iToolCallCount = 2u;
+        uInterruptedTurn = xllmSessionBeginTurn(pSession);
+        CHECK(uInterruptedTurn &&
+            xllmSessionAddText(pSession, uInterruptedTurn, XLLM_ROLE_USER, "Finish this interrupted verification batch.", 0u) &&
+            xllmSessionAddAssistantResponse(pSession, uInterruptedTurn, &tInterruptedResponse) &&
+            xllmSessionAddToolResult(pSession, uInterruptedTurn, "call_recovered_list", "status: success"),
+            "interrupted batch fixture records one completed and one pending tool");
+        CHECK(xllmSessionGetStats(pSession, &tInterruptedStats) && tInterruptedStats.uPendingToolCalls == 1u,
+            "interrupted batch exposes one pending tool before resume");
+        xworkRunResultUnit(&tResult);
+        CHECK(xworkAgentRun(pAgent, "This prompt must not be appended.", &tResult, &tError) == XWORK_RESULT_ERROR &&
+            tError.eCode == XWORK_ERROR_CONTEXT && xllmSessionCurrentTurn(pSession) == uInterruptedTurn,
+            "normal run refuses to duplicate a prompt over interrupted work");
+        CHECK(xworkAgentResume(pAgent, &tResult, &tError) == XWORK_RESULT_OK,
+            "resume executes the pending tool and continues the model loop");
+        CHECK(tResult.uToolCalls == 1u && tResult.uModelCalls == 1u &&
+            tResult.sFinalText && strstr(tResult.sFinalText, "verified"),
+            "resumed run reports only newly recovered work and returns final text");
+        CHECK(xllmSessionGetStats(pSession, &tInterruptedStats) && tInterruptedStats.uPendingToolCalls == 0u,
+            "resumed run durably resolves the pending tool call");
+    }
 
     xworkRunResultUnit(&tResult);
     xworkAgentDestroy(pAgent);
