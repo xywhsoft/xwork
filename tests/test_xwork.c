@@ -141,9 +141,14 @@ static xllm_result mock_complete(
         } else if ( pMock->uAgentCalls == 3u ) {
             pResponse = mock_response("The requested edits are complete.", 0u);
         } else if ( pMock->uAgentCalls == 4u ) {
+            #if defined(_WIN32) || defined(_WIN64)
+                static const char sVerifyArgs[] = "{\"command\":\"type sandbox\\\\note.txt\",\"timeout_ms\":10000}";
+            #else
+                static const char sVerifyArgs[] = "{\"command\":\"cat sandbox/note.txt\",\"timeout_ms\":10000}";
+            #endif
             pResponse = mock_response("", 1u);
             if ( !pResponse || !mock_set_call(pResponse, 0u, "call_exec", "exec_command",
-                    "{\"command\":\"type sandbox\\\\note.txt\",\"timeout_ms\":10000}") ) goto oom;
+                    sVerifyArgs) ) goto oom;
         } else {
             pResponse = mock_response("Implemented, inspected, edited, and verified the workspace file successfully.", 0u);
         }
@@ -195,7 +200,7 @@ static xwork_permission_decision on_permission(void* pUserData, const xwork_perm
     if ( pRequest->eResourceKind == XWORK_RESOURCE_PATH && pRequest->sResource && strstr(pRequest->sResource, "sandbox") ) {
         pMock->bSawPathPermission = true;
     }
-    if ( pRequest->eResourceKind == XWORK_RESOURCE_COMMAND && pRequest->sResource && strstr(pRequest->sResource, "type sandbox") ) {
+    if ( pRequest->eResourceKind == XWORK_RESOURCE_COMMAND && pRequest->sResource && strstr(pRequest->sResource, "sandbox") ) {
         pMock->bSawCommandPermission = true;
     }
     if ( pRequest->eRisk == XWORK_RISK_HIGH ) pMock->bSawHighRiskPermission = true;
