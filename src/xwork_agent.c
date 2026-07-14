@@ -140,14 +140,101 @@ cleanup:
     return bOk;
 }
 
+static char* xwork__permission_resource(
+    const xwork_tool_entry* pTool,
+    const char* sArgumentsJson,
+    xwork_resource_kind* peKind
+)
+{
+    xvalue tArgs = NULL;
+    xvalue tChanges;
+    const char* sValue = NULL;
+    char* sResource = NULL;
+    xwork_buf tPaths = {0};
+    uint64_t uProcessId;
+    bool bValid;
+    uint32_t i;
+    uint32_t iCount;
+    *peKind = XWORK_RESOURCE_NONE;
+    if ( !pTool || !sArgumentsJson ) return NULL;
+    tArgs = xwork__json_parse_object(sArgumentsJson);
+    if ( !tArgs ) return NULL;
+    if ( strcmp(pTool->sName, "exec_command") == 0 || strcmp(pTool->sName, "start_process") == 0 ) {
+        *peKind = XWORK_RESOURCE_COMMAND;
+        sValue = xwork__json_text(tArgs, "command");
+    } else if ( strcmp(pTool->sName, "write_process") == 0 ||
+                strcmp(pTool->sName, "poll_process") == 0 ||
+                strcmp(pTool->sName, "stop_process") == 0 ) {
+        *peKind = XWORK_RESOURCE_PROCESS;
+        uProcessId = xwork__json_u64(tArgs, "process_id", 0u, &bValid);
+        if ( bValid && uProcessId && xwork__buf_appendf(&tPaths, "%llu", (unsigned long long)uProcessId) ) {
+            sResource = xwork__buf_detach(&tPaths);
+        }
+    } else if ( strcmp(pTool->sName, "apply_patch") == 0 ) {
+        *peKind = XWORK_RESOURCE_PATH;
+        tChanges = xwork__json_get(tArgs, "changes");
+        iCount = tChanges && xvoType(tChanges) == XVO_DT_ARRAY ? xvoArrayItemCount(tChanges) : 0u;
+        for ( i = 0u; i < iCount; ++i ) {
+            const char* sPath = xwork__json_text(xvoArrayGetValue(tChanges, i), "path");
+            if ( !sPath ) continue;
+            if ( tPaths.iLen && !xwork__buf_append_cstr(&tPaths, ", ") ) break;
+            if ( !xwork__buf_append_cstr(&tPaths, sPath) ) break;
+            if ( tPaths.iLen > 2048u ) { (void)xwork__buf_append_cstr(&tPaths, ", ..."); break; }
+        }
+        sResource = xwork__buf_detach(&tPaths);
+    } else {
+        *peKind = XWORK_RESOURCE_PATH;
+        sValue = xwork__json_text(tArgs, "path");
+        if ( !sValue ) sValue = xwork__json_text(tArgs, "cwd");
+        if ( !sValue ) sValue = ".";
+    }
+    if ( !sResource && sValue ) sResource = xwork__strdup(sValue);
+    xvoUnref(tArgs);
+    xwork__buf_unit(&tPaths);
+    return sResource;
+}
+
+static xwork_risk_level xwork__tool_risk(const xwork_tool_entry* pTool, const char* sArgumentsJson)
+{
+    if ( pTool->eEffect == XWORK_TOOL_EFFECT_PROCESS ) return XWORK_RISK_HIGH;
+    if ( pTool->eEffect == XWORK_TOOL_EFFECT_WORKSPACE_WRITE ) {
+        if ( strcmp(pTool->sName, "apply_patch") == 0 && sArgumentsJson && strstr(sArgumentsJson, "\"operation\":\"delete\"") ) {
+            return XWORK_RISK_HIGH;
+        }
+        return XWORK_RISK_MEDIUM;
+    }
+    return XWORK_RISK_LOW;
+}
+
 static bool xwork__tool_allowed(
     xwork_agent* pAgent,
     const xwork_tool_entry* pTool,
-    const char* sArgumentsJson
+    const char* sArgumentsJson,
+    uint64_t uTurn
 )
 {
+    xwork_permission_request tRequest;
+    xwork_permission_decision eDecision;
+    char* sResource = NULL;
+    if ( pAgent->eApprovalMode == XWORK_APPROVAL_READ_ONLY && pTool->eEffect != XWORK_TOOL_EFFECT_READ_ONLY ) {
+        return false;
+    }
+    if ( pAgent->OnPermission ) {
+        memset(&tRequest, 0, sizeof(tRequest));
+        sResource = xwork__permission_resource(pTool, sArgumentsJson, &tRequest.eResourceKind);
+        tRequest.sToolName = pTool->sName;
+        tRequest.eEffect = pTool->eEffect;
+        tRequest.eRisk = xwork__tool_risk(pTool, sArgumentsJson);
+        tRequest.sResource = sResource ? sResource : "";
+        tRequest.sArgumentsJson = sArgumentsJson;
+        tRequest.sWorkspaceRoot = pAgent->sWorkspaceRoot;
+        tRequest.uAgentTurn = uTurn;
+        eDecision = pAgent->OnPermission(pAgent->pPermissionUserData, &tRequest);
+        free(sResource);
+        if ( eDecision == XWORK_PERMISSION_ALLOW ) return true;
+        if ( eDecision == XWORK_PERMISSION_DENY ) return false;
+    }
     if ( pTool->eEffect == XWORK_TOOL_EFFECT_READ_ONLY ) return true;
-    if ( pAgent->eApprovalMode == XWORK_APPROVAL_READ_ONLY ) return false;
     if ( pAgent->eApprovalMode == XWORK_APPROVAL_AUTO ) return true;
     return pAgent->OnApproval && pAgent->OnApproval(
         pAgent->pApprovalUserData,
@@ -163,6 +250,7 @@ xwork_result xwork__execute_tool(
     uint64_t uTurn,
     char** ppSessionContent,
     bool* pbSuccess,
+    bool* pbEffectApplied,
     xwork_error* pError
 )
 {
@@ -170,12 +258,16 @@ xwork_result xwork__execute_tool(
     xwork_tool_context tContext;
     xwork_tool_output tOutput;
     xwork_event tEvent;
+    xwork_hook_event tHook;
+    xwork_hook_action eHookAction;
     char* sInline = NULL;
     char* sArtifact = NULL;
     xwork_buf tSession = {0};
+    xwork_buf tHookOutput = {0};
     xwork_result eResult = XWORK_RESULT_ERROR;
     if ( ppSessionContent ) *ppSessionContent = NULL;
     if ( pbSuccess ) *pbSuccess = false;
+    if ( pbEffectApplied ) *pbEffectApplied = false;
     if ( !pAgent || !pCall || !ppSessionContent ) {
         xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "invalid tool execution arguments");
         return XWORK_RESULT_ERROR;
@@ -195,9 +287,28 @@ xwork_result xwork__execute_tool(
     }
     if ( !pTool ) {
         if ( !xworkToolOutputSet(&tOutput, false, "unknown tool name") ) goto oom;
-    } else if ( !xwork__tool_allowed(pAgent, pTool, pCall->sArgumentsJson ? pCall->sArgumentsJson : "{}") ) {
+    } else if ( !xwork__tool_allowed(pAgent, pTool, pCall->sArgumentsJson ? pCall->sArgumentsJson : "{}", uTurn) ) {
         if ( !xworkToolOutputSet(&tOutput, false, "tool execution denied by approval policy") ) goto oom;
     } else {
+        if ( pAgent->OnHook ) {
+            memset(&tHook, 0, sizeof(tHook));
+            tHook.ePhase = XWORK_HOOK_BEFORE_TOOL;
+            tHook.uAgentTurn = uTurn;
+            tHook.sToolName = pTool->sName;
+            tHook.eEffect = pTool->eEffect;
+            tHook.sArgumentsJson = pCall->sArgumentsJson ? pCall->sArgumentsJson : "{}";
+            eHookAction = pAgent->OnHook(pAgent->pHookUserData, &tHook);
+            if ( eHookAction == XWORK_HOOK_DENY ) {
+                if ( !xworkToolOutputSet(&tOutput, false, "tool execution denied by before-tool hook") ) goto oom;
+                goto tool_ready;
+            }
+            if ( eHookAction == XWORK_HOOK_CANCEL ) {
+                xwork__atomic_store(&pAgent->iCancelled, 1);
+                xwork__set_error(pError, XWORK_ERROR_CANCELLED, "agent cancelled by before-tool hook");
+                eResult = XWORK_RESULT_CANCELLED;
+                goto cleanup;
+            }
+        }
         memset(&tContext, 0, sizeof(tContext));
         tContext.pAgent = pAgent;
         tContext.sWorkspaceRoot = pAgent->sWorkspaceRoot;
@@ -219,7 +330,31 @@ xwork_result xwork__execute_tool(
         if ( !tOutput.sContent ) {
             if ( !xworkToolOutputSet(&tOutput, false, "tool returned no output") ) goto oom;
         }
+        if ( pbEffectApplied ) *pbEffectApplied = tOutput.bSuccess;
+        if ( pAgent->OnHook ) {
+            memset(&tHook, 0, sizeof(tHook));
+            tHook.ePhase = XWORK_HOOK_AFTER_TOOL;
+            tHook.uAgentTurn = uTurn;
+            tHook.sToolName = pTool->sName;
+            tHook.eEffect = pTool->eEffect;
+            tHook.sArgumentsJson = pCall->sArgumentsJson ? pCall->sArgumentsJson : "{}";
+            tHook.sOutput = tOutput.sContent;
+            tHook.bSuccess = tOutput.bSuccess;
+            eHookAction = pAgent->OnHook(pAgent->pHookUserData, &tHook);
+            if ( eHookAction == XWORK_HOOK_DENY ) {
+                if ( !xwork__buf_append_cstr(&tHookOutput,
+                        "after-tool hook rejected this result; the tool may already have completed side effects\n--- original result ---\n") ||
+                     !xwork__buf_append_cstr(&tHookOutput, tOutput.sContent) ||
+                     !xworkToolOutputSet(&tOutput, false, tHookOutput.pData) ) goto oom;
+            } else if ( eHookAction == XWORK_HOOK_CANCEL ) {
+                xwork__atomic_store(&pAgent->iCancelled, 1);
+                xwork__set_error(pError, XWORK_ERROR_CANCELLED, "agent cancelled by after-tool hook");
+                eResult = XWORK_RESULT_CANCELLED;
+                goto cleanup;
+            }
+        }
     }
+tool_ready:
     if ( !xwork__spill_tool_output(
             pAgent,
             pCall->sName ? pCall->sName : "tool",
@@ -264,6 +399,7 @@ cleanup:
     free(sInline);
     free(sArtifact);
     xwork__buf_unit(&tSession);
+    xwork__buf_unit(&tHookOutput);
     return eResult;
 }
 
@@ -384,7 +520,10 @@ xwork_result xworkAgentRun(xwork_agent* pAgent, const char* sPrompt, xwork_run_r
     uint64_t uPreviousBatchHash = 0u;
     uint32_t uRepeatedBatches = 0u;
     uint32_t uConsecutiveToolFailures = 0u;
+    uint32_t uVerificationPrompts = 0u;
     bool bNeedNewTurn = false;
+    bool bWorkspaceChanged = false;
+    bool bVerifiedAfterChange = false;
     xwork_result eResult = XWORK_RESULT_ERROR;
     xwork_run_result tRun;
     xwork_event tEvent;
@@ -530,6 +669,26 @@ xwork_result xworkAgentRun(xwork_agent* pAgent, const char* sPrompt, xwork_run_r
                 eResult = XWORK_RESULT_ERROR;
                 goto cleanup;
             }
+            if ( pAgent->bRequireVerificationAfterWrite && bWorkspaceChanged && !bVerifiedAfterChange ) {
+                static const char sVerificationPrompt[] =
+                    "Completion verification gate: this run changed the workspace, but no successful verification command has run after the latest change. Inspect the resulting diff and run the most relevant build, test, syntax, static-analysis, or smoke command now. Do not merely describe what should be tested. If the project has no test suite, run a concrete executable or compiler check that can fail on the change.";
+                xllmResponseDestroy(pResponse);
+                pResponse = NULL;
+                if ( uVerificationPrompts >= pAgent->uCompletionVerificationRetries ) {
+                    xwork__set_error(pError, XWORK_ERROR_LOOP_GUARD, "agent repeatedly attempted to finish without verifying workspace changes");
+                    eResult = XWORK_RESULT_LIMIT;
+                    goto cleanup;
+                }
+                ++uVerificationPrompts;
+                uTurn = xllmSessionBeginTurn(pAgent->pSession);
+                if ( !uTurn || !xllmSessionAddText(pAgent->pSession, uTurn, XLLM_ROLE_USER, sVerificationPrompt, 0u) ) {
+                    xwork__set_error(pError, XWORK_ERROR_CONTEXT, "failed to append completion verification gate");
+                    eResult = XWORK_RESULT_ERROR;
+                    goto cleanup;
+                }
+                if ( !xwork__save(pAgent, pError) ) { eResult = XWORK_RESULT_ERROR; goto cleanup; }
+                continue;
+            }
             tRun.sFinalText = xwork__strdup(pResponse->sContent);
             xllmResponseDestroy(pResponse);
             if ( !tRun.sFinalText ) {
@@ -552,8 +711,12 @@ xwork_result xworkAgentRun(xwork_agent* pAgent, const char* sPrompt, xwork_run_r
         for ( i = 0u; i < pResponse->iToolCallCount; ++i ) {
             char* sToolResult = NULL;
             bool bToolSuccess = false;
+            bool bToolEffectApplied = false;
             const char* sCallId = pResponse->pToolCalls[i].sId;
-            eResult = xwork__execute_tool(pAgent, &pResponse->pToolCalls[i], uTurn, &sToolResult, &bToolSuccess, pError);
+            const xwork_tool_entry* pExecutedTool = xwork__find_tool(pAgent,
+                pResponse->pToolCalls[i].sName ? pResponse->pToolCalls[i].sName : "");
+            eResult = xwork__execute_tool(pAgent, &pResponse->pToolCalls[i], uTurn, &sToolResult,
+                &bToolSuccess, &bToolEffectApplied, pError);
             if ( eResult != XWORK_RESULT_OK ) { free(sToolResult); xllmResponseDestroy(pResponse); goto cleanup; }
             if ( !sCallId || !sCallId[0] || !xllmSessionAddToolResult(pAgent->pSession, uTurn, sCallId, sToolResult) ) {
                 free(sToolResult);
@@ -564,7 +727,16 @@ xwork_result xworkAgentRun(xwork_agent* pAgent, const char* sPrompt, xwork_run_r
             }
             free(sToolResult);
             ++tRun.uToolCalls;
-            if ( bToolSuccess ) uConsecutiveToolFailures = 0u;
+            if ( bToolEffectApplied && pExecutedTool && pExecutedTool->eEffect == XWORK_TOOL_EFFECT_WORKSPACE_WRITE ) {
+                bWorkspaceChanged = true;
+                bVerifiedAfterChange = false;
+            }
+            if ( bToolSuccess ) {
+                uConsecutiveToolFailures = 0u;
+                if ( bWorkspaceChanged && pExecutedTool && strcmp(pExecutedTool->sName, "exec_command") == 0 ) {
+                    bVerifiedAfterChange = true;
+                }
+            }
             else ++uConsecutiveToolFailures;
             if ( uConsecutiveToolFailures >= pAgent->uConsecutiveFailureLimit ) {
                 xllmResponseDestroy(pResponse);

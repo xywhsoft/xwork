@@ -66,6 +66,57 @@ typedef enum xwork_approval_mode {
     XWORK_APPROVAL_READ_ONLY
 } xwork_approval_mode;
 
+typedef enum xwork_permission_decision {
+    XWORK_PERMISSION_DEFAULT = 0,
+    XWORK_PERMISSION_ALLOW,
+    XWORK_PERMISSION_DENY
+} xwork_permission_decision;
+
+typedef enum xwork_resource_kind {
+    XWORK_RESOURCE_NONE = 0,
+    XWORK_RESOURCE_PATH,
+    XWORK_RESOURCE_COMMAND,
+    XWORK_RESOURCE_PROCESS
+} xwork_resource_kind;
+
+typedef enum xwork_risk_level {
+    XWORK_RISK_LOW = 0,
+    XWORK_RISK_MEDIUM,
+    XWORK_RISK_HIGH
+} xwork_risk_level;
+
+typedef struct xwork_permission_request {
+    const char* sToolName;
+    xwork_tool_effect eEffect;
+    xwork_risk_level eRisk;
+    xwork_resource_kind eResourceKind;
+    const char* sResource;
+    const char* sArgumentsJson;
+    const char* sWorkspaceRoot;
+    uint64_t uAgentTurn;
+} xwork_permission_request;
+
+typedef enum xwork_hook_phase {
+    XWORK_HOOK_BEFORE_TOOL = 0,
+    XWORK_HOOK_AFTER_TOOL
+} xwork_hook_phase;
+
+typedef enum xwork_hook_action {
+    XWORK_HOOK_CONTINUE = 0,
+    XWORK_HOOK_DENY,
+    XWORK_HOOK_CANCEL
+} xwork_hook_action;
+
+typedef struct xwork_hook_event {
+    xwork_hook_phase ePhase;
+    uint64_t uAgentTurn;
+    const char* sToolName;
+    xwork_tool_effect eEffect;
+    const char* sArgumentsJson;
+    const char* sOutput;
+    bool bSuccess;
+} xwork_hook_event;
+
 typedef struct xwork_tool_context {
     xwork_agent* pAgent;
     const char* sWorkspaceRoot;
@@ -134,6 +185,16 @@ typedef bool (*xwork_approval_fn)(
     const char* sArgumentsJson
 );
 
+/* Structured per-call policy. DEFAULT falls back to eApprovalMode/OnApproval. */
+typedef xwork_permission_decision (*xwork_permission_fn)(
+    void* pUserData,
+    const xwork_permission_request* pRequest
+);
+
+/* DENY is a tool-level rejection before execution. After execution it marks
+ * the tool result failed because an already-completed side effect cannot be undone. */
+typedef xwork_hook_action (*xwork_hook_fn)(void* pUserData, const xwork_hook_event* pEvent);
+
 /* Injectable model boundary used by tests and offline hosts. */
 typedef xllm_result (*xwork_model_complete_fn)(
     void* pUserData,
@@ -156,6 +217,10 @@ typedef struct xwork_agent_config {
     xwork_approval_mode eApprovalMode;
     xwork_approval_fn OnApproval;
     void* pApprovalUserData;
+    xwork_permission_fn OnPermission;
+    void* pPermissionUserData;
+    xwork_hook_fn OnHook;
+    void* pHookUserData;
 
     xwork_event_fn OnEvent;
     void* pEventUserData;
@@ -168,10 +233,12 @@ typedef struct xwork_agent_config {
     uint32_t uRepeatedToolBatchLimit;
     uint32_t uConsecutiveFailureLimit;
     uint32_t uMaxManagedProcesses;
+    uint32_t uCompletionVerificationRetries; /* Premature final answers after a write; default 2. */
     size_t iMaxInlineToolBytes;
     size_t iMaxCapturedCommandBytes;
     bool bRegisterBuiltinTools;
     bool bAutoSaveSession;
+    bool bRequireVerificationAfterWrite;      /* Require successful exec_command after latest write. */
 } xwork_agent_config;
 
 typedef struct xwork_run_result {

@@ -17,6 +17,13 @@ typedef struct mock_model {
     bool bSawParallel;
     bool bSawToolResults;
     bool bSawCompactionSummary;
+    bool bSawVerificationGate;
+    uint32_t uPermissionCalls;
+    bool bSawPathPermission;
+    bool bSawCommandPermission;
+    bool bSawHighRiskPermission;
+    uint32_t uBeforeToolHooks;
+    uint32_t uAfterToolHooks;
 } mock_model;
 
 typedef struct test_events {
@@ -111,6 +118,7 @@ static xllm_result mock_complete(
         pMock->bSawParallel = pRequest->bParallelToolCalls;
         if ( pMock->uAgentCalls > 1u && request_has_role(pRequest, XLLM_ROLE_TOOL, 1u) ) pMock->bSawToolResults = true;
         if ( request_has_text(pRequest, "Objective: test the xwork tool loop after compaction") ) pMock->bSawCompactionSummary = true;
+        if ( request_has_text(pRequest, "Completion verification gate") ) pMock->bSawVerificationGate = true;
         if ( pMock->uAgentCalls == 1u ) {
             xwork_buf tArgs = {0};
             pResponse = mock_response("", 6u);
@@ -131,6 +139,8 @@ static xllm_result mock_complete(
             if ( !pResponse || !mock_set_call(pResponse, 0u, "call_patch", "apply_patch",
                     "{\"changes\":[{\"path\":\"sandbox/note.txt\",\"operation\":\"replace\",\"old_text\":\"HELLO-\",\"new_text\":\"PATCHED-\"},{\"path\":\"sandbox/extra.txt\",\"operation\":\"create\",\"content\":\"transaction created this file\\n\"}]}") ) goto oom;
         } else if ( pMock->uAgentCalls == 3u ) {
+            pResponse = mock_response("The requested edits are complete.", 0u);
+        } else if ( pMock->uAgentCalls == 4u ) {
             pResponse = mock_response("", 1u);
             if ( !pResponse || !mock_set_call(pResponse, 0u, "call_exec", "exec_command",
                     "{\"command\":\"type sandbox\\\\note.txt\",\"timeout_ms\":10000}") ) goto oom;
@@ -176,6 +186,31 @@ static bool on_event(void* pUserData, const xwork_event* pEvent)
         default: break;
     }
     return true;
+}
+
+static xwork_permission_decision on_permission(void* pUserData, const xwork_permission_request* pRequest)
+{
+    mock_model* pMock = (mock_model*)pUserData;
+    ++pMock->uPermissionCalls;
+    if ( pRequest->eResourceKind == XWORK_RESOURCE_PATH && pRequest->sResource && strstr(pRequest->sResource, "sandbox") ) {
+        pMock->bSawPathPermission = true;
+    }
+    if ( pRequest->eResourceKind == XWORK_RESOURCE_COMMAND && pRequest->sResource && strstr(pRequest->sResource, "type sandbox") ) {
+        pMock->bSawCommandPermission = true;
+    }
+    if ( pRequest->eRisk == XWORK_RISK_HIGH ) pMock->bSawHighRiskPermission = true;
+    return XWORK_PERMISSION_DEFAULT;
+}
+
+static xwork_hook_action on_hook(void* pUserData, const xwork_hook_event* pEvent)
+{
+    mock_model* pMock = (mock_model*)pUserData;
+    if ( pEvent->ePhase == XWORK_HOOK_BEFORE_TOOL ) ++pMock->uBeforeToolHooks;
+    else if ( pEvent->ePhase == XWORK_HOOK_AFTER_TOOL ) {
+        ++pMock->uAfterToolHooks;
+        if ( !pEvent->sOutput ) return XWORK_HOOK_CANCEL;
+    }
+    return XWORK_HOOK_CONTINUE;
 }
 
 static char* make_text(size_t iSize, char ch)
@@ -278,6 +313,10 @@ static void test_agent_loop(void)
     tAgentConfig.pModelUserData = &tMock;
     tAgentConfig.OnEvent = on_event;
     tAgentConfig.pEventUserData = &tEvents;
+    tAgentConfig.OnPermission = on_permission;
+    tAgentConfig.pPermissionUserData = &tMock;
+    tAgentConfig.OnHook = on_hook;
+    tAgentConfig.pHookUserData = &tMock;
     tAgentConfig.iMaxInlineToolBytes = 300u;
     pAgent = xworkAgentCreate(&tAgentConfig, &tError);
     CHECK(pAgent != NULL, "agent creates with injected model boundary");
@@ -286,11 +325,15 @@ static void test_agent_loop(void)
 
     CHECK(xworkAgentRun(pAgent, "Create and verify the requested note file.", &tResult, &tError) == XWORK_RESULT_OK, "multi-turn tool loop completes");
     CHECK(tResult.sFinalText && strstr(tResult.sFinalText, "verified"), "final assistant response returned");
-    CHECK(tResult.uAgentTurns == 4u && tResult.uToolCalls == 8u, "four model turns and eight tool calls recorded");
+    CHECK(tResult.uAgentTurns == 5u && tResult.uToolCalls == 8u, "verification gate adds one model turn while eight tool calls run");
     CHECK(tResult.uCompactions >= 1u && tMock.uCompactionCalls == tResult.uCompactions, "context compaction occurred before or during tool work");
     CHECK(tEvents.uCompactions == tResult.uCompactions && tEvents.uErrors == 0u, "compaction events emitted without agent errors");
     CHECK(tMock.bSawTools && tMock.bSawParallel && tMock.bSawToolResults, "tool definitions, parallel flag, and continuity reach model");
     CHECK(tMock.bSawCompactionSummary, "post-compaction model turns receive the summary checkpoint");
+    CHECK(tMock.bSawVerificationGate, "premature completion receives a durable verification-gate prompt");
+    CHECK(tMock.uPermissionCalls == 8u && tMock.bSawPathPermission && tMock.bSawCommandPermission && tMock.bSawHighRiskPermission,
+        "structured permission callback sees every tool plus path, command, and risk metadata");
+    CHECK(tMock.uBeforeToolHooks == 8u && tMock.uAfterToolHooks == 8u, "before/after tool hooks bracket every executed tool");
     CHECK(tEvents.uToolStarts == 8u && tEvents.uToolDone == 8u, "tool lifecycle events are balanced");
     CHECK(tEvents.uToolSuccess == 7u && tEvents.uToolFailure == 1u, "seven builtin operations succeed and escape is a tool-level failure");
     CHECK(tEvents.sLastArtifact[0] != '\0', "oversized tool output spills to an artifact");

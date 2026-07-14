@@ -33,6 +33,9 @@ xcode CLI / IDE host
 - cooperative cancellation;
 - managed long-running processes with stable IDs, incremental output, stdin, stop, and cleanup;
 - approval modes for automatic, callback-controlled, and read-only execution;
+- structured per-tool permission decisions with risk and path/command/process resource metadata;
+- before/after tool hooks over full, untruncated arguments and results;
+- a completion verification gate that requires a successful command after the latest workspace mutation;
 - workspace-contained filesystem path resolution;
 - oversized tool output spill to `.xcode/artifacts`, with bounded head/tail context returned to the model;
 - injectable model callback for deterministic offline tests.
@@ -84,6 +87,10 @@ xworkAgentDestroy(agent);
 ```
 
 The product host should render `xwork_event` values and install its own approval callback where human confirmation is required.
+
+For finer control, set `OnPermission` in `xwork_agent_config`. It receives an `xwork_permission_request` for every tool call permitted by the hard read-only ceiling and may return `XWORK_PERMISSION_ALLOW`, `XWORK_PERMISSION_DENY`, or `XWORK_PERMISSION_DEFAULT` to fall back to the approval mode. `OnHook` brackets permitted tool execution; before-tool denial prevents execution, while after-tool denial marks the result failed and explicitly warns that completed side effects are not reversible. Transactional file rollback remains the responsibility of `apply_patch`.
+
+`bRequireVerificationAfterWrite` is enabled by default. When a run mutates the workspace and then tries to finish without a successful `exec_command` after the latest edit, xwork appends a durable verification prompt and continues. `uCompletionVerificationRetries` bounds repeated premature completion attempts without imposing a general Agent turn limit.
 
 ## Build and test
 

@@ -353,10 +353,12 @@ void xworkAgentConfigInit(xwork_agent_config* pConfig)
     pConfig->uRepeatedToolBatchLimit = 3u;
     pConfig->uConsecutiveFailureLimit = 5u;
     pConfig->uMaxManagedProcesses = 8u;
+    pConfig->uCompletionVerificationRetries = 2u;
     pConfig->iMaxInlineToolBytes = 64u * 1024u;
     pConfig->iMaxCapturedCommandBytes = 8u * 1024u * 1024u;
     pConfig->bRegisterBuiltinTools = true;
     pConfig->bAutoSaveSession = true;
+    pConfig->bRequireVerificationAfterWrite = true;
 }
 
 static void xwork__tool_entry_unit(xwork_tool_entry* pTool)
@@ -459,6 +461,10 @@ xwork_agent* xworkAgentCreate(const xwork_agent_config* pConfig, xwork_error* pE
     pAgent->eApprovalMode = pConfig->eApprovalMode;
     pAgent->OnApproval = pConfig->OnApproval;
     pAgent->pApprovalUserData = pConfig->pApprovalUserData;
+    pAgent->OnPermission = pConfig->OnPermission;
+    pAgent->pPermissionUserData = pConfig->pPermissionUserData;
+    pAgent->OnHook = pConfig->OnHook;
+    pAgent->pHookUserData = pConfig->pHookUserData;
     pAgent->OnEvent = pConfig->OnEvent;
     pAgent->pEventUserData = pConfig->pEventUserData;
     pAgent->OnModelComplete = pConfig->OnModelComplete;
@@ -468,9 +474,11 @@ xwork_agent* xworkAgentCreate(const xwork_agent_config* pConfig, xwork_error* pE
     pAgent->uRepeatedToolBatchLimit = pConfig->uRepeatedToolBatchLimit ? pConfig->uRepeatedToolBatchLimit : 3u;
     pAgent->uConsecutiveFailureLimit = pConfig->uConsecutiveFailureLimit ? pConfig->uConsecutiveFailureLimit : 5u;
     pAgent->uMaxManagedProcesses = pConfig->uMaxManagedProcesses ? pConfig->uMaxManagedProcesses : 8u;
+    pAgent->uCompletionVerificationRetries = pConfig->uCompletionVerificationRetries ? pConfig->uCompletionVerificationRetries : 2u;
     pAgent->iMaxInlineToolBytes = pConfig->iMaxInlineToolBytes ? pConfig->iMaxInlineToolBytes : 64u * 1024u;
     pAgent->iMaxCapturedCommandBytes = pConfig->iMaxCapturedCommandBytes ? pConfig->iMaxCapturedCommandBytes : 8u * 1024u * 1024u;
     pAgent->bAutoSaveSession = pConfig->bAutoSaveSession;
+    pAgent->bRequireVerificationAfterWrite = pConfig->bRequireVerificationAfterWrite;
 
     if ( !xllmSessionGetStats(pAgent->pSession, &tStats) ) {
         xworkAgentDestroy(pAgent);

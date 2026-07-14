@@ -59,6 +59,10 @@ struct xwork_agent {
     xwork_approval_mode eApprovalMode;
     xwork_approval_fn OnApproval;
     void* pApprovalUserData;
+    xwork_permission_fn OnPermission;
+    void* pPermissionUserData;
+    xwork_hook_fn OnHook;
+    void* pHookUserData;
     xwork_event_fn OnEvent;
     void* pEventUserData;
     xwork_model_complete_fn OnModelComplete;
@@ -69,9 +73,11 @@ struct xwork_agent {
     uint32_t uRepeatedToolBatchLimit;
     uint32_t uConsecutiveFailureLimit;
     uint32_t uMaxManagedProcesses;
+    uint32_t uCompletionVerificationRetries;
     size_t iMaxInlineToolBytes;
     size_t iMaxCapturedCommandBytes;
     bool bAutoSaveSession;
+    bool bRequireVerificationAfterWrite;
     volatile long iCancelled;
     bool bRunning;
 
@@ -119,6 +125,7 @@ xwork_result xwork__execute_tool(
     uint64_t uTurn,
     char** ppSessionContent,
     bool* pbSuccess,
+    bool* pbEffectApplied,
     xwork_error* pError
 );
 
