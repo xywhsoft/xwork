@@ -336,7 +336,7 @@ bool xwork__save(xwork_agent* pAgent, xwork_error* pError)
         return false;
     }
     xllmErrorInit(&tError);
-    if ( !xllmSessionSave(pAgent->pSession, pAgent->sSessionPath, &tError) ) {
+    if ( !xllmSessionCheckpoint(pAgent->pSession, pAgent->sSessionPath, &tError) ) {
         xwork__set_error(pError, XWORK_ERROR_IO, tError.sMessage[0] ? tError.sMessage : "failed to save session");
         return false;
     }

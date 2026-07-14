@@ -28,7 +28,7 @@ xcode CLI / IDE host
 - assistant tool calls and tool results preserved as valid session pairs;
 - automatic context-pressure checks and transactional summary compaction;
 - explicit `xworkAgentCompact()` for a host-controlled safe compaction checkpoint;
-- atomic session autosave after prompts, assistant responses, tool batches, and compaction;
+- journal-backed atomic session checkpoints after prompts, assistant responses, tool batches, and compaction;
 - streaming text/reasoning, model, tool, compaction, completion, and error events;
 - cooperative cancellation;
 - approval modes for automatic, callback-controlled, and read-only execution;
