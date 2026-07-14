@@ -39,6 +39,15 @@ typedef struct xwork_tool_entry {
     void* pUserData;
 } xwork_tool_entry;
 
+typedef struct xwork_process_entry {
+    uint64_t uId;
+    xprocess* pProcess;
+    char* sCommand;
+    uint64_t uStdoutOffset;
+    uint64_t uStderrOffset;
+    bool bStdinClosed;
+} xwork_process_entry;
+
 struct xwork_agent {
     xllm_client* pClient;
     xllm_session* pSession;
@@ -59,6 +68,7 @@ struct xwork_agent {
     uint32_t uMaxAgentTurns;
     uint32_t uRepeatedToolBatchLimit;
     uint32_t uConsecutiveFailureLimit;
+    uint32_t uMaxManagedProcesses;
     size_t iMaxInlineToolBytes;
     size_t iMaxCapturedCommandBytes;
     bool bAutoSaveSession;
@@ -68,6 +78,10 @@ struct xwork_agent {
     xwork_tool_entry* pTools;
     size_t iToolCount;
     size_t iToolCap;
+    xwork_process_entry* pProcesses;
+    size_t iProcessCount;
+    size_t iProcessCap;
+    uint64_t uNextProcessId;
     uint64_t uArtifactSequence;
     uint64_t uRunSequence;
 };
@@ -97,6 +111,7 @@ bool xwork__ensure_parent(const char* sPath);
 bool xwork__emit(xwork_agent* pAgent, const xwork_event* pEvent);
 bool xwork__save(xwork_agent* pAgent, xwork_error* pError);
 const xwork_tool_entry* xwork__find_tool(const xwork_agent* pAgent, const char* sName);
+void xwork__processes_unit(xwork_agent* pAgent);
 
 xwork_result xwork__execute_tool(
     xwork_agent* pAgent,

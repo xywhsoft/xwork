@@ -927,6 +927,394 @@ cleanup:
     return eResult;
 }
 
+static void xwork__process_entry_close(xwork_process_entry* pEntry)
+{
+    if ( !pEntry ) return;
+    if ( pEntry->pProcess ) {
+        if ( xrtProcessIsRunning(pEntry->pProcess) ) {
+            (void)xrtProcessKillTree(pEntry->pProcess);
+            if ( xrtProcessWaitTimeout(pEntry->pProcess, 3000u) != XRT_WAIT_OK ) {
+                (void)xrtProcessKill(pEntry->pProcess);
+                (void)xrtProcessWait(pEntry->pProcess);
+            }
+        }
+        xrtProcessDestroy(pEntry->pProcess);
+    }
+    free(pEntry->sCommand);
+    memset(pEntry, 0, sizeof(*pEntry));
+}
+
+static void xwork__process_remove(xwork_agent* pAgent, size_t iIndex)
+{
+    if ( !pAgent || iIndex >= pAgent->iProcessCount ) return;
+    xwork__process_entry_close(&pAgent->pProcesses[iIndex]);
+    if ( iIndex + 1u < pAgent->iProcessCount ) {
+        pAgent->pProcesses[iIndex] = pAgent->pProcesses[pAgent->iProcessCount - 1u];
+        memset(&pAgent->pProcesses[pAgent->iProcessCount - 1u], 0, sizeof(*pAgent->pProcesses));
+    }
+    --pAgent->iProcessCount;
+}
+
+void xwork__processes_unit(xwork_agent* pAgent)
+{
+    if ( !pAgent ) return;
+    while ( pAgent->iProcessCount ) xwork__process_remove(pAgent, pAgent->iProcessCount - 1u);
+    free(pAgent->pProcesses);
+    pAgent->pProcesses = NULL;
+    pAgent->iProcessCap = 0u;
+}
+
+static xwork_process_entry* xwork__process_find(xwork_agent* pAgent, uint64_t uId, size_t* piIndex)
+{
+    size_t i;
+    if ( piIndex ) *piIndex = (size_t)-1;
+    if ( !pAgent || !uId ) return NULL;
+    for ( i = 0u; i < pAgent->iProcessCount; ++i ) {
+        if ( pAgent->pProcesses[i].uId == uId ) {
+            if ( piIndex ) *piIndex = i;
+            return &pAgent->pProcesses[i];
+        }
+    }
+    return NULL;
+}
+
+static xwork_process_entry* xwork__process_add(xwork_agent* pAgent)
+{
+    xwork_process_entry* pNew;
+    size_t i;
+    size_t iCap;
+    for ( i = pAgent->iProcessCount; i > 0u && pAgent->iProcessCount >= pAgent->uMaxManagedProcesses; --i ) {
+        if ( !xrtProcessIsRunning(pAgent->pProcesses[i - 1u].pProcess) ) xwork__process_remove(pAgent, i - 1u);
+    }
+    if ( pAgent->iProcessCount >= pAgent->uMaxManagedProcesses ) return NULL;
+    if ( pAgent->iProcessCount == pAgent->iProcessCap ) {
+        iCap = pAgent->iProcessCap ? pAgent->iProcessCap * 2u : 4u;
+        if ( iCap > pAgent->uMaxManagedProcesses ) iCap = pAgent->uMaxManagedProcesses;
+        pNew = (xwork_process_entry*)realloc(pAgent->pProcesses, iCap * sizeof(*pNew));
+        if ( !pNew ) return NULL;
+        memset(pNew + pAgent->iProcessCap, 0, (iCap - pAgent->iProcessCap) * sizeof(*pNew));
+        pAgent->pProcesses = pNew;
+        pAgent->iProcessCap = iCap;
+    }
+    pNew = &pAgent->pProcesses[pAgent->iProcessCount++];
+    memset(pNew, 0, sizeof(*pNew));
+    pNew->uId = ++pAgent->uNextProcessId;
+    if ( pNew->uId == 0u ) pNew->uId = ++pAgent->uNextProcessId;
+    return pNew;
+}
+
+static bool xwork__append_process_stream(
+    xwork_buf* pOutput,
+    xwork_process_entry* pEntry,
+    bool bStderr,
+    size_t iMaxBytes
+)
+{
+    uint64_t* puOffset = bStderr ? &pEntry->uStderrOffset : &pEntry->uStdoutOffset;
+    uint64_t uRequested = *puOffset;
+    xprocessreadinfo tInfo;
+    void* pData;
+    size_t iSize = 0u;
+    memset(&tInfo, 0, sizeof(tInfo));
+    pData = bStderr
+        ? xrtProcessReadStderrSince(pEntry->pProcess, uRequested, iMaxBytes, &iSize, &tInfo)
+        : xrtProcessReadStdoutSince(pEntry->pProcess, uRequested, iMaxBytes, &iSize, &tInfo);
+    if ( tInfo.iNextOffset > *puOffset ) *puOffset = tInfo.iNextOffset;
+    if ( tInfo.iBaseOffset > uRequested &&
+         !xwork__buf_appendf(pOutput, "[%s output before offset %llu was dropped by the capture limit]\n",
+            bStderr ? "stderr" : "stdout", (unsigned long long)tInfo.iBaseOffset) ) goto fail;
+    if ( iSize ) {
+        if ( !xwork__buf_appendf(pOutput, "--- %s ---\n", bStderr ? "stderr" : "stdout") ||
+             !xwork__buf_append_process_text(pOutput, pData, iSize) ||
+             !xwork__buf_append_char(pOutput, '\n') ) goto fail;
+    }
+    if ( pData ) xrtFree(pData);
+    return true;
+fail:
+    if ( pData ) xrtFree(pData);
+    return false;
+}
+
+static bool xwork__append_process_status(
+    xwork_buf* pOutput,
+    xwork_process_entry* pEntry,
+    uint32_t uWaitMs,
+    size_t iMaxBytes
+)
+{
+    bool bRunning;
+    xprocessexitinfo tExit;
+    if ( uWaitMs && xrtProcessIsRunning(pEntry->pProcess) ) {
+        (void)xrtProcessWaitTimeout(pEntry->pProcess, uWaitMs);
+    }
+    bRunning = xrtProcessIsRunning(pEntry->pProcess);
+    if ( !xwork__buf_appendf(pOutput, "process_id: %llu\nstate: %s\ncommand: %s\n",
+            (unsigned long long)pEntry->uId, bRunning ? "running" : "exited",
+            pEntry->sCommand ? pEntry->sCommand : "") ) return false;
+    if ( !xwork__append_process_stream(pOutput, pEntry, false, iMaxBytes) ||
+         !xwork__append_process_stream(pOutput, pEntry, true, iMaxBytes) ) return false;
+    if ( !bRunning ) {
+        memset(&tExit, 0, sizeof(tExit));
+        (void)xrtProcessGetExitInfo(pEntry->pProcess, &tExit);
+        if ( !xwork__buf_appendf(pOutput, "exit_code: %d\nexit_kind: %d\nstop_reason: %d\n",
+                tExit.iExitCode, tExit.iKind, tExit.iStopReason) ) return false;
+    } else if ( !xwork__buf_append_cstr(pOutput, "use poll_process to read more output\n") ) {
+        return false;
+    }
+    return true;
+}
+
+static xwork_result xwork__tool_start_process(
+    void* pUserData,
+    const xwork_tool_context* pContext,
+    const char* sArgumentsJson,
+    xwork_tool_output* pOutput,
+    xwork_error* pError
+)
+{
+    xwork_agent* pAgent = (xwork_agent*)pUserData;
+    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    const char* sCommand;
+    const char* sCwd;
+    char* sResolvedCwd = NULL;
+    bool bValid;
+    bool bMerge;
+    uint64_t uWaitMs;
+    uint64_t uCapture;
+    xprocessconfig tConfig;
+    xprocess* pProcess = NULL;
+    xwork_process_entry* pEntry = NULL;
+    xwork_buf tOutput = {0};
+    xwork_result eResult = XWORK_RESULT_ERROR;
+    (void)pContext;
+    if ( !tArgs ) return xwork__tool_fail(pOutput, "invalid arguments: expected a JSON object");
+    sCommand = xwork__json_text(tArgs, "command");
+    sCwd = xwork__json_text(tArgs, "cwd");
+    if ( !sCwd || !sCwd[0] ) sCwd = ".";
+    if ( !sCommand || !sCommand[0] ) { eResult = xwork__tool_fail(pOutput, "command is required"); goto cleanup; }
+    uWaitMs = xwork__json_u64(tArgs, "wait_ms", 0u, &bValid);
+    if ( !bValid || uWaitMs > 30000u ) { eResult = xwork__tool_fail(pOutput, "wait_ms must be between 0 and 30000"); goto cleanup; }
+    uCapture = xwork__json_u64(tArgs, "max_capture_bytes", pAgent->iMaxCapturedCommandBytes, &bValid);
+    if ( !bValid || uCapture < 1024u || uCapture > 64u * 1024u * 1024u ) {
+        eResult = xwork__tool_fail(pOutput, "max_capture_bytes must be between 1024 and 67108864"); goto cleanup;
+    }
+    bMerge = xwork__json_bool(tArgs, "merge_stderr", false, &bValid);
+    if ( !bValid ) { eResult = xwork__tool_fail(pOutput, "merge_stderr must be boolean"); goto cleanup; }
+    sResolvedCwd = xwork__resolve_path(pAgent, sCwd, pError);
+    if ( !sResolvedCwd ) { eResult = xwork__tool_fail(pOutput, pError && pError->sMessage[0] ? pError->sMessage : "cwd denied"); goto cleanup; }
+    if ( !xrtDirExists((str)sResolvedCwd) ) { eResult = xwork__tool_fail(pOutput, "cwd does not exist"); goto cleanup; }
+    pEntry = xwork__process_add(pAgent);
+    if ( !pEntry ) { eResult = xwork__tool_fail(pOutput, "managed process limit reached; stop or release an existing process"); goto cleanup; }
+    pEntry->sCommand = xwork__strdup(sCommand);
+    if ( !pEntry->sCommand ) goto oom;
+    xrtProcessConfigInit(&tConfig);
+    tConfig.iTargetKind = XPROC_TARGET_SHELL;
+    tConfig.sCommand = (str)sCommand;
+    tConfig.sWorkDir = (str)sResolvedCwd;
+    tConfig.bInheritEnv = true;
+    tConfig.bMergeStderr = bMerge;
+    tConfig.bCreateProcessGroup = true;
+    tConfig.bHideWindow = true;
+    tConfig.iMaxCaptureBytes = (size_t)uCapture;
+    tConfig.Stdin.iMode = XPROC_STDIO_PIPE;
+    tConfig.Stdout.iMode = XPROC_STDIO_PIPE;
+    tConfig.Stdout.bCapture = true;
+    tConfig.Stderr.iMode = bMerge ? XPROC_STDIO_INHERIT : XPROC_STDIO_PIPE;
+    tConfig.Stderr.bCapture = !bMerge;
+    pProcess = xrtProcessSpawn(&tConfig);
+    if ( !pProcess ) {
+        xwork__process_remove(pAgent, pAgent->iProcessCount - 1u);
+        pEntry = NULL;
+        eResult = xwork__tool_fail(pOutput, "failed to start process");
+        goto cleanup;
+    }
+    pEntry->pProcess = pProcess;
+    pProcess = NULL;
+    if ( !xwork__append_process_status(&tOutput, pEntry, (uint32_t)uWaitMs, 64u * 1024u) ||
+         !xworkToolOutputSet(pOutput, true, tOutput.pData) ) goto oom;
+    eResult = XWORK_RESULT_OK;
+    goto cleanup;
+oom:
+    if ( pEntry ) xwork__process_remove(pAgent, pAgent->iProcessCount - 1u);
+    xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to create managed process");
+cleanup:
+    if ( pProcess ) {
+        if ( xrtProcessIsRunning(pProcess) ) { (void)xrtProcessKillTree(pProcess); (void)xrtProcessWait(pProcess); }
+        xrtProcessDestroy(pProcess);
+    }
+    if ( tArgs ) xvoUnref(tArgs);
+    free(sResolvedCwd);
+    xwork__buf_unit(&tOutput);
+    return eResult;
+}
+
+static xwork_result xwork__tool_poll_process(
+    void* pUserData,
+    const xwork_tool_context* pContext,
+    const char* sArgumentsJson,
+    xwork_tool_output* pOutput,
+    xwork_error* pError
+)
+{
+    xwork_agent* pAgent = (xwork_agent*)pUserData;
+    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    uint64_t uId;
+    uint64_t uWaitMs;
+    uint64_t uMaxBytes;
+    bool bValid;
+    bool bRelease;
+    size_t iIndex;
+    xwork_process_entry* pEntry;
+    xwork_buf tOutput = {0};
+    xwork_result eResult = XWORK_RESULT_ERROR;
+    (void)pContext;
+    if ( !tArgs ) return xwork__tool_fail(pOutput, "invalid arguments: expected a JSON object");
+    uId = xwork__json_u64(tArgs, "process_id", 0u, &bValid);
+    if ( !bValid || !uId ) { eResult = xwork__tool_fail(pOutput, "positive process_id is required"); goto cleanup; }
+    uWaitMs = xwork__json_u64(tArgs, "wait_ms", 0u, &bValid);
+    if ( !bValid || uWaitMs > 30000u ) { eResult = xwork__tool_fail(pOutput, "wait_ms must be between 0 and 30000"); goto cleanup; }
+    uMaxBytes = xwork__json_u64(tArgs, "max_bytes", 64u * 1024u, &bValid);
+    if ( !bValid || uMaxBytes < 256u || uMaxBytes > 1024u * 1024u ) { eResult = xwork__tool_fail(pOutput, "max_bytes must be between 256 and 1048576"); goto cleanup; }
+    bRelease = xwork__json_bool(tArgs, "release", false, &bValid);
+    if ( !bValid ) { eResult = xwork__tool_fail(pOutput, "release must be boolean"); goto cleanup; }
+    pEntry = xwork__process_find(pAgent, uId, &iIndex);
+    if ( !pEntry ) { eResult = xwork__tool_fail(pOutput, "unknown or released process_id"); goto cleanup; }
+    if ( bRelease && xrtProcessIsRunning(pEntry->pProcess) ) {
+        if ( uWaitMs ) (void)xrtProcessWaitTimeout(pEntry->pProcess, (uint32_t)uWaitMs);
+        uWaitMs = 0u;
+        if ( xrtProcessIsRunning(pEntry->pProcess) ) {
+            eResult = xwork__tool_fail(pOutput, "cannot release a running process; stop it first");
+            goto cleanup;
+        }
+    }
+    if ( !xwork__append_process_status(&tOutput, pEntry, (uint32_t)uWaitMs, (size_t)uMaxBytes) ) goto oom;
+    if ( !xworkToolOutputSet(pOutput, true, tOutput.pData) ) goto oom;
+    if ( bRelease ) xwork__process_remove(pAgent, iIndex);
+    eResult = XWORK_RESULT_OK;
+    goto cleanup;
+oom:
+    xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to report managed process status");
+cleanup:
+    if ( tArgs ) xvoUnref(tArgs);
+    xwork__buf_unit(&tOutput);
+    return eResult;
+}
+
+static xwork_result xwork__tool_write_process(
+    void* pUserData,
+    const xwork_tool_context* pContext,
+    const char* sArgumentsJson,
+    xwork_tool_output* pOutput,
+    xwork_error* pError
+)
+{
+    xwork_agent* pAgent = (xwork_agent*)pUserData;
+    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    uint64_t uId;
+    const char* sInput;
+    bool bValid;
+    bool bNewline;
+    bool bClose;
+    xwork_process_entry* pEntry;
+    xwork_buf tInput = {0};
+    xwork_buf tOutput = {0};
+    int64_t iWritten = 0;
+    xwork_result eResult = XWORK_RESULT_ERROR;
+    (void)pContext;
+    if ( !tArgs ) return xwork__tool_fail(pOutput, "invalid arguments: expected a JSON object");
+    uId = xwork__json_u64(tArgs, "process_id", 0u, &bValid);
+    if ( !bValid || !uId ) { eResult = xwork__tool_fail(pOutput, "positive process_id is required"); goto cleanup; }
+    sInput = xwork__json_text(tArgs, "input");
+    bNewline = xwork__json_bool(tArgs, "append_newline", false, &bValid);
+    if ( !bValid ) { eResult = xwork__tool_fail(pOutput, "append_newline must be boolean"); goto cleanup; }
+    bClose = xwork__json_bool(tArgs, "close_stdin", false, &bValid);
+    if ( !bValid ) { eResult = xwork__tool_fail(pOutput, "close_stdin must be boolean"); goto cleanup; }
+    if ( !sInput && !bClose ) { eResult = xwork__tool_fail(pOutput, "input or close_stdin=true is required"); goto cleanup; }
+    pEntry = xwork__process_find(pAgent, uId, NULL);
+    if ( !pEntry ) { eResult = xwork__tool_fail(pOutput, "unknown or released process_id"); goto cleanup; }
+    if ( !xrtProcessIsRunning(pEntry->pProcess) ) { eResult = xwork__tool_fail(pOutput, "process has already exited"); goto cleanup; }
+    if ( pEntry->bStdinClosed ) { eResult = xwork__tool_fail(pOutput, "process stdin is already closed"); goto cleanup; }
+    if ( sInput && (sInput[0] || bNewline) ) {
+        if ( !xwork__buf_append_cstr(&tInput, sInput) || (bNewline && !xwork__buf_append_char(&tInput, '\n')) ) goto oom;
+        iWritten = xrtProcessWriteText(pEntry->pProcess, (str)tInput.pData, tInput.iLen);
+        if ( iWritten < 0 || (size_t)iWritten != tInput.iLen ) { eResult = xwork__tool_fail(pOutput, "failed to write complete input to process"); goto cleanup; }
+    }
+    if ( bClose ) {
+        if ( !xrtProcessCloseStdin(pEntry->pProcess) ) { eResult = xwork__tool_fail(pOutput, "failed to close process stdin"); goto cleanup; }
+        pEntry->bStdinClosed = true;
+    }
+    if ( !xwork__buf_appendf(&tOutput, "process_id: %llu\nwrote: %lld bytes\nstdin: %s\n",
+            (unsigned long long)uId, (long long)iWritten, pEntry->bStdinClosed ? "closed" : "open") ||
+         !xworkToolOutputSet(pOutput, true, tOutput.pData) ) goto oom;
+    eResult = XWORK_RESULT_OK;
+    goto cleanup;
+oom:
+    xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to prepare managed process input");
+cleanup:
+    if ( tArgs ) xvoUnref(tArgs);
+    xwork__buf_unit(&tInput);
+    xwork__buf_unit(&tOutput);
+    return eResult;
+}
+
+static xwork_result xwork__tool_stop_process(
+    void* pUserData,
+    const xwork_tool_context* pContext,
+    const char* sArgumentsJson,
+    xwork_tool_output* pOutput,
+    xwork_error* pError
+)
+{
+    xwork_agent* pAgent = (xwork_agent*)pUserData;
+    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    uint64_t uId;
+    uint64_t uWaitMs;
+    const char* sMode;
+    bool bValid;
+    bool bRelease;
+    bool bRequested = true;
+    bool bRunning;
+    size_t iIndex;
+    xwork_process_entry* pEntry;
+    xwork_buf tOutput = {0};
+    xwork_result eResult = XWORK_RESULT_ERROR;
+    (void)pContext;
+    if ( !tArgs ) return xwork__tool_fail(pOutput, "invalid arguments: expected a JSON object");
+    uId = xwork__json_u64(tArgs, "process_id", 0u, &bValid);
+    if ( !bValid || !uId ) { eResult = xwork__tool_fail(pOutput, "positive process_id is required"); goto cleanup; }
+    sMode = xwork__json_text(tArgs, "mode");
+    if ( !sMode || !sMode[0] ) sMode = "interrupt";
+    if ( strcmp(sMode, "interrupt") != 0 && strcmp(sMode, "terminate") != 0 &&
+         strcmp(sMode, "kill") != 0 && strcmp(sMode, "kill_tree") != 0 ) {
+        eResult = xwork__tool_fail(pOutput, "mode must be interrupt, terminate, kill, or kill_tree"); goto cleanup;
+    }
+    uWaitMs = xwork__json_u64(tArgs, "wait_ms", 3000u, &bValid);
+    if ( !bValid || uWaitMs > 30000u ) { eResult = xwork__tool_fail(pOutput, "wait_ms must be between 0 and 30000"); goto cleanup; }
+    bRelease = xwork__json_bool(tArgs, "release", true, &bValid);
+    if ( !bValid ) { eResult = xwork__tool_fail(pOutput, "release must be boolean"); goto cleanup; }
+    pEntry = xwork__process_find(pAgent, uId, &iIndex);
+    if ( !pEntry ) { eResult = xwork__tool_fail(pOutput, "unknown or released process_id"); goto cleanup; }
+    if ( xrtProcessIsRunning(pEntry->pProcess) ) {
+        if ( strcmp(sMode, "interrupt") == 0 ) bRequested = xrtProcessInterrupt(pEntry->pProcess);
+        else if ( strcmp(sMode, "terminate") == 0 ) bRequested = xrtProcessTerminate(pEntry->pProcess);
+        else if ( strcmp(sMode, "kill") == 0 ) bRequested = xrtProcessKill(pEntry->pProcess);
+        else bRequested = xrtProcessKillTree(pEntry->pProcess);
+        if ( !bRequested ) { eResult = xwork__tool_fail(pOutput, "process stop request failed"); goto cleanup; }
+    }
+    if ( !xwork__append_process_status(&tOutput, pEntry, (uint32_t)uWaitMs, 64u * 1024u) ) goto oom;
+    bRunning = xrtProcessIsRunning(pEntry->pProcess);
+    if ( !xworkToolOutputSet(pOutput, !bRunning, tOutput.pData) ) goto oom;
+    if ( bRelease && !bRunning ) xwork__process_remove(pAgent, iIndex);
+    eResult = XWORK_RESULT_OK;
+    goto cleanup;
+oom:
+    xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to stop or report managed process");
+cleanup:
+    if ( tArgs ) xvoUnref(tArgs);
+    xwork__buf_unit(&tOutput);
+    return eResult;
+}
+
 static xwork_result xwork__tool_exec_command(
     void* pUserData,
     const xwork_tool_context* pContext,
@@ -1047,6 +1435,30 @@ bool xworkAgentRegisterBuiltinTools(xwork_agent* pAgent, xwork_error* pError)
             "Apply a validated multi-file UTF-8 text transaction. Every change is checked before writing; a failed write rolls back earlier changes.",
             "{\"type\":\"object\",\"properties\":{\"changes\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":64,\"items\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"operation\":{\"type\":\"string\",\"enum\":[\"create\",\"replace\",\"delete\"]},\"content\":{\"type\":\"string\"},\"old_text\":{\"type\":\"string\"},\"new_text\":{\"type\":\"string\"},\"replace_all\":{\"type\":\"boolean\"}},\"required\":[\"path\",\"operation\"],\"additionalProperties\":false}}},\"required\":[\"changes\"],\"additionalProperties\":false}",
             true, XWORK_TOOL_EFFECT_WORKSPACE_WRITE, xwork__tool_apply_patch, NULL
+        },
+        {
+            "start_process",
+            "Start a managed long-running shell process in the workspace. Returns a process_id for polling, stdin writes, and cleanup.",
+            "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"cwd\":{\"type\":\"string\"},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000},\"max_capture_bytes\":{\"type\":\"integer\",\"minimum\":1024,\"maximum\":67108864},\"merge_stderr\":{\"type\":\"boolean\"}},\"required\":[\"command\"],\"additionalProperties\":false}",
+            true, XWORK_TOOL_EFFECT_PROCESS, xwork__tool_start_process, NULL
+        },
+        {
+            "poll_process",
+            "Incrementally read new stdout and stderr from a managed process and report its state. Set release=true only after it exits.",
+            "{\"type\":\"object\",\"properties\":{\"process_id\":{\"type\":\"integer\",\"minimum\":1},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000},\"max_bytes\":{\"type\":\"integer\",\"minimum\":256,\"maximum\":1048576},\"release\":{\"type\":\"boolean\"}},\"required\":[\"process_id\"],\"additionalProperties\":false}",
+            true, XWORK_TOOL_EFFECT_READ_ONLY, xwork__tool_poll_process, NULL
+        },
+        {
+            "write_process",
+            "Write UTF-8 text to a managed process stdin, optionally append a newline and/or close stdin.",
+            "{\"type\":\"object\",\"properties\":{\"process_id\":{\"type\":\"integer\",\"minimum\":1},\"input\":{\"type\":\"string\"},\"append_newline\":{\"type\":\"boolean\"},\"close_stdin\":{\"type\":\"boolean\"}},\"required\":[\"process_id\"],\"additionalProperties\":false}",
+            true, XWORK_TOOL_EFFECT_PROCESS, xwork__tool_write_process, NULL
+        },
+        {
+            "stop_process",
+            "Stop a managed process using interrupt, terminate, kill, or kill_tree; returns final incremental output when it exits.",
+            "{\"type\":\"object\",\"properties\":{\"process_id\":{\"type\":\"integer\",\"minimum\":1},\"mode\":{\"type\":\"string\",\"enum\":[\"interrupt\",\"terminate\",\"kill\",\"kill_tree\"]},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000},\"release\":{\"type\":\"boolean\"}},\"required\":[\"process_id\"],\"additionalProperties\":false}",
+            true, XWORK_TOOL_EFFECT_PROCESS, xwork__tool_stop_process, NULL
         },
         {
             "exec_command",

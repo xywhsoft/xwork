@@ -352,6 +352,7 @@ void xworkAgentConfigInit(xwork_agent_config* pConfig)
     pConfig->uMaxAgentTurns = 0u;
     pConfig->uRepeatedToolBatchLimit = 3u;
     pConfig->uConsecutiveFailureLimit = 5u;
+    pConfig->uMaxManagedProcesses = 8u;
     pConfig->iMaxInlineToolBytes = 64u * 1024u;
     pConfig->iMaxCapturedCommandBytes = 8u * 1024u * 1024u;
     pConfig->bRegisterBuiltinTools = true;
@@ -466,6 +467,7 @@ xwork_agent* xworkAgentCreate(const xwork_agent_config* pConfig, xwork_error* pE
     pAgent->uMaxAgentTurns = pConfig->uMaxAgentTurns;
     pAgent->uRepeatedToolBatchLimit = pConfig->uRepeatedToolBatchLimit ? pConfig->uRepeatedToolBatchLimit : 3u;
     pAgent->uConsecutiveFailureLimit = pConfig->uConsecutiveFailureLimit ? pConfig->uConsecutiveFailureLimit : 5u;
+    pAgent->uMaxManagedProcesses = pConfig->uMaxManagedProcesses ? pConfig->uMaxManagedProcesses : 8u;
     pAgent->iMaxInlineToolBytes = pConfig->iMaxInlineToolBytes ? pConfig->iMaxInlineToolBytes : 64u * 1024u;
     pAgent->iMaxCapturedCommandBytes = pConfig->iMaxCapturedCommandBytes ? pConfig->iMaxCapturedCommandBytes : 8u * 1024u * 1024u;
     pAgent->bAutoSaveSession = pConfig->bAutoSaveSession;
@@ -494,6 +496,7 @@ void xworkAgentDestroy(xwork_agent* pAgent)
 {
     size_t i;
     if ( !pAgent ) return;
+    xwork__processes_unit(pAgent);
     for ( i = 0u; i < pAgent->iToolCount; ++i ) xwork__tool_entry_unit(&pAgent->pTools[i]);
     free(pAgent->pTools);
     free(pAgent->sWorkspaceRoot);

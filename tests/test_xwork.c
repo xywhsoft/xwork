@@ -107,7 +107,7 @@ static xllm_result mock_complete(
         );
     } else {
         ++pMock->uAgentCalls;
-        pMock->bSawTools = pRequest->iToolCount == 7u;
+        pMock->bSawTools = pRequest->iToolCount == 11u;
         pMock->bSawParallel = pRequest->bParallelToolCalls;
         if ( pMock->uAgentCalls > 1u && request_has_role(pRequest, XLLM_ROLE_TOOL, 1u) ) pMock->bSawToolResults = true;
         if ( request_has_text(pRequest, "Objective: test the xwork tool loop after compaction") ) pMock->bSawCompactionSummary = true;
@@ -235,8 +235,13 @@ static void test_agent_loop(void)
     size_t iFileSize = 0u;
     uint32_t uCompactionsBeforeExplicit = 0u;
     const xwork_tool_entry* pPatchTool;
+    const xwork_tool_entry* pStartTool;
+    const xwork_tool_entry* pWriteProcessTool;
+    const xwork_tool_entry* pPollTool;
     xwork_tool_context tPatchContext;
     xwork_tool_output tPatchOutput;
+    xwork_tool_output tProcessOutput;
+    unsigned long long uManagedId = 0u;
     unsigned i;
 
     memset(&tMock, 0, sizeof(tMock));
@@ -276,7 +281,7 @@ static void test_agent_loop(void)
     tAgentConfig.iMaxInlineToolBytes = 300u;
     pAgent = xworkAgentCreate(&tAgentConfig, &tError);
     CHECK(pAgent != NULL, "agent creates with injected model boundary");
-    CHECK(pAgent && xworkAgentToolCount(pAgent) == 7u, "seven practical builtin tools registered");
+    CHECK(pAgent && xworkAgentToolCount(pAgent) == 11u, "eleven practical builtin tools registered");
     if ( !pAgent ) goto cleanup;
 
     CHECK(xworkAgentRun(pAgent, "Create and verify the requested note file.", &tResult, &tError) == XWORK_RESULT_OK, "multi-turn tool loop completes");
@@ -306,6 +311,43 @@ static void test_agent_loop(void)
     CHECK(sFile && iFileSize > 1600u && strncmp(sFile, "PATCHED-", 8u) == 0, "workspace file was created then edited by both edit tools");
     CHECK(xrtFileExists((str)"tests/tmp_xwork/sandbox/extra.txt"), "multi-file patch transaction created its second target");
     CHECK(!xrtFileExists((str)"tests/tmp_xwork/sandbox/note.txt/child.txt"), "failed transaction left no partial target behind");
+
+    pStartTool = xwork__find_tool(pAgent, "start_process");
+    pWriteProcessTool = xwork__find_tool(pAgent, "write_process");
+    pPollTool = xwork__find_tool(pAgent, "poll_process");
+    xworkToolOutputInit(&tProcessOutput);
+#if defined(_WIN32)
+    CHECK(pStartTool && pStartTool->OnExecute(pStartTool->pUserData, &tPatchContext,
+        "{\"command\":\"findstr persistent\",\"wait_ms\":0}", &tProcessOutput, &tError) == XWORK_RESULT_OK &&
+        tProcessOutput.bSuccess && tProcessOutput.sContent && sscanf(tProcessOutput.sContent, "process_id: %llu", &uManagedId) == 1,
+        "managed process starts and returns a stable process id");
+#else
+    CHECK(pStartTool && pStartTool->OnExecute(pStartTool->pUserData, &tPatchContext,
+        "{\"command\":\"grep persistent\",\"wait_ms\":0}", &tProcessOutput, &tError) == XWORK_RESULT_OK &&
+        tProcessOutput.bSuccess && tProcessOutput.sContent && sscanf(tProcessOutput.sContent, "process_id: %llu", &uManagedId) == 1,
+        "managed process starts and returns a stable process id");
+#endif
+    xworkToolOutputUnit(&tProcessOutput);
+    xworkToolOutputInit(&tProcessOutput);
+    if ( uManagedId ) {
+        char sProcessArgs[512];
+        snprintf(sProcessArgs, sizeof(sProcessArgs),
+            "{\"process_id\":%llu,\"input\":\"persistent hello\",\"append_newline\":true,\"close_stdin\":true}", uManagedId);
+        CHECK(pWriteProcessTool && pWriteProcessTool->OnExecute(pWriteProcessTool->pUserData, &tPatchContext,
+            sProcessArgs, &tProcessOutput, &tError) == XWORK_RESULT_OK && tProcessOutput.bSuccess,
+            "managed process accepts stdin and an explicit stdin close");
+        xworkToolOutputUnit(&tProcessOutput);
+        xworkToolOutputInit(&tProcessOutput);
+        snprintf(sProcessArgs, sizeof(sProcessArgs),
+            "{\"process_id\":%llu,\"wait_ms\":5000,\"release\":true}", uManagedId);
+        CHECK(pPollTool && pPollTool->OnExecute(pPollTool->pUserData, &tPatchContext,
+            sProcessArgs, &tProcessOutput, &tError) == XWORK_RESULT_OK && tProcessOutput.bSuccess &&
+            tProcessOutput.sContent && strstr(tProcessOutput.sContent, "persistent hello") && strstr(tProcessOutput.sContent, "state: exited"),
+            "managed process poll returns incremental output and final exit state");
+        CHECK(pAgent->iProcessCount == 0u, "released managed process leaves no live registry entry");
+    }
+    xworkToolOutputUnit(&tProcessOutput);
+
     if ( tEvents.sLastArtifact[0] ) {
         sArtifactAbsolute = (char*)xrtPathJoin(2u, sWorkspace, tEvents.sLastArtifact);
         CHECK(sArtifactAbsolute && xrtFileExists((str)sArtifactAbsolute), "full oversized output artifact exists");

@@ -167,6 +167,7 @@ typedef struct xwork_agent_config {
     uint32_t uMaxAgentTurns;          /* 0 means unlimited. */
     uint32_t uRepeatedToolBatchLimit;
     uint32_t uConsecutiveFailureLimit;
+    uint32_t uMaxManagedProcesses;
     size_t iMaxInlineToolBytes;
     size_t iMaxCapturedCommandBytes;
     bool bRegisterBuiltinTools;
@@ -202,7 +203,7 @@ xwork_result xworkAgentRun(xwork_agent* pAgent, const char* sPrompt, xwork_run_r
 xwork_result xworkAgentCompact(xwork_agent* pAgent, xwork_error* pError);
 void xworkRunResultUnit(xwork_run_result* pResult);
 
-/* Registers read/list/search/write/replace/apply-patch/exec tools. */
+/* Registers filesystem, transactional edit, synchronous command, and managed process tools. */
 bool xworkAgentRegisterBuiltinTools(xwork_agent* pAgent, xwork_error* pError);
 
 #ifdef __cplusplus

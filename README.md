@@ -31,6 +31,7 @@ xcode CLI / IDE host
 - journal-backed atomic session checkpoints after prompts, assistant responses, tool batches, and compaction;
 - streaming text/reasoning, model, tool, compaction, completion, and error events;
 - cooperative cancellation;
+- managed long-running processes with stable IDs, incremental output, stdin, stop, and cleanup;
 - approval modes for automatic, callback-controlled, and read-only execution;
 - workspace-contained filesystem path resolution;
 - oversized tool output spill to `.xcode/artifacts`, with bounded head/tail context returned to the model;
@@ -47,8 +48,14 @@ Built-in tools:
 | `replace_text` | Exact conflict-detecting text replacement. |
 | `apply_patch` | Validate and transactionally apply multi-file create/replace/delete edits; each file is replaced atomically and earlier writes roll back on failure. |
 | `exec_command` | Run a non-interactive shell command with cwd, timeout, exit metadata, and bounded capture. |
+| `start_process` | Start a bounded-capture long-running process and return a stable process ID. |
+| `poll_process` | Wait briefly and consume incremental stdout/stderr plus exit status. |
+| `write_process` | Write text to process stdin or close stdin. |
+| `stop_process` | Interrupt, terminate, kill, or kill the tree and release completed processes. |
 
 Filesystem tools reject paths outside the configured workspace. `exec_command` starts inside the workspace, but it is a real shell and is not an OS sandbox. Hosts that do not fully trust commands should use `XWORK_APPROVAL_CALLBACK` or `XWORK_APPROVAL_READ_ONLY`.
+
+Managed process IDs live for the lifetime of one `xwork_agent`. They intentionally are not serialized into the session checkpoint because OS process handles cannot be recovered safely after a host restart. Destroying the agent stops and releases every remaining managed process.
 
 ## Minimal host setup
 
@@ -86,4 +93,4 @@ From the repository root on Windows with GCC available:
 build.bat
 ```
 
-The optimized warning-as-error suite covers a forced context compaction followed by a multi-turn workflow using all seven built-in tools, transactional multi-file editing, artifact spill, session persistence, and a rejected workspace escape.
+The optimized warning-as-error suite covers a forced context compaction followed by a multi-turn workflow using the built-in tools, transactional multi-file editing and rollback, managed-process stdin/output, artifact spill, session persistence, and a rejected workspace escape.
