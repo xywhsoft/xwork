@@ -1,6 +1,6 @@
 #include "../xwork.c"
-#include "../../xllm/xllm.c"
-#include "../../xllm/xllm-session.c"
+#include "xllm.c"
+#include "xllm-session.c"
 
 static int g_iFailures = 0;
 
