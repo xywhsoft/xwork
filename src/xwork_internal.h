@@ -55,6 +55,8 @@ struct xwork_agent {
     char* sSystemPrompt;
     char* sSessionPath;
     char* sArtifactDirectory;
+    char* sModel;
+    char* sReasoningEffort;
 
     xwork_approval_mode eApprovalMode;
     xwork_approval_fn OnApproval;

@@ -451,9 +451,13 @@ xwork_agent* xworkAgentCreate(const xwork_agent_config* pConfig, xwork_error* pE
     pAgent->sSystemPrompt = xwork__strdup(pConfig->sSystemPrompt ? pConfig->sSystemPrompt : "You are a careful coding agent. Inspect the workspace, use tools to make changes, run relevant tests, and continue until the user's task is complete.");
     pAgent->sSessionPath = pConfig->sSessionPath ? xwork__strdup(pConfig->sSessionPath) : NULL;
     pAgent->sArtifactDirectory = xwork__strdup(pConfig->sArtifactDirectory ? pConfig->sArtifactDirectory : ".xcode/artifacts");
+    pAgent->sModel = pConfig->sModel ? xwork__strdup(pConfig->sModel) : NULL;
+    pAgent->sReasoningEffort = pConfig->sReasoningEffort ? xwork__strdup(pConfig->sReasoningEffort) : NULL;
     xrtFree(sRoot);
     if ( !pAgent->sWorkspaceRoot || !pAgent->sSystemPrompt || !pAgent->sArtifactDirectory ||
-         (pConfig->sSessionPath && !pAgent->sSessionPath) ) {
+         (pConfig->sSessionPath && !pAgent->sSessionPath) ||
+         (pConfig->sModel && !pAgent->sModel) ||
+         (pConfig->sReasoningEffort && !pAgent->sReasoningEffort) ) {
         xworkAgentDestroy(pAgent);
         xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to copy agent configuration");
         return NULL;
@@ -511,6 +515,8 @@ void xworkAgentDestroy(xwork_agent* pAgent)
     free(pAgent->sSystemPrompt);
     free(pAgent->sSessionPath);
     free(pAgent->sArtifactDirectory);
+    free(pAgent->sModel);
+    free(pAgent->sReasoningEffort);
     free(pAgent);
 }
 

@@ -34,6 +34,10 @@ typedef struct test_events {
     uint32_t uToolFailure;
     uint32_t uCompactions;
     uint32_t uErrors;
+    uint32_t uModelStarts;
+    uint32_t uModelDone;
+    bool bRequestMetadata;
+    bool bResponseMetadata;
     char sLastArtifact[512];
 } test_events;
 
@@ -50,9 +54,12 @@ static xllm_response* mock_response(const char* sContent, size_t iToolCount)
     xllm_response* pResponse = (xllm_response*)calloc(1u, sizeof(*pResponse));
     if ( !pResponse ) return NULL;
     pResponse->sContent = test_strdup(sContent ? sContent : "");
+    pResponse->sModel = test_strdup("mock-model");
+    pResponse->sRequestId = test_strdup("mock-request-id");
     pResponse->sFinishReason = test_strdup(iToolCount ? "tool_calls" : "stop");
     if ( iToolCount ) pResponse->pToolCalls = (xllm_tool_call*)calloc(iToolCount, sizeof(*pResponse->pToolCalls));
-    if ( !pResponse->sContent || !pResponse->sFinishReason || (iToolCount && !pResponse->pToolCalls) ) {
+    if ( !pResponse->sContent || !pResponse->sModel || !pResponse->sRequestId ||
+         !pResponse->sFinishReason || (iToolCount && !pResponse->pToolCalls) ) {
         xllmResponseDestroy(pResponse);
         return NULL;
     }
@@ -61,6 +68,11 @@ static xllm_response* mock_response(const char* sContent, size_t iToolCount)
     pResponse->tUsage.uInputTokens = 100u;
     pResponse->tUsage.uOutputTokens = 20u;
     pResponse->tUsage.uTotalTokens = 120u;
+    pResponse->uHttpStatus = 200u;
+    pResponse->tDiagnostics.uAttemptCount = 1u;
+    pResponse->tDiagnostics.uMaxAttempts = 3u;
+    pResponse->tDiagnostics.uTotalDurationMs = 7u;
+    pResponse->tDiagnostics.uResponseBodyBytes = 42u;
     return pResponse;
 }
 
@@ -178,7 +190,23 @@ static bool on_event(void* pUserData, const xwork_event* pEvent)
 {
     test_events* pEvents = (test_events*)pUserData;
     switch ( pEvent->eKind ) {
+        case XWORK_EVENT_MODEL_START:
+            ++pEvents->uModelStarts;
+            if ( pEvent->sModel && strcmp(pEvent->sModel, "mock-model") == 0 &&
+                 pEvent->sRequestFingerprint && strlen(pEvent->sRequestFingerprint) == 16u &&
+                 pEvent->iMessageCount > 0u && pEvent->iToolDefinitionCount == 11u &&
+                 pEvent->uMaxOutputTokens > 0u ) pEvents->bRequestMetadata = true;
+            break;
         case XWORK_EVENT_MODEL_TEXT_DELTA: ++pEvents->uTextDeltas; break;
+        case XWORK_EVENT_MODEL_DONE:
+            ++pEvents->uModelDone;
+            if ( pEvent->sModel && strcmp(pEvent->sModel, "mock-model") == 0 &&
+                 pEvent->sProviderRequestId && strcmp(pEvent->sProviderRequestId, "mock-request-id") == 0 &&
+                 pEvent->sFinishReason && pEvent->uHttpStatus == 200u &&
+                 pEvent->tDiagnostics.uAttemptCount == 1u && pEvent->tDiagnostics.uTotalDurationMs == 7u ) {
+                pEvents->bResponseMetadata = true;
+            }
+            break;
         case XWORK_EVENT_TOOL_START: ++pEvents->uToolStarts; break;
         case XWORK_EVENT_TOOL_DONE:
             ++pEvents->uToolDone;
@@ -316,6 +344,8 @@ static void test_agent_loop(void)
     tAgentConfig.pSession = pSession;
     tAgentConfig.sWorkspaceRoot = sWorkspace;
     tAgentConfig.sSessionPath = sSessionPath;
+    tAgentConfig.sModel = "mock-model";
+    tAgentConfig.sReasoningEffort = "high";
     tAgentConfig.OnModelComplete = mock_complete;
     tAgentConfig.pModelUserData = &tMock;
     tAgentConfig.OnEvent = on_event;
@@ -335,6 +365,9 @@ static void test_agent_loop(void)
     CHECK(tResult.uAgentTurns == 5u && tResult.uToolCalls == 8u, "verification gate adds one model turn while eight tool calls run");
     CHECK(tResult.uCompactions >= 1u && tMock.uCompactionCalls == tResult.uCompactions, "context compaction occurred before or during tool work");
     CHECK(tEvents.uCompactions == tResult.uCompactions && tEvents.uErrors == 0u, "compaction events emitted without agent errors");
+    CHECK(tEvents.uModelStarts == tResult.uAgentTurns && tEvents.uModelDone == tResult.uAgentTurns &&
+          tEvents.bRequestMetadata && tEvents.bResponseMetadata,
+        "model lifecycle events expose reproducible request and provider diagnostics");
     CHECK(tMock.bSawTools && tMock.bSawParallel && tMock.bSawToolResults, "tool definitions, parallel flag, and continuity reach model");
     CHECK(tMock.bSawCompactionSummary, "post-compaction model turns receive the summary checkpoint");
     CHECK(tMock.bSawVerificationGate, "premature completion receives a durable verification-gate prompt");

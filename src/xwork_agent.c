@@ -28,6 +28,39 @@ static uint64_t xwork__tool_batch_hash(const xllm_response* pResponse)
     return uHash;
 }
 
+static uint64_t xwork__request_fingerprint(const xllm_request* pRequest)
+{
+    uint64_t uHash = UINT64_C(1469598103934665603);
+    size_t i;
+    if ( !pRequest ) return uHash;
+    uHash = xwork__hash_bytes(uHash, pRequest->sModel);
+    uHash = xwork__hash_bytes(uHash, pRequest->sReasoningEffort);
+    uHash ^= (uint64_t)pRequest->uMaxOutputTokens;
+    uHash *= UINT64_C(1099511628211);
+    for ( i = 0u; i < pRequest->iMessageCount; ++i ) {
+        const xllm_message* pMessage = &pRequest->pMessages[i];
+        size_t j;
+        uHash ^= (uint64_t)pMessage->eRole;
+        uHash *= UINT64_C(1099511628211);
+        uHash = xwork__hash_bytes(uHash, pMessage->sContent);
+        uHash = xwork__hash_bytes(uHash, pMessage->sReasoningContent);
+        uHash = xwork__hash_bytes(uHash, pMessage->sToolCallId);
+        for ( j = 0u; j < pMessage->iToolCallCount; ++j ) {
+            uHash = xwork__hash_bytes(uHash, pMessage->pToolCalls[j].sId);
+            uHash = xwork__hash_bytes(uHash, pMessage->pToolCalls[j].sName);
+            uHash = xwork__hash_bytes(uHash, pMessage->pToolCalls[j].sArgumentsJson);
+        }
+    }
+    for ( i = 0u; i < pRequest->iToolCount; ++i ) {
+        uHash = xwork__hash_bytes(uHash, pRequest->pTools[i].sName);
+        uHash = xwork__hash_bytes(uHash, pRequest->pTools[i].sDescription);
+        uHash = xwork__hash_bytes(uHash, pRequest->pTools[i].sParametersJson);
+        uHash ^= pRequest->pTools[i].bStrict ? UINT64_C(1) : UINT64_C(0);
+        uHash *= UINT64_C(1099511628211);
+    }
+    return uHash;
+}
+
 static bool xwork__stream_event(void* pUserData, const xllm_event* pModelEvent)
 {
     xwork_stream_bridge* pBridge = (xwork_stream_bridge*)pUserData;
@@ -702,6 +735,13 @@ static xwork_result xwork__agent_run(
             eResult = XWORK_RESULT_ERROR;
             goto cleanup;
         }
+        if ( (pAgent->sModel && !xllmRequestSetModel(&tRequest, pAgent->sModel)) ||
+             (pAgent->sReasoningEffort && !xllmRequestSetReasoningEffort(&tRequest, pAgent->sReasoningEffort)) ) {
+            xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to apply model request profile");
+            xllmRequestUnit(&tRequest);
+            eResult = XWORK_RESULT_ERROR;
+            goto cleanup;
+        }
         for ( i = 0u; i < pAgent->iToolCount; ++i ) {
             const xwork_tool_entry* pTool = &pAgent->pTools[i];
             if ( !xllmRequestAddTool(&tRequest, pTool->sName, pTool->sDescription, pTool->sParametersJson, pTool->bStrict) ) {
@@ -714,14 +754,25 @@ static xwork_result xwork__agent_run(
         tRequest.bParallelToolCalls = true;
         tRequest.eToolChoice = XLLM_TOOL_CHOICE_AUTO;
         memset(&tEvent, 0, sizeof(tEvent));
-        tEvent.eKind = XWORK_EVENT_MODEL_START;
-        tEvent.uAgentTurn = uTurn;
-        (void)xllmSessionGetStats(pAgent->pSession, &tEvent.tSessionStats);
-        if ( !xwork__emit(pAgent, &tEvent) ) {
-            xllmRequestUnit(&tRequest);
-            xwork__set_error(pError, XWORK_ERROR_CANCELLED, "agent was cancelled before model call");
-            eResult = XWORK_RESULT_CANCELLED;
-            goto cleanup;
+        {
+            char sRequestFingerprint[17];
+            uint64_t uRequestFingerprint = xwork__request_fingerprint(&tRequest);
+            (void)snprintf(sRequestFingerprint, sizeof(sRequestFingerprint), "%016llx",
+                (unsigned long long)uRequestFingerprint);
+            tEvent.eKind = XWORK_EVENT_MODEL_START;
+            tEvent.uAgentTurn = uTurn;
+            tEvent.sModel = tRequest.sModel;
+            tEvent.sRequestFingerprint = sRequestFingerprint;
+            tEvent.iMessageCount = tRequest.iMessageCount;
+            tEvent.iToolDefinitionCount = tRequest.iToolCount;
+            tEvent.uMaxOutputTokens = tRequest.uMaxOutputTokens;
+            (void)xllmSessionGetStats(pAgent->pSession, &tEvent.tSessionStats);
+            if ( !xwork__emit(pAgent, &tEvent) ) {
+                xllmRequestUnit(&tRequest);
+                xwork__set_error(pError, XWORK_ERROR_CANCELLED, "agent was cancelled before model call");
+                eResult = XWORK_RESULT_CANCELLED;
+                goto cleanup;
+            }
         }
         memset(&tBridge, 0, sizeof(tBridge));
         tBridge.pAgent = pAgent;
@@ -758,8 +809,14 @@ static xwork_result xwork__agent_run(
         tEvent.uAgentTurn = uTurn;
         tEvent.sText = pResponse->sContent;
         tEvent.iTextLength = pResponse->sContent ? strlen(pResponse->sContent) : 0u;
+        tEvent.sModel = pResponse->sModel;
+        tEvent.sProviderRequestId = pResponse->sRequestId;
+        tEvent.sFinishReason = pResponse->sFinishReason;
+        tEvent.iResponseToolCallCount = pResponse->iToolCallCount;
+        tEvent.uHttpStatus = pResponse->uHttpStatus;
         tEvent.bSuccess = true;
         tEvent.tUsage = pResponse->tUsage;
+        tEvent.tDiagnostics = pResponse->tDiagnostics;
         if ( !xwork__emit(pAgent, &tEvent) ) {
             xllmResponseDestroy(pResponse);
             xwork__set_error(pError, XWORK_ERROR_CANCELLED, "agent was cancelled after model call");

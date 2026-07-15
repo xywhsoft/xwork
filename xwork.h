@@ -169,8 +169,18 @@ typedef struct xwork_event {
     const char* sToolName;
     const char* sToolCallId;
     const char* sArtifactPath;
+    const char* sModel;
+    const char* sProviderRequestId;
+    const char* sFinishReason;
+    const char* sRequestFingerprint;
+    size_t iMessageCount;
+    size_t iToolDefinitionCount;
+    size_t iResponseToolCallCount;
+    uint32_t uMaxOutputTokens;
+    uint32_t uHttpStatus;
     bool bSuccess;
     xllm_usage tUsage;
+    xllm_diagnostics tDiagnostics;
     xllm_session_stats tSessionStats;
 } xwork_event;
 
@@ -213,6 +223,8 @@ typedef struct xwork_agent_config {
     const char* sSystemPrompt;
     const char* sSessionPath;
     const char* sArtifactDirectory;
+    const char* sModel;
+    const char* sReasoningEffort;
 
     xwork_approval_mode eApprovalMode;
     xwork_approval_fn OnApproval;
