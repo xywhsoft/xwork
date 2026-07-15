@@ -1,6 +1,7 @@
 #include "../xwork.c"
 #include "xllm.c"
 #include "xllm-session.c"
+#include "xllm-memory.c"
 
 static int g_iFailures = 0;
 
@@ -19,6 +20,8 @@ typedef struct mock_model {
     bool bSawCompactionSummary;
     bool bSawVerificationGate;
     bool bSawContext;
+    bool bSawRetrievedMemory;
+    bool bSawSecretMemory;
     uint32_t uPermissionCalls;
     bool bSawPathPermission;
     bool bSawCommandPermission;
@@ -34,11 +37,15 @@ typedef struct test_events {
     uint32_t uToolSuccess;
     uint32_t uToolFailure;
     uint32_t uCompactions;
+    uint32_t uRejectedCompactions;
+    uint32_t uMemoryRetrievals;
+    uint32_t uMemoryHits;
     uint32_t uErrors;
     uint32_t uModelStarts;
     uint32_t uModelDone;
     bool bRequestMetadata;
     bool bResponseMetadata;
+    bool bCompactionQualityMetadata;
     char sLastArtifact[512];
 } test_events;
 
@@ -122,14 +129,28 @@ static xllm_result mock_complete(
     if ( pRequest->pContext ) pMock->bSawContext = true;
     if ( pRequest->iToolCount == 0u ) {
         ++pMock->uCompactionCalls;
-        pResponse = mock_response(
-            "Objective: test the xwork tool loop after compaction. Completed: old synthetic rounds. Constraints: remain inside the workspace. Next: execute the requested file workflow.",
-            0u
-        );
+        if ( pMock->uCompactionCalls == 1u ) {
+            pResponse = mock_response("Objective: incomplete first compaction candidate.", 0u);
+        } else {
+            pResponse = mock_response(
+                "Objective: test the xwork tool loop after compaction and finish the requested file workflow.\n"
+                "Constraints: remain inside the workspace, preserve tool-call pairing, and verify every write.\n"
+                "Architecture and decisions: use a durable session checkpoint while retaining the newest complete turn verbatim.\n"
+                "Completed work: old synthetic rounds were inspected and their successful outcomes were retained.\n"
+                "Current repository state: sandbox paths are active and the requested note workflow remains ready to execute.\n"
+                "Verification evidence: the compacted prefix contains only completed turns with no unresolved tool calls.\n"
+                "Open issues and risks: the requested edits and command verification are not complete yet.\n"
+                "Exact next actions: execute the requested file tools, inspect results, run verification, and then report completion.",
+                0u
+            );
+        }
     } else {
         ++pMock->uAgentCalls;
         pMock->bSawTools = pRequest->iToolCount == 11u;
         pMock->bSawParallel = pRequest->bParallelToolCalls;
+        if ( request_has_text(pRequest, "project-note-convention") &&
+             request_has_text(pRequest, "note-verification-command") ) pMock->bSawRetrievedMemory = true;
+        if ( request_has_text(pRequest, "never-inject-secret-memory") ) pMock->bSawSecretMemory = true;
         if ( pMock->uAgentCalls > 1u && request_has_role(pRequest, XLLM_ROLE_TOOL, 1u) ) pMock->bSawToolResults = true;
         if ( request_has_text(pRequest, "Objective: test the xwork tool loop after compaction") ) pMock->bSawCompactionSummary = true;
         if ( request_has_text(pRequest, "Completion verification gate") ) pMock->bSawVerificationGate = true;
@@ -216,7 +237,19 @@ static bool on_event(void* pUserData, const xwork_event* pEvent)
             else ++pEvents->uToolFailure;
             if ( pEvent->sArtifactPath ) snprintf(pEvents->sLastArtifact, sizeof(pEvents->sLastArtifact), "%s", pEvent->sArtifactPath);
             break;
-        case XWORK_EVENT_COMPACTION_DONE: ++pEvents->uCompactions; break;
+        case XWORK_EVENT_COMPACTION_REJECTED:
+            ++pEvents->uRejectedCompactions;
+            if ( pEvent->uCompactionAttempt == 1u &&
+                 pEvent->tCompactionQuality.uMissingSections != 0u &&
+                 !pEvent->tCompactionQuality.bAccepted ) pEvents->bCompactionQualityMetadata = true;
+            break;
+        case XWORK_EVENT_COMPACTION_DONE:
+            ++pEvents->uCompactions;
+            break;
+        case XWORK_EVENT_MEMORY_RETRIEVED:
+            ++pEvents->uMemoryRetrievals;
+            pEvents->uMemoryHits += (uint32_t)pEvent->iMemoryHitCount;
+            break;
         case XWORK_EVENT_ERROR: ++pEvents->uErrors; break;
         default: break;
     }
@@ -292,6 +325,10 @@ static void test_agent_loop(void)
     static const char sSessionPath[] = "tests/tmp_xwork/.xcode/session.json";
     xllm_session_config tSessionConfig;
     xllm_session* pSession;
+    xllm_memory* pMemory = NULL;
+    xllm_memory_config tMemoryConfig;
+    xllm_memory_record_input tMemoryRecord;
+    xllm_memory_receipt tMemoryReceipt;
     xllm_error tLlmError;
     xwork_agent_config tAgentConfig;
     xwork_agent* pAgent;
@@ -314,6 +351,7 @@ static void test_agent_loop(void)
     xwork_tool_output tPatchOutput;
     xwork_tool_output tProcessOutput;
     unsigned long long uManagedId = 0u;
+    xwork_result eAgentRun;
     uint64_t uInterruptedTurn = 0u;
     unsigned i;
 
@@ -322,16 +360,61 @@ static void test_agent_loop(void)
     memset(&tResult, 0, sizeof(tResult));
     (void)xrtDirDelete((str)sWorkspace);
     CHECK(xrtDirCreateAll((str)sWorkspace), "test workspace created");
+    xllmMemoryConfigInit(&tMemoryConfig);
+    tMemoryConfig.sPath = "tests/tmp_xwork/.xcode/memory.json";
+    tMemoryConfig.sNamespace = "xwork-test";
+    tMemoryConfig.bCreateIfMissing = true;
+    pMemory = xllmMemoryOpen(&tMemoryConfig, &tLlmError);
+    CHECK(pMemory != NULL, "layered memory store opens");
+    xllmMemoryRecordInputInit(&tMemoryRecord);
+    tMemoryRecord.eScope = XLLM_MEMORY_SCOPE_MEMORY;
+    tMemoryRecord.eKind = XLLM_MEMORY_KIND_PREFERENCE;
+    tMemoryRecord.eTrust = XLLM_MEMORY_TRUST_USER_APPROVED;
+    tMemoryRecord.eSensitivity = XLLM_MEMORY_SENSITIVITY_INTERNAL;
+    tMemoryRecord.sRecordId = "project-note-convention";
+    tMemoryRecord.sTitle = "note file convention";
+    tMemoryRecord.sText = "For requested note file work, use the sandbox directory and verify the final content.";
+    tMemoryRecord.sSourceUri = "user://test/convention";
+    tMemoryRecord.sActor = "test-user";
+    tMemoryRecord.sReason = "approved project convention";
+    CHECK(pMemory && xllmMemoryPut(pMemory, &tMemoryRecord, &tMemoryReceipt, &tLlmError),
+        "approved memory-layer record is stored");
+    xllmMemoryRecordInputInit(&tMemoryRecord);
+    tMemoryRecord.eScope = XLLM_MEMORY_SCOPE_KNOWLEDGE;
+    tMemoryRecord.eKind = XLLM_MEMORY_KIND_KNOWLEDGE;
+    tMemoryRecord.eTrust = XLLM_MEMORY_TRUST_LOCAL;
+    tMemoryRecord.eSensitivity = XLLM_MEMORY_SENSITIVITY_INTERNAL;
+    tMemoryRecord.sRecordId = "note-verification-command";
+    tMemoryRecord.sTitle = "note file verification";
+    tMemoryRecord.sText = "Verify a requested note file by reading it after the final write command succeeds.";
+    tMemoryRecord.sSourceUri = "repo://docs/testing";
+    tMemoryRecord.sActor = "workspace-indexer";
+    tMemoryRecord.sReason = "local project knowledge";
+    CHECK(pMemory && xllmMemoryPut(pMemory, &tMemoryRecord, &tMemoryReceipt, &tLlmError),
+        "knowledge-layer record is stored");
+    xllmMemoryRecordInputInit(&tMemoryRecord);
+    tMemoryRecord.eScope = XLLM_MEMORY_SCOPE_MEMORY;
+    tMemoryRecord.eKind = XLLM_MEMORY_KIND_FACT;
+    tMemoryRecord.eTrust = XLLM_MEMORY_TRUST_USER_APPROVED;
+    tMemoryRecord.eSensitivity = XLLM_MEMORY_SENSITIVITY_SECRET;
+    tMemoryRecord.sRecordId = "secret-note-record";
+    tMemoryRecord.sTitle = "requested note secret";
+    tMemoryRecord.sText = "never-inject-secret-memory";
+    tMemoryRecord.sSourceUri = "secret://test";
+    tMemoryRecord.sActor = "test-user";
+    tMemoryRecord.sReason = "sensitivity filter fixture";
+    CHECK(pMemory && xllmMemoryPut(pMemory, &tMemoryRecord, &tMemoryReceipt, &tLlmError),
+        "secret memory fixture is stored with an explicit label");
 
     xllmSessionConfigInit(&tSessionConfig);
-    tSessionConfig.uContextWindowTokens = 5000u;
+    tSessionConfig.uContextWindowTokens = 8000u;
     tSessionConfig.uMaxOutputTokens = 600u;
     tSessionConfig.uSafetyReserveTokens = 100u;
     tSessionConfig.uRecentTurnsToKeep = 1u;
     tSessionConfig.uToolPruneBytes = 512u;
     tSessionConfig.uSummaryMaxTokens = 400u;
     tSessionConfig.fPruneTrigger = 0.20;
-    tSessionConfig.fCompactTrigger = 0.32;
+    tSessionConfig.fCompactTrigger = 0.50;
     pSession = xllmSessionCreate(&tSessionConfig, &tLlmError);
     CHECK(pSession != NULL, "small session created for deterministic compaction");
     if ( !pSession || !sOld ) goto cleanup;
@@ -345,6 +428,7 @@ static void test_agent_loop(void)
     xworkAgentConfigInit(&tAgentConfig);
     CHECK(tAgentConfig.uMaxAgentTurns == 0u, "agent turns are unlimited by default");
     tAgentConfig.pSession = pSession;
+    tAgentConfig.pMemory = pMemory;
     tAgentConfig.sWorkspaceRoot = sWorkspace;
     tAgentConfig.sSessionPath = sSessionPath;
     tAgentConfig.sModel = "mock-model";
@@ -367,16 +451,31 @@ static void test_agent_loop(void)
     CHECK(pAgent && xworkAgentToolCount(pAgent) == 11u, "eleven practical builtin tools registered");
     if ( !pAgent ) goto cleanup;
 
-    CHECK(xworkAgentRun(pAgent, "Create and verify the requested note file.", &tResult, &tError) == XWORK_RESULT_OK, "multi-turn tool loop completes");
+    eAgentRun = xworkAgentRun(pAgent, "Create and verify the requested note file.", &tResult, &tError);
+    if ( eAgentRun != XWORK_RESULT_OK ) {
+        fprintf(stderr, "agent loop error: result=%d code=%s message=%s\n",
+            (int)eAgentRun, xworkErrorCodeName(tError.eCode), tError.sMessage);
+    }
+    CHECK(eAgentRun == XWORK_RESULT_OK, "multi-turn tool loop completes");
     CHECK(tResult.sFinalText && strstr(tResult.sFinalText, "verified"), "final assistant response returned");
     CHECK(tResult.uAgentTurns == 5u && tResult.uToolCalls == 8u, "verification gate adds one model turn while eight tool calls run");
-    CHECK(tResult.uCompactions >= 1u && tMock.uCompactionCalls == tResult.uCompactions, "context compaction occurred before or during tool work");
-    CHECK(tEvents.uCompactions == tResult.uCompactions && tEvents.uErrors == 0u, "compaction events emitted without agent errors");
+    CHECK(tResult.uCompactions >= 1u && tMock.uCompactionCalls == tResult.uCompactions + 1u &&
+        tResult.uRejectedCompactionSummaries == 1u,
+        "rejected compaction is corrected before the durable checkpoint advances");
+    CHECK(tEvents.uCompactions == tResult.uCompactions && tEvents.uRejectedCompactions == 1u &&
+        tEvents.bCompactionQualityMetadata && tEvents.uErrors == 0u,
+        "compaction quality and completion events are balanced");
     CHECK(tEvents.uModelStarts == tResult.uAgentTurns && tEvents.uModelDone == tResult.uAgentTurns &&
           tEvents.bRequestMetadata && tEvents.bResponseMetadata,
         "model lifecycle events expose reproducible request and provider diagnostics");
     CHECK(tMock.bSawTools && tMock.bSawParallel && tMock.bSawToolResults && tMock.bSawContext,
         "tools, parallel flag, continuity, and operation context reach model");
+    CHECK(tResult.uMemoryHits == 2u && tResult.uMemoryContextBytes > 0u &&
+        tResult.uMemoryStoreRevision == 3u && tEvents.uMemoryRetrievals == 2u &&
+        tEvents.uMemoryHits == 2u,
+        "memory and knowledge layers are retrieved with auditable revision metrics");
+    CHECK(tMock.bSawRetrievedMemory && !tMock.bSawSecretMemory,
+        "retrieved memory reaches the model while secret records remain filtered");
     CHECK(tMock.bSawCompactionSummary, "post-compaction model turns receive the summary checkpoint");
     CHECK(tMock.bSawVerificationGate, "premature completion receives a durable verification-gate prompt");
     CHECK(tMock.uPermissionCalls == 8u && tMock.bSawPathPermission && tMock.bSawCommandPermission && tMock.bSawHighRiskPermission,
@@ -486,7 +585,8 @@ static void test_agent_loop(void)
     CHECK(tError.eCode == XWORK_ERROR_NONE, "successful run does not leak a stale recoverable tool error");
     uCompactionsBeforeExplicit = tMock.uCompactionCalls;
     CHECK(xworkAgentCompact(pAgent, &tError) == XWORK_RESULT_OK, "explicit safe-prefix compaction completes after the run");
-    CHECK(tMock.uCompactionCalls == uCompactionsBeforeExplicit + 1u && tEvents.uCompactions == tMock.uCompactionCalls,
+    CHECK(tMock.uCompactionCalls == uCompactionsBeforeExplicit + 1u &&
+        tEvents.uCompactions + tEvents.uRejectedCompactions == tMock.uCompactionCalls,
         "explicit compaction adds one model summary and lifecycle event");
 
     {
@@ -537,6 +637,7 @@ cleanup:
     if ( sFile && iFileSize ) xrtFree(sFile);
     if ( sArtifactAbsolute ) xrtFree(sArtifactAbsolute);
     free(sOld);
+    xllmMemoryClose(pMemory);
     xllmSessionDestroy(pSession);
     (void)xrtDirDelete((str)sWorkspace);
 }

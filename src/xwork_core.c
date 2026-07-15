@@ -355,11 +355,16 @@ void xworkAgentConfigInit(xwork_agent_config* pConfig)
     pConfig->uConsecutiveFailureLimit = 5u;
     pConfig->uMaxManagedProcesses = 8u;
     pConfig->uCompletionVerificationRetries = 2u;
+    pConfig->uCompactionQualityRetries = 1u;
     pConfig->iMaxInlineToolBytes = 64u * 1024u;
     pConfig->iMaxCapturedCommandBytes = 8u * 1024u * 1024u;
+    pConfig->uMemoryMaxHitsPerLayer = 8u;
+    pConfig->iMemoryMaxContextBytesPerLayer = 16u * 1024u;
+    pConfig->eMemoryMaximumSensitivity = XLLM_MEMORY_SENSITIVITY_INTERNAL;
     pConfig->bRegisterBuiltinTools = true;
     pConfig->bAutoSaveSession = true;
     pConfig->bRequireVerificationAfterWrite = true;
+    pConfig->bRetrieveMemory = true;
 }
 
 static void xwork__tool_entry_unit(xwork_tool_entry* pTool)
@@ -448,6 +453,7 @@ xwork_agent* xworkAgentCreate(const xwork_agent_config* pConfig, xwork_error* pE
     }
     pAgent->pClient = pConfig->pClient;
     pAgent->pSession = pConfig->pSession;
+    pAgent->pMemory = pConfig->pMemory;
     pAgent->sWorkspaceRoot = xwork__strdup(sRoot);
     pAgent->sSystemPrompt = xwork__strdup(pConfig->sSystemPrompt ? pConfig->sSystemPrompt : "You are a careful coding agent. Inspect the workspace, use tools to make changes, run relevant tests, and continue until the user's task is complete.");
     pAgent->sSessionPath = pConfig->sSessionPath ? xwork__strdup(pConfig->sSessionPath) : NULL;
@@ -482,10 +488,23 @@ xwork_agent* xworkAgentCreate(const xwork_agent_config* pConfig, xwork_error* pE
     pAgent->uConsecutiveFailureLimit = pConfig->uConsecutiveFailureLimit ? pConfig->uConsecutiveFailureLimit : 5u;
     pAgent->uMaxManagedProcesses = pConfig->uMaxManagedProcesses ? pConfig->uMaxManagedProcesses : 8u;
     pAgent->uCompletionVerificationRetries = pConfig->uCompletionVerificationRetries ? pConfig->uCompletionVerificationRetries : 2u;
+    pAgent->uCompactionQualityRetries = pConfig->uCompactionQualityRetries;
     pAgent->iMaxInlineToolBytes = pConfig->iMaxInlineToolBytes ? pConfig->iMaxInlineToolBytes : 64u * 1024u;
     pAgent->iMaxCapturedCommandBytes = pConfig->iMaxCapturedCommandBytes ? pConfig->iMaxCapturedCommandBytes : 8u * 1024u * 1024u;
+    pAgent->uMemoryMaxHitsPerLayer = pConfig->uMemoryMaxHitsPerLayer ? pConfig->uMemoryMaxHitsPerLayer : 8u;
+    pAgent->iMemoryMaxContextBytesPerLayer = pConfig->iMemoryMaxContextBytesPerLayer
+        ? pConfig->iMemoryMaxContextBytesPerLayer : 16u * 1024u;
+    pAgent->eMemoryMaximumSensitivity = pConfig->eMemoryMaximumSensitivity;
     pAgent->bAutoSaveSession = pConfig->bAutoSaveSession;
     pAgent->bRequireVerificationAfterWrite = pConfig->bRequireVerificationAfterWrite;
+    pAgent->bRetrieveMemory = pConfig->bRetrieveMemory;
+    if ( pAgent->eMemoryMaximumSensitivity < XLLM_MEMORY_SENSITIVITY_PUBLIC ||
+         pAgent->eMemoryMaximumSensitivity > XLLM_MEMORY_SENSITIVITY_SECRET ||
+         pAgent->iMemoryMaxContextBytesPerLayer < 512u ) {
+        xworkAgentDestroy(pAgent);
+        xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "invalid memory retrieval policy");
+        return NULL;
+    }
 
     if ( !xllmSessionGetStats(pAgent->pSession, &tStats) ) {
         xworkAgentDestroy(pAgent);

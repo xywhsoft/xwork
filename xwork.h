@@ -10,6 +10,7 @@
 
 #include "xllm.h"
 #include "xllm-session.h"
+#include "xllm-memory.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -20,7 +21,7 @@ extern "C" {
 #endif
 
 #define XWORK_VERSION_MAJOR 2
-#define XWORK_VERSION_MINOR 0
+#define XWORK_VERSION_MINOR 1
 #define XWORK_VERSION_PATCH 0
 
 typedef struct xwork_agent xwork_agent;
@@ -158,7 +159,9 @@ typedef enum xwork_event_kind {
     XWORK_EVENT_TOOL_START,
     XWORK_EVENT_TOOL_DONE,
     XWORK_EVENT_COMPACTION_START,
+    XWORK_EVENT_COMPACTION_REJECTED,
     XWORK_EVENT_COMPACTION_DONE,
+    XWORK_EVENT_MEMORY_RETRIEVED,
     XWORK_EVENT_AGENT_DONE,
     XWORK_EVENT_ERROR
 } xwork_event_kind;
@@ -181,6 +184,12 @@ typedef struct xwork_event {
     uint32_t uMaxOutputTokens;
     uint32_t uHttpStatus;
     bool bSuccess;
+    uint32_t uCompactionAttempt;
+    xllm_compaction_quality tCompactionQuality;
+    xllm_memory_scope eMemoryScope;
+    uint64_t uMemoryStoreRevision;
+    size_t iMemoryHitCount;
+    size_t iMemoryContextBytes;
     xllm_usage tUsage;
     xllm_diagnostics tDiagnostics;
     xllm_session_stats tSessionStats;
@@ -220,6 +229,7 @@ typedef struct xwork_agent_config {
     /* Borrowed dependencies; they must outlive the agent. */
     xllm_client* pClient;
     xllm_session* pSession;
+    xllm_memory* pMemory;
 
     const char* sWorkspaceRoot;
     const char* sSystemPrompt;
@@ -249,11 +259,16 @@ typedef struct xwork_agent_config {
     uint32_t uConsecutiveFailureLimit;
     uint32_t uMaxManagedProcesses;
     uint32_t uCompletionVerificationRetries; /* Premature final answers after a write; default 2. */
+    uint32_t uCompactionQualityRetries;       /* Retries after a structurally rejected summary. */
     size_t iMaxInlineToolBytes;
     size_t iMaxCapturedCommandBytes;
+    uint32_t uMemoryMaxHitsPerLayer;
+    size_t iMemoryMaxContextBytesPerLayer;
+    xllm_memory_sensitivity eMemoryMaximumSensitivity;
     bool bRegisterBuiltinTools;
     bool bAutoSaveSession;
     bool bRequireVerificationAfterWrite;      /* Require successful exec_command after latest write. */
+    bool bRetrieveMemory;
 } xwork_agent_config;
 
 typedef struct xwork_run_result {
@@ -262,6 +277,10 @@ typedef struct xwork_run_result {
     uint64_t uModelCalls;
     uint64_t uToolCalls;
     uint64_t uCompactions;
+    uint64_t uRejectedCompactionSummaries;
+    uint64_t uMemoryHits;
+    uint64_t uMemoryContextBytes;
+    uint64_t uMemoryStoreRevision;
     xllm_usage tLastUsage;
     xllm_session_stats tFinalSessionStats;
 } xwork_run_result;

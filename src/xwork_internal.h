@@ -51,6 +51,7 @@ typedef struct xwork_process_entry {
 struct xwork_agent {
     xllm_client* pClient;
     xllm_session* pSession;
+    xllm_memory* pMemory;
     char* sWorkspaceRoot;
     char* sSystemPrompt;
     char* sSessionPath;
@@ -77,10 +78,15 @@ struct xwork_agent {
     uint32_t uConsecutiveFailureLimit;
     uint32_t uMaxManagedProcesses;
     uint32_t uCompletionVerificationRetries;
+    uint32_t uCompactionQualityRetries;
     size_t iMaxInlineToolBytes;
     size_t iMaxCapturedCommandBytes;
+    uint32_t uMemoryMaxHitsPerLayer;
+    size_t iMemoryMaxContextBytesPerLayer;
+    xllm_memory_sensitivity eMemoryMaximumSensitivity;
     bool bAutoSaveSession;
     bool bRequireVerificationAfterWrite;
+    bool bRetrieveMemory;
     volatile long iCancelled;
     bool bRunning;
 
