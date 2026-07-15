@@ -1546,7 +1546,7 @@ cleanup:
     return eResult;
 }
 
-bool xworkAgentRegisterBuiltinTools(xwork_agent* pAgent, xwork_error* pError)
+bool xworkAgentRegisterBuiltinReadOnlyTools(xwork_agent* pAgent, xwork_error* pError)
 {
     static const xwork_tool_definition arrTools[] = {
         {
@@ -1566,7 +1566,26 @@ bool xworkAgentRegisterBuiltinTools(xwork_agent* pAgent, xwork_error* pError)
             "Search literal text in workspace files. Use pattern such as *.c to narrow files; binary and files over 4 MiB are skipped.",
             "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"pattern\":{\"type\":\"string\"},\"max_results\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":5000},\"max_depth\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":64}},\"required\":[\"query\"],\"additionalProperties\":false}",
             true, XWORK_TOOL_EFFECT_READ_ONLY, xwork__tool_search_text, NULL, NULL
-        },
+        }
+    };
+    size_t i;
+    xwork_tool_definition tTool;
+    if ( !pAgent ) {
+        xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "agent is null");
+        return false;
+    }
+    for ( i = 0u; i < sizeof(arrTools) / sizeof(arrTools[0]); ++i ) {
+        tTool = arrTools[i];
+        tTool.pUserData = pAgent;
+        tTool.sSource = "builtin";
+        if ( !xworkAgentRegisterTool(pAgent, &tTool, pError) ) return false;
+    }
+    return true;
+}
+
+bool xworkAgentRegisterBuiltinTools(xwork_agent* pAgent, xwork_error* pError)
+{
+    static const xwork_tool_definition arrTools[] = {
         {
             "write_file",
             "Create, overwrite, or append a UTF-8 file inside the workspace. Prefer replace_text for small edits to existing files.",
@@ -1622,6 +1641,7 @@ bool xworkAgentRegisterBuiltinTools(xwork_agent* pAgent, xwork_error* pError)
         xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "agent is null");
         return false;
     }
+    if ( !xworkAgentRegisterBuiltinReadOnlyTools(pAgent, pError) ) return false;
     for ( i = 0u; i < sizeof(arrTools) / sizeof(arrTools[0]); ++i ) {
         tTool = arrTools[i];
         tTool.pUserData = pAgent;

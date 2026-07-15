@@ -5,3 +5,4 @@
 #include "src/xwork_tools.c"
 #include "src/xwork_mcp.c"
 #include "src/xwork_agent.c"
+#include "src/xwork_subagent.c"

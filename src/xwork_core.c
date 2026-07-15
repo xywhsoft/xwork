@@ -319,9 +319,14 @@ bool xwork__ensure_parent(const char* sPath)
 
 bool xwork__emit(xwork_agent* pAgent, const xwork_event* pEvent)
 {
+    xwork_event tEvent;
     if ( !pAgent || !pEvent ) return false;
     if ( xwork__is_cancelled(pAgent) ) return false;
-    if ( pAgent->OnEvent && !pAgent->OnEvent(pAgent->pEventUserData, pEvent) ) {
+    tEvent = *pEvent;
+    tEvent.uAgentDepth = pAgent->uAgentDepth;
+    tEvent.uDelegationId = pAgent->uDelegationId;
+    tEvent.uParentAgentTurn = pAgent->uParentAgentTurn;
+    if ( pAgent->OnEvent && !pAgent->OnEvent(pAgent->pEventUserData, &tEvent) ) {
         xwork__atomic_store(&pAgent->iCancelled, 1);
         return false;
     }
@@ -363,6 +368,7 @@ void xworkAgentConfigInit(xwork_agent_config* pConfig)
     pConfig->eMemoryMaximumSensitivity = XLLM_MEMORY_SENSITIVITY_INTERNAL;
     pConfig->bRegisterBuiltinTools = true;
     pConfig->bAutoSaveSession = true;
+    pConfig->bAllowArtifactWrites = true;
     pConfig->bRequireVerificationAfterWrite = true;
     pConfig->bRetrieveMemory = true;
 }
@@ -565,6 +571,7 @@ xwork_agent* xworkAgentCreate(const xwork_agent_config* pConfig, xwork_error* pE
         ? pConfig->iMemoryMaxContextBytesPerLayer : 16u * 1024u;
     pAgent->eMemoryMaximumSensitivity = pConfig->eMemoryMaximumSensitivity;
     pAgent->bAutoSaveSession = pConfig->bAutoSaveSession;
+    pAgent->bAllowArtifactWrites = pConfig->bAllowArtifactWrites;
     pAgent->bRequireVerificationAfterWrite = pConfig->bRequireVerificationAfterWrite;
     pAgent->bRetrieveMemory = pConfig->bRetrieveMemory;
     if ( pAgent->eMemoryMaximumSensitivity < XLLM_MEMORY_SENSITIVITY_PUBLIC ||

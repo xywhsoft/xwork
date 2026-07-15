@@ -2,7 +2,7 @@
 
 `xwork` is the C agent-runtime layer between `xllm-session` and product hosts such as `xcode`.
 
-The v2 mainline is deliberately small. It implements the reliable single-agent loop needed for a usable coding agent before the project grows remote workers, multi-agent scheduling, replay, or database backends again. The previous broad implementation remains under `dev/v1` as design and implementation reference.
+The v2 mainline is deliberately small. It implements a reliable governed agent loop, including bounded read-only delegation, before the project grows remote workers or database-backed scheduling again. The previous broad implementation remains under `dev/v1` as design and implementation reference.
 
 ## Boundary
 
@@ -46,6 +46,9 @@ xcode CLI / IDE host
 - MCP 2025-06-18 stdio client support for initialization, paginated tool
   discovery, namespaced proxy registration, synchronous tool calls, structured
   results, cancellation notifications, deadlines, and protocol diagnostics.
+- isolated read-only subagents with independent sessions, inherited cancellation,
+  hard timeout/turn/output budgets, three inspection-only tools, depth-tagged
+  events, protected `.git`/`.xcode` paths, and no session or artifact writes.
 
 Built-in tools:
 
@@ -70,6 +73,23 @@ Managed process IDs live for the lifetime of one `xwork_agent`. They intentional
 `exec_command` treats only exit code `0` as success by default. For a command that is expected to reject invalid input, pass a non-empty `expected_exit_codes` array such as `[1, 2]`; a normal exit matching the array is successful, while timeouts, cancellation, signals, and other abnormal exits remain failures.
 
 Interrupted tool recovery is intentionally at-least-once: if a process stops after a side effect completes but before its result reaches the journal, that call is still pending and may be retried. Permission and hook checks run again. Hosts should favor idempotent operations and transactional `apply_patch` edits; managed OS processes cannot be reattached after restart. Recovery conservatively requires a fresh successful verification command before accepting completion.
+
+## Read-only delegation
+
+`xworkAgentRunReadOnlySubagent()` creates a fresh, non-persistent child session
+from the parent session's token policy and clamps it to host-provided turn,
+timeout, maximum-output, and final-byte budgets. The child borrows the parent's
+model boundary, workspace, operation-context ancestry, and optional layered
+memory. It receives only `read_file`, `list_files`, and `search_text`; `.git`
+and `.xcode` path components are denied even through explicit reads.
+
+Delegation depth is fixed at one. Child agents cannot register a delegation
+tool, launch processes, mutate the workspace, save a session, or spill tool
+output to artifacts. Oversized inspection results are truncated in memory.
+Forwarded events carry `uAgentDepth`, `uDelegationId`, and `uParentAgentTurn`
+so a host can record nested model/tool lifecycles without merging them into the
+parent scope. The product host remains responsible for deciding when and how
+many times the parent may invoke delegation.
 
 ## Minimal host setup
 
@@ -149,4 +169,4 @@ sh build.sh
 Cross builds use `RUN_TESTS=0`; sibling locations and flags are overrideable through
 `XLLM_DIR`, `XRT_DIR`, `BUILD_DIR`, `RELEASE_DIR`, `CFLAGS`, `LDFLAGS`, and `LIBS`.
 
-The optimized warning-as-error suite covers operation-deadline propagation, a forced context compaction followed by a multi-turn workflow using the built-in tools, transactional multi-file editing and rollback, managed-process stdin/output, artifact spill, session persistence, interrupted parallel-tool recovery, duplicate-prompt rejection, a rejected workspace escape, dynamic registry replacement, and a real local MCP stdio handshake/discovery/call lifecycle.
+The optimized warning-as-error suite covers operation-deadline propagation, bounded read-only delegation and internal-path isolation, a forced context compaction followed by a multi-turn workflow using the built-in tools, transactional multi-file editing and rollback, managed-process stdin/output, artifact spill, session persistence, interrupted parallel-tool recovery, duplicate-prompt rejection, a rejected workspace escape, dynamic registry replacement, and a real local MCP stdio handshake/discovery/call lifecycle.

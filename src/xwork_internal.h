@@ -86,6 +86,7 @@ struct xwork_agent {
     size_t iMemoryMaxContextBytesPerLayer;
     xllm_memory_sensitivity eMemoryMaximumSensitivity;
     bool bAutoSaveSession;
+    bool bAllowArtifactWrites;
     bool bRequireVerificationAfterWrite;
     bool bRetrieveMemory;
     volatile long iCancelled;
@@ -101,6 +102,10 @@ struct xwork_agent {
     uint64_t uNextProcessId;
     uint64_t uArtifactSequence;
     uint64_t uRunSequence;
+    uint32_t uAgentDepth;
+    uint64_t uDelegationId;
+    uint64_t uParentAgentTurn;
+    uint64_t uSubagentSequence;
 };
 
 char* xwork__strdup(const char* sText);

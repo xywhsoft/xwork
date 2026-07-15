@@ -125,6 +125,20 @@ static bool xwork__spill_tool_output(
         if ( !*ppInline ) xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to copy tool output");
         return *ppInline != NULL;
     }
+    iHead = pAgent->iMaxInlineToolBytes * 2u / 3u;
+    iTail = pAgent->iMaxInlineToolBytes - iHead;
+    if ( iHead > iLength ) iHead = iLength;
+    if ( iTail > iLength - iHead ) iTail = iLength - iHead;
+    if ( !pAgent->bAllowArtifactWrites ) {
+        if ( !xwork__buf_appendf(&tInline,
+                "[tool output truncated: %zu bytes; artifact writes disabled]\n--- head ---\n",
+                iLength) ||
+             !xwork__buf_append(&tInline, sContent, iHead) ||
+             !xwork__buf_append_cstr(&tInline, "\n--- tail ---\n") ||
+             !xwork__buf_append(&tInline, sContent + iLength - iTail, iTail) ) goto oom;
+        *ppInline = xwork__buf_detach(&tInline);
+        return *ppInline != NULL;
+    }
     sSafe = xwork__sanitize_name(sToolName ? sToolName : "tool");
     if ( !sSafe ) goto oom;
     snprintf(sRunName, sizeof(sRunName), "run-%06llu", (unsigned long long)pAgent->uRunSequence);
@@ -140,10 +154,6 @@ static bool xwork__spill_tool_output(
         xwork__set_error(pError, XWORK_ERROR_IO, "failed to write tool output artifact");
         goto cleanup;
     }
-    iHead = pAgent->iMaxInlineToolBytes * 2u / 3u;
-    iTail = pAgent->iMaxInlineToolBytes - iHead;
-    if ( iHead > iLength ) iHead = iLength;
-    if ( iTail > iLength - iHead ) iTail = iLength - iHead;
     if ( !xwork__buf_appendf(&tInline,
             "[tool output truncated: %zu bytes; full output saved to %s]\n--- head ---\n",
             iLength,
@@ -1106,7 +1116,8 @@ cleanup:
     if ( eResult != XWORK_RESULT_OK ) {
         (void)xllmSessionGetStats(pAgent->pSession, &tRun.tFinalSessionStats);
         xwork__emit_error(pAgent, uTurn, pError);
-        xworkRunResultUnit(&tRun);
+        *pResult = tRun;
+        memset(&tRun, 0, sizeof(tRun));
     } else {
         *pResult = tRun;
         memset(&tRun, 0, sizeof(tRun));

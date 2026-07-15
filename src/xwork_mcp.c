@@ -732,7 +732,7 @@ bool xworkMcpClientConnect(xwork_mcp_client* pClient, xwork_error* pError)
     if ( !xwork__buf_append_cstr(&tParams, "{\"protocolVersion\":") ||
          !xwork__json_string(&tParams, pClient->sRequestedProtocolVersion) ||
          !xwork__buf_append_cstr(&tParams,
-            ",\"capabilities\":{},\"clientInfo\":{\"name\":\"xwork\",\"version\":\"2.2.0\"}}") ) {
+            ",\"capabilities\":{},\"clientInfo\":{\"name\":\"xwork\",\"version\":\"2.3.0\"}}") ) {
         xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to build MCP initialize request");
         goto cleanup;
     }

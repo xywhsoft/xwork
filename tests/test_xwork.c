@@ -52,6 +52,18 @@ typedef struct test_events {
     char sLastArtifact[512];
 } test_events;
 
+typedef struct subagent_mock {
+    uint32_t uModelCalls;
+    uint32_t uAgentStarts;
+    uint32_t uAgentDone;
+    uint32_t uToolStarts;
+    uint32_t uToolDone;
+    bool bReadOnlyToolSet;
+    bool bSawReadableFile;
+    bool bSawInternalDenial;
+    bool bScopedEvents;
+} subagent_mock;
+
 static char* test_strdup(const char* sText)
 {
     size_t iLen = strlen(sText);
@@ -129,6 +141,67 @@ static bool request_has_text(const xllm_request* pRequest, const char* sNeedle)
         if ( sText && strstr(sText, sNeedle) ) return true;
     }
     return false;
+}
+
+static xllm_result subagent_complete(
+    void* pUserData,
+    const xllm_request* pRequest,
+    const xllm_stream_callbacks* pCallbacks,
+    xllm_response** ppResponse,
+    xllm_error* pError
+)
+{
+    static const char sLongFinal[] =
+        "Evidence report: the readable workspace file was inspected and the internal control directory was denied as required. "
+        "The child received only read_file, list_files, and search_text, performed no writes or process execution, and cannot delegate recursively. "
+        "Recommended next action: let the parent agent use this bounded evidence while retaining authority for every mutation. "
+        "Additional padding verifies that the host byte budget truncates this final response deterministically without creating an artifact.";
+    subagent_mock* pMock = (subagent_mock*)pUserData;
+    xllm_response* pResponse;
+    size_t i;
+    bool bNames = pRequest && pRequest->iToolCount == 3u;
+    (void)pCallbacks;
+    (void)pError;
+    *ppResponse = NULL;
+    if ( !pRequest || !pMock ) return XLLM_RESULT_ERROR;
+    for ( i = 0u; bNames && i < pRequest->iToolCount; ++i ) {
+        const char* sName = pRequest->pTools[i].sName;
+        if ( strcmp(sName, "read_file") != 0 && strcmp(sName, "list_files") != 0 &&
+             strcmp(sName, "search_text") != 0 ) bNames = false;
+    }
+    pMock->bReadOnlyToolSet = pMock->bReadOnlyToolSet || bNames;
+    ++pMock->uModelCalls;
+    if ( pMock->uModelCalls == 1u ) {
+        pResponse = mock_response("", 2u);
+        if ( !pResponse ||
+             !mock_set_call(pResponse, 0u, "sub_read", "read_file",
+                "{\"path\":\"evidence.txt\",\"max_lines\":100}") ||
+             !mock_set_call(pResponse, 1u, "sub_internal", "read_file",
+                "{\"path\":\".xcode/secrets.local.json\",\"max_lines\":20}") ) {
+            xllmResponseDestroy(pResponse);
+            return XLLM_RESULT_ERROR;
+        }
+    } else {
+        pMock->bSawReadableFile = request_has_text(pRequest, "readonly-evidence-marker") &&
+            request_has_text(pRequest, "artifact writes disabled");
+        pMock->bSawInternalDenial = request_has_text(pRequest, "denied by approval policy");
+        pResponse = mock_response(sLongFinal, 0u);
+    }
+    *ppResponse = pResponse;
+    return pResponse ? XLLM_RESULT_OK : XLLM_RESULT_ERROR;
+}
+
+static bool subagent_event(void* pUserData, const xwork_event* pEvent)
+{
+    subagent_mock* pMock = (subagent_mock*)pUserData;
+    if ( !pMock || !pEvent ) return false;
+    if ( pEvent->uAgentDepth != 1u || pEvent->uDelegationId != 1u ||
+         pEvent->uParentAgentTurn != 42u ) pMock->bScopedEvents = false;
+    if ( pEvent->eKind == XWORK_EVENT_AGENT_START ) ++pMock->uAgentStarts;
+    if ( pEvent->eKind == XWORK_EVENT_AGENT_DONE ) ++pMock->uAgentDone;
+    if ( pEvent->eKind == XWORK_EVENT_TOOL_START ) ++pMock->uToolStarts;
+    if ( pEvent->eKind == XWORK_EVENT_TOOL_DONE ) ++pMock->uToolDone;
+    return true;
 }
 
 static xllm_result mock_complete(
@@ -763,6 +836,99 @@ cleanup:
     (void)xrtDirDelete((str)sWorkspace);
 }
 
+static void test_readonly_subagent(void)
+{
+    static const char sWorkspace[] = "tests/tmp_xwork_subagent";
+    char sEvidence[2048];
+    xllm_session_config tSessionConfig;
+    xllm_session* pSession = NULL;
+    xllm_error tLlmError;
+    xwork_agent_config tAgentConfig;
+    xwork_agent* pParent = NULL;
+    xwork_readonly_subagent_config tSubagentConfig;
+    xwork_run_result tResult;
+    xwork_error tError;
+    subagent_mock tMock;
+    xctx* pContext = NULL;
+    xwork_result eResult = XWORK_RESULT_ERROR;
+    size_t i;
+    memset(&tMock, 0, sizeof(tMock));
+    tMock.bScopedEvents = true;
+    memset(&tResult, 0, sizeof(tResult));
+    for ( i = 0u; i + 1u < sizeof(sEvidence); ++i ) {
+        static const char sMarker[] = "readonly-evidence-marker ";
+        sEvidence[i] = sMarker[i % (sizeof(sMarker) - 1u)];
+    }
+    sEvidence[sizeof(sEvidence) - 1u] = '\0';
+    (void)xrtDirDelete((str)sWorkspace);
+    CHECK(xrtDirCreateAll((str)"tests/tmp_xwork_subagent/.xcode") &&
+          xrtFilePutAll((str)"tests/tmp_xwork_subagent/evidence.txt",
+            (ptr)sEvidence, strlen(sEvidence)) == (int)strlen(sEvidence) &&
+          xrtFilePutAll((str)"tests/tmp_xwork_subagent/.xcode/secrets.local.json",
+            (ptr)"private-fixture", strlen("private-fixture")) == (int)strlen("private-fixture"),
+        "read-only subagent workspace and protected internal fixture created");
+    xllmSessionConfigInit(&tSessionConfig);
+    pSession = xllmSessionCreate(&tSessionConfig, &tLlmError);
+    pContext = xrtContextCreate(NULL);
+    xworkAgentConfigInit(&tAgentConfig);
+    tAgentConfig.pSession = pSession;
+    tAgentConfig.pContext = pContext;
+    tAgentConfig.sWorkspaceRoot = sWorkspace;
+    tAgentConfig.OnModelComplete = subagent_complete;
+    tAgentConfig.pModelUserData = &tMock;
+    tAgentConfig.bRegisterBuiltinTools = false;
+    tAgentConfig.iMaxInlineToolBytes = 128u;
+    pParent = xworkAgentCreate(&tAgentConfig, &tError);
+    xrtContextRelease(pContext);
+    pContext = NULL;
+    CHECK(pSession && pParent && xworkAgentToolCount(pParent) == 0u,
+        "parent fixture creates without exposing tools to the child implicitly");
+    xworkReadOnlySubagentConfigInit(&tSubagentConfig);
+    tSubagentConfig.uParentAgentTurn = 42u;
+    tSubagentConfig.uTimeoutMs = 5000u;
+    tSubagentConfig.uMaxAgentTurns = 4u;
+    tSubagentConfig.uMaxOutputTokens = 1024u;
+    tSubagentConfig.iMaxFinalBytes = 256u;
+    tSubagentConfig.OnEvent = subagent_event;
+    tSubagentConfig.pEventUserData = &tMock;
+    if ( pParent ) {
+        eResult = xworkAgentRunReadOnlySubagent(
+            pParent, &tSubagentConfig, "Inspect evidence and report isolation.",
+            &tResult, &tError);
+    }
+    CHECK(eResult == XWORK_RESULT_OK && tMock.uModelCalls == 2u &&
+          tResult.uAgentTurns == 2u && tResult.uToolCalls == 2u,
+        "isolated read-only subagent completes a bounded tool loop");
+    CHECK(tMock.bReadOnlyToolSet && tMock.bSawReadableFile && tMock.bSawInternalDenial,
+        "subagent exposes only inspection tools and denies internal control paths");
+    CHECK(tMock.bScopedEvents && tMock.uAgentStarts == 1u && tMock.uAgentDone == 1u &&
+          tMock.uToolStarts == 2u && tMock.uToolDone == 2u &&
+          tResult.uAgentDepth == 1u && tResult.uDelegationId == 1u,
+        "subagent lifecycle is tagged with depth, delegation, and parent turn");
+    CHECK(tResult.sFinalText && strlen(tResult.sFinalText) <= 256u &&
+          strstr(tResult.sFinalText, "truncated by host budget") &&
+          !xrtDirExists((str)"tests/tmp_xwork_subagent/.xcode/artifacts"),
+        "subagent final output is capped without artifact side effects");
+    xworkRunResultUnit(&tResult);
+    memset(&tResult, 0, sizeof(tResult));
+    tMock.uModelCalls = 0u;
+    tSubagentConfig.uMaxAgentTurns = 1u;
+    tSubagentConfig.OnEvent = NULL;
+    tSubagentConfig.pEventUserData = NULL;
+    eResult = pParent ? xworkAgentRunReadOnlySubagent(
+        pParent, &tSubagentConfig, "Exercise the hard child turn budget.",
+        &tResult, &tError) : XWORK_RESULT_ERROR;
+    CHECK(eResult == XWORK_RESULT_LIMIT && tError.eCode == XWORK_ERROR_LOOP_GUARD &&
+          tResult.uAgentTurns == 1u && tResult.uAgentDepth == 1u &&
+          tResult.uDelegationId == 2u,
+        "subagent hard turn budget stops an unfinished child deterministically");
+    xworkRunResultUnit(&tResult);
+    xworkAgentDestroy(pParent);
+    xrtContextRelease(pContext);
+    xllmSessionDestroy(pSession);
+    (void)xrtDirDelete((str)sWorkspace);
+}
+
 static void test_agent_context_deadline(void)
 {
     static const char sWorkspace[] = "tests/tmp_xwork_deadline";
@@ -898,6 +1064,7 @@ int main(int argc, char** argv)
     test_process_text_normalization();
     test_agent_context_deadline();
     test_command_context_deadline();
+    test_readonly_subagent();
     test_agent_loop();
     xrtNetSyncShutdownHiddenEngine();
     xrtUnit();

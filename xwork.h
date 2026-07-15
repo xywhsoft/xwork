@@ -21,7 +21,7 @@ extern "C" {
 #endif
 
 #define XWORK_VERSION_MAJOR 2
-#define XWORK_VERSION_MINOR 2
+#define XWORK_VERSION_MINOR 3
 #define XWORK_VERSION_PATCH 0
 
 typedef struct xwork_agent xwork_agent;
@@ -182,6 +182,9 @@ typedef enum xwork_event_kind {
 typedef struct xwork_event {
     xwork_event_kind eKind;
     uint64_t uAgentTurn;
+    uint32_t uAgentDepth;
+    uint64_t uDelegationId;
+    uint64_t uParentAgentTurn;
     const char* sText;
     size_t iTextLength;
     const char* sToolName;
@@ -280,6 +283,7 @@ typedef struct xwork_agent_config {
     xllm_memory_sensitivity eMemoryMaximumSensitivity;
     bool bRegisterBuiltinTools;
     bool bAutoSaveSession;
+    bool bAllowArtifactWrites;
     bool bRequireVerificationAfterWrite;      /* Require successful exec_command after latest write. */
     bool bRetrieveMemory;
 } xwork_agent_config;
@@ -294,9 +298,25 @@ typedef struct xwork_run_result {
     uint64_t uMemoryHits;
     uint64_t uMemoryContextBytes;
     uint64_t uMemoryStoreRevision;
+    uint32_t uAgentDepth;
+    uint64_t uDelegationId;
     xllm_usage tLastUsage;
     xllm_session_stats tFinalSessionStats;
 } xwork_run_result;
+
+typedef struct xwork_readonly_subagent_config {
+    const char* sSystemPrompt;
+    xwork_permission_fn OnPermission;
+    void* pPermissionUserData;
+    xwork_event_fn OnEvent;
+    void* pEventUserData;
+    uint64_t uParentAgentTurn;
+    uint32_t uTimeoutMs;
+    uint32_t uMaxAgentTurns;
+    uint32_t uMaxOutputTokens;
+    size_t iMaxFinalBytes;
+    bool bRetrieveMemory;
+} xwork_readonly_subagent_config;
 
 void xworkErrorInit(xwork_error* pError);
 const char* xworkErrorCodeName(xwork_error_code eCode);
@@ -305,6 +325,7 @@ void xworkToolOutputUnit(xwork_tool_output* pOutput);
 bool xworkToolOutputSet(xwork_tool_output* pOutput, bool bSuccess, const char* sContent);
 
 void xworkAgentConfigInit(xwork_agent_config* pConfig);
+void xworkReadOnlySubagentConfigInit(xwork_readonly_subagent_config* pConfig);
 xwork_agent* xworkAgentCreate(const xwork_agent_config* pConfig, xwork_error* pError);
 void xworkAgentDestroy(xwork_agent* pAgent);
 bool xworkAgentRegisterTool(xwork_agent* pAgent, const xwork_tool_definition* pDefinition, xwork_error* pError);
@@ -365,6 +386,13 @@ bool xworkAgentCancel(xwork_agent* pAgent);
 const char* xworkAgentWorkspaceRoot(const xwork_agent* pAgent);
 
 xwork_result xworkAgentRun(xwork_agent* pAgent, const char* sPrompt, xwork_run_result* pResult, xwork_error* pError);
+xwork_result xworkAgentRunReadOnlySubagent(
+    xwork_agent* pParent,
+    const xwork_readonly_subagent_config* pConfig,
+    const char* sTask,
+    xwork_run_result* pResult,
+    xwork_error* pError
+);
 /* Resume an interrupted run without appending another user prompt. Pending
  * tool calls are completed first; an interrupted model call is retried from
  * the durable session tail. */
@@ -375,6 +403,8 @@ void xworkRunResultUnit(xwork_run_result* pResult);
 
 /* Registers filesystem, transactional edit, synchronous command, and managed process tools. */
 bool xworkAgentRegisterBuiltinTools(xwork_agent* pAgent, xwork_error* pError);
+/* Registers only filesystem inspection tools: read_file, list_files, and search_text. */
+bool xworkAgentRegisterBuiltinReadOnlyTools(xwork_agent* pAgent, xwork_error* pError);
 
 #ifdef __cplusplus
 }
