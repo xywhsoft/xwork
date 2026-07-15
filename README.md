@@ -32,6 +32,7 @@ xcode CLI / IDE host
 - explicit `xworkAgentResume()` recovery for interrupted model calls and partially completed tool batches, without appending a duplicate user prompt;
 - streaming text/reasoning, model, tool, compaction, completion, and error events;
 - cooperative cancellation;
+- optional reference-counted operation context with inherited cancellation and monotonic deadlines;
 - managed long-running processes with stable IDs, incremental output, stdin, stop, and cleanup;
 - approval modes for automatic, callback-controlled, and read-only execution;
 - structured per-tool permission decisions with risk and path/command/process resource metadata;
@@ -78,6 +79,7 @@ xwork_run_result result = {0};
 xworkAgentConfigInit(&config);
 config.pClient = client;
 config.pSession = session;
+config.pContext = operation_context;
 config.sWorkspaceRoot = "D:/GIT/project";
 config.sSessionPath = "D:/GIT/project/.xcode/session.json";
 config.eApprovalMode = XWORK_APPROVAL_AUTO;
@@ -92,6 +94,8 @@ xworkAgentDestroy(agent);
 ```
 
 The product host should render `xwork_event` values and install its own approval callback where human confirmation is required.
+
+When `config.pContext` is non-NULL, the agent retains it until destruction and passes it to every normal and compaction model request. `xworkAgentCancel()` also cancels this context. A cancelled scope returns `XWORK_RESULT_CANCELLED`; an expired deadline returns `XWORK_RESULT_TIMEOUT` and `XWORK_ERROR_TIMEOUT`, including during provider transport, retry backoff, or a long `exec_command`. Scoped command waits interrupt, terminate, and finally kill the process tree instead of waiting for the tool timeout.
 
 If startup inspection reports an interrupted durable run, call `xworkAgentResume(agent, &result, &error)` before accepting another prompt. A normal `xworkAgentRun` refuses to append new user input while the durable tail is waiting for a model response or has unresolved tool calls.
 
@@ -116,4 +120,4 @@ sh build.sh
 Cross builds use `RUN_TESTS=0`; sibling locations and flags are overrideable through
 `XLLM_DIR`, `XRT_DIR`, `BUILD_DIR`, `RELEASE_DIR`, `CFLAGS`, `LDFLAGS`, and `LIBS`.
 
-The optimized warning-as-error suite covers a forced context compaction followed by a multi-turn workflow using the built-in tools, transactional multi-file editing and rollback, managed-process stdin/output, artifact spill, session persistence, interrupted parallel-tool recovery, duplicate-prompt rejection, and a rejected workspace escape.
+The optimized warning-as-error suite covers operation-deadline propagation, a forced context compaction followed by a multi-turn workflow using the built-in tools, transactional multi-file editing and rollback, managed-process stdin/output, artifact spill, session persistence, interrupted parallel-tool recovery, duplicate-prompt rejection, and a rejected workspace escape.

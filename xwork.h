@@ -29,7 +29,8 @@ typedef enum xwork_result {
     XWORK_RESULT_OK = 0,
     XWORK_RESULT_ERROR = -1,
     XWORK_RESULT_CANCELLED = -2,
-    XWORK_RESULT_LIMIT = -3
+    XWORK_RESULT_LIMIT = -3,
+    XWORK_RESULT_TIMEOUT = -4
 } xwork_result;
 
 typedef enum xwork_error_code {
@@ -42,7 +43,8 @@ typedef enum xwork_error_code {
     XWORK_ERROR_IO,
     XWORK_ERROR_CONTEXT,
     XWORK_ERROR_LOOP_GUARD,
-    XWORK_ERROR_CANCELLED
+    XWORK_ERROR_CANCELLED,
+    XWORK_ERROR_TIMEOUT
 } xwork_error_code;
 
 typedef struct xwork_error {
@@ -225,6 +227,7 @@ typedef struct xwork_agent_config {
     const char* sArtifactDirectory;
     const char* sModel;
     const char* sReasoningEffort;
+    xctx* pContext;
 
     xwork_approval_mode eApprovalMode;
     xwork_approval_fn OnApproval;

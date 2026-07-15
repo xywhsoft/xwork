@@ -18,6 +18,7 @@ typedef struct mock_model {
     bool bSawToolResults;
     bool bSawCompactionSummary;
     bool bSawVerificationGate;
+    bool bSawContext;
     uint32_t uPermissionCalls;
     bool bSawPathPermission;
     bool bSawCommandPermission;
@@ -118,6 +119,7 @@ static xllm_result mock_complete(
     size_t i;
     (void)pError;
     *ppResponse = NULL;
+    if ( pRequest->pContext ) pMock->bSawContext = true;
     if ( pRequest->iToolCount == 0u ) {
         ++pMock->uCompactionCalls;
         pResponse = mock_response(
@@ -293,6 +295,7 @@ static void test_agent_loop(void)
     xllm_error tLlmError;
     xwork_agent_config tAgentConfig;
     xwork_agent* pAgent;
+    xctx* pContext = NULL;
     xwork_error tError;
     xwork_run_result tResult;
     mock_model tMock;
@@ -346,6 +349,8 @@ static void test_agent_loop(void)
     tAgentConfig.sSessionPath = sSessionPath;
     tAgentConfig.sModel = "mock-model";
     tAgentConfig.sReasoningEffort = "high";
+    pContext = xrtContextCreate(NULL);
+    tAgentConfig.pContext = pContext;
     tAgentConfig.OnModelComplete = mock_complete;
     tAgentConfig.pModelUserData = &tMock;
     tAgentConfig.OnEvent = on_event;
@@ -356,6 +361,8 @@ static void test_agent_loop(void)
     tAgentConfig.pHookUserData = &tMock;
     tAgentConfig.iMaxInlineToolBytes = 300u;
     pAgent = xworkAgentCreate(&tAgentConfig, &tError);
+    xrtContextRelease(pContext);
+    pContext = NULL;
     CHECK(pAgent != NULL, "agent creates with injected model boundary");
     CHECK(pAgent && xworkAgentToolCount(pAgent) == 11u, "eleven practical builtin tools registered");
     if ( !pAgent ) goto cleanup;
@@ -368,7 +375,8 @@ static void test_agent_loop(void)
     CHECK(tEvents.uModelStarts == tResult.uAgentTurns && tEvents.uModelDone == tResult.uAgentTurns &&
           tEvents.bRequestMetadata && tEvents.bResponseMetadata,
         "model lifecycle events expose reproducible request and provider diagnostics");
-    CHECK(tMock.bSawTools && tMock.bSawParallel && tMock.bSawToolResults, "tool definitions, parallel flag, and continuity reach model");
+    CHECK(tMock.bSawTools && tMock.bSawParallel && tMock.bSawToolResults && tMock.bSawContext,
+        "tools, parallel flag, continuity, and operation context reach model");
     CHECK(tMock.bSawCompactionSummary, "post-compaction model turns receive the summary checkpoint");
     CHECK(tMock.bSawVerificationGate, "premature completion receives a durable verification-gate prompt");
     CHECK(tMock.uPermissionCalls == 8u && tMock.bSawPathPermission && tMock.bSawCommandPermission && tMock.bSawHighRiskPermission,
@@ -525,9 +533,110 @@ static void test_agent_loop(void)
     xworkRunResultUnit(&tResult);
     xworkAgentDestroy(pAgent);
 cleanup:
+    xrtContextRelease(pContext);
     if ( sFile && iFileSize ) xrtFree(sFile);
     if ( sArtifactAbsolute ) xrtFree(sArtifactAbsolute);
     free(sOld);
+    xllmSessionDestroy(pSession);
+    (void)xrtDirDelete((str)sWorkspace);
+}
+
+static void test_agent_context_deadline(void)
+{
+    static const char sWorkspace[] = "tests/tmp_xwork_deadline";
+    xllm_session_config tSessionConfig;
+    xllm_session* pSession = NULL;
+    xllm_error tLlmError;
+    xwork_agent_config tAgentConfig;
+    xwork_agent* pAgent = NULL;
+    xwork_error tError;
+    xwork_run_result tResult;
+    mock_model tMock;
+    xctx* pContext = NULL;
+    uint64_t uTurnBefore = 0u;
+    memset(&tMock, 0, sizeof(tMock));
+    memset(&tResult, 0, sizeof(tResult));
+    (void)xrtDirDelete((str)sWorkspace);
+    CHECK(xrtDirCreateAll((str)sWorkspace), "deadline test workspace created");
+    xllmSessionConfigInit(&tSessionConfig);
+    pSession = xllmSessionCreate(&tSessionConfig, &tLlmError);
+    pContext = xrtContextCreateTimeout(NULL, 0u);
+    xworkAgentConfigInit(&tAgentConfig);
+    tAgentConfig.pSession = pSession;
+    tAgentConfig.pContext = pContext;
+    tAgentConfig.sWorkspaceRoot = sWorkspace;
+    tAgentConfig.OnModelComplete = mock_complete;
+    tAgentConfig.pModelUserData = &tMock;
+    pAgent = xworkAgentCreate(&tAgentConfig, &tError);
+    CHECK(pSession && pContext && pAgent, "deadline-scoped agent creates");
+    if ( pSession ) uTurnBefore = xllmSessionCurrentTurn(pSession);
+    xrtContextRelease(pContext);
+    pContext = NULL;
+    if ( pAgent ) {
+        CHECK(xworkAgentRun(pAgent, "This prompt must not be appended.", &tResult, &tError) == XWORK_RESULT_TIMEOUT &&
+            tError.eCode == XWORK_ERROR_TIMEOUT && tMock.uAgentCalls == 0u &&
+            tMock.uCompactionCalls == 0u && xllmSessionCurrentTurn(pSession) == uTurnBefore,
+            "expired operation deadline stops before session mutation or model call");
+    }
+    xworkRunResultUnit(&tResult);
+    xworkAgentDestroy(pAgent);
+    xrtContextRelease(pContext);
+    xllmSessionDestroy(pSession);
+    (void)xrtDirDelete((str)sWorkspace);
+}
+
+static void test_command_context_deadline(void)
+{
+    static const char sWorkspace[] = "tests/tmp_xwork_command_deadline";
+    xllm_session_config tSessionConfig;
+    xllm_session* pSession = NULL;
+    xllm_error tLlmError;
+    xwork_agent_config tAgentConfig;
+    xwork_agent* pAgent = NULL;
+    xwork_error tError;
+    mock_model tMock;
+    xctx* pContext = NULL;
+    const xwork_tool_entry* pExecTool;
+    xwork_tool_context tToolContext;
+    xwork_tool_output tOutput;
+    xwork_result eResult = XWORK_RESULT_ERROR;
+    uint64_t uStartedMs;
+    uint64_t uElapsedMs;
+    memset(&tMock, 0, sizeof(tMock));
+    memset(&tToolContext, 0, sizeof(tToolContext));
+    (void)xrtDirDelete((str)sWorkspace);
+    CHECK(xrtDirCreateAll((str)sWorkspace), "command deadline test workspace created");
+    xllmSessionConfigInit(&tSessionConfig);
+    pSession = xllmSessionCreate(&tSessionConfig, &tLlmError);
+    pContext = xrtContextCreateTimeout(NULL, 300u);
+    xworkAgentConfigInit(&tAgentConfig);
+    tAgentConfig.pSession = pSession;
+    tAgentConfig.pContext = pContext;
+    tAgentConfig.sWorkspaceRoot = sWorkspace;
+    tAgentConfig.OnModelComplete = mock_complete;
+    tAgentConfig.pModelUserData = &tMock;
+    pAgent = xworkAgentCreate(&tAgentConfig, &tError);
+    xrtContextRelease(pContext);
+    pContext = NULL;
+    pExecTool = pAgent ? xwork__find_tool(pAgent, "exec_command") : NULL;
+    tToolContext.pAgent = pAgent;
+    tToolContext.sWorkspaceRoot = sWorkspace;
+    xworkToolOutputInit(&tOutput);
+    uStartedMs = xrtMonotonicMs();
+#if defined(_WIN32)
+    if ( pExecTool ) eResult = pExecTool->OnExecute(pExecTool->pUserData, &tToolContext,
+        "{\"command\":\"ping -n 6 127.0.0.1 >nul\",\"timeout_ms\":5000}", &tOutput, &tError);
+#else
+    if ( pExecTool ) eResult = pExecTool->OnExecute(pExecTool->pUserData, &tToolContext,
+        "{\"command\":\"sleep 5\",\"timeout_ms\":5000}", &tOutput, &tError);
+#endif
+    uElapsedMs = xrtMonotonicMs() - uStartedMs;
+    CHECK(pAgent && pExecTool && eResult == XWORK_RESULT_TIMEOUT &&
+        tError.eCode == XWORK_ERROR_TIMEOUT && uElapsedMs < 3000u,
+        "operation deadline interrupts a long command without waiting for tool timeout");
+    xworkToolOutputUnit(&tOutput);
+    xworkAgentDestroy(pAgent);
+    xrtContextRelease(pContext);
     xllmSessionDestroy(pSession);
     (void)xrtDirDelete((str)sWorkspace);
 }
@@ -540,6 +649,8 @@ int main(void)
         return 1;
     }
     test_process_text_normalization();
+    test_agent_context_deadline();
+    test_command_context_deadline();
     test_agent_loop();
     xrtNetSyncShutdownHiddenEngine();
     xrtUnit();

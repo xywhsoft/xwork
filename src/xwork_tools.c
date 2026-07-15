@@ -1315,6 +1315,103 @@ cleanup:
     return eResult;
 }
 
+static void xwork__stop_scoped_process(xprocess* pProcess)
+{
+    if ( !pProcess || !xrtProcessIsRunning(pProcess) ) return;
+    (void)xrtProcessInterrupt(pProcess);
+    if ( xrtProcessWaitTimeout(pProcess, 250u) == XRT_WAIT_OK ) return;
+    (void)xrtProcessTerminate(pProcess);
+    if ( xrtProcessWaitTimeout(pProcess, 250u) == XRT_WAIT_OK ) return;
+    if ( !xrtProcessKillTree(pProcess) ) (void)xrtProcessKill(pProcess);
+    (void)xrtProcessWait(pProcess);
+}
+
+static bool xwork__exec_capture_scoped(
+    xwork_agent* pAgent,
+    const xprocessconfig* pConfig,
+    xprocessresult* pResult,
+    uint32_t uTimeoutMs,
+    xwork_result* pScopeResult
+)
+{
+    xprocess* pProcess;
+    xprocessreadinfo tStdoutInfo;
+    xprocessreadinfo tStderrInfo;
+    uint64_t uStartedMs;
+    bool bCommandTimedOut = false;
+    xctx_status eContextStatus = XCTX_ACTIVE;
+    int iWait = XRT_WAIT_TIMEOUT;
+    if ( pScopeResult ) *pScopeResult = XWORK_RESULT_OK;
+    if ( !pAgent || !pConfig || !pResult ) return false;
+    memset(pResult, 0, sizeof(*pResult));
+    eContextStatus = xwork__context_status(pAgent);
+    if ( eContextStatus != XCTX_ACTIVE ) {
+        if ( pScopeResult ) *pScopeResult = eContextStatus == XCTX_DEADLINE_EXCEEDED
+            ? XWORK_RESULT_TIMEOUT : XWORK_RESULT_CANCELLED;
+        return true;
+    }
+    uStartedMs = xrtMonotonicMs();
+    pProcess = xrtProcessSpawn(pConfig);
+    if ( !pProcess ) return false;
+    for ( ;; ) {
+        uint64_t uNowMs;
+        uint64_t uElapsedMs;
+        uint32_t uSliceMs = 20u;
+        int64_t iContextRemaining;
+        iWait = xrtProcessWaitTimeout(pProcess, 0u);
+        if ( iWait == XRT_WAIT_OK || iWait == XRT_WAIT_ERROR ) break;
+        eContextStatus = xwork__context_status(pAgent);
+        if ( eContextStatus != XCTX_ACTIVE ) break;
+        uNowMs = xrtMonotonicMs();
+        uElapsedMs = uNowMs >= uStartedMs ? uNowMs - uStartedMs : 0u;
+        if ( uElapsedMs >= (uint64_t)uTimeoutMs ) {
+            bCommandTimedOut = true;
+            break;
+        }
+        if ( (uint64_t)uSliceMs > (uint64_t)uTimeoutMs - uElapsedMs ) {
+            uSliceMs = (uint32_t)((uint64_t)uTimeoutMs - uElapsedMs);
+        }
+        iContextRemaining = pAgent->pContext ? xrtContextRemainingMs(pAgent->pContext) : -1;
+        if ( iContextRemaining >= 0 && iContextRemaining < (int64_t)uSliceMs ) {
+            uSliceMs = iContextRemaining > 0 ? (uint32_t)iContextRemaining : 1u;
+        }
+        if ( !uSliceMs ) uSliceMs = 1u;
+        iWait = xrtProcessWaitTimeout(pProcess, uSliceMs);
+        if ( iWait == XRT_WAIT_OK || iWait == XRT_WAIT_ERROR ) break;
+    }
+    if ( eContextStatus != XCTX_ACTIVE || bCommandTimedOut ) {
+        xwork__stop_scoped_process(pProcess);
+    } else if ( iWait == XRT_WAIT_ERROR ) {
+        (void)xrtProcessWait(pProcess);
+    }
+    (void)xrtProcessGetExitInfo(pProcess, &pResult->ExitInfo);
+    pResult->iExitCode = pResult->ExitInfo.iExitCode;
+    memset(&tStdoutInfo, 0, sizeof(tStdoutInfo));
+    memset(&tStderrInfo, 0, sizeof(tStderrInfo));
+    pResult->pStdout = xrtProcessReadStdoutSince(pProcess, 0u, SIZE_MAX,
+        &pResult->iStdoutSize, &tStdoutInfo);
+    pResult->pStderr = xrtProcessReadStderrSince(pProcess, 0u, SIZE_MAX,
+        &pResult->iStderrSize, &tStderrInfo);
+    pResult->iStdoutBaseOffset = tStdoutInfo.iBaseOffset;
+    pResult->iStderrBaseOffset = tStderrInfo.iBaseOffset;
+    pResult->bStdoutTruncated = tStdoutInfo.iBaseOffset != 0u;
+    pResult->bStderrTruncated = tStderrInfo.iBaseOffset != 0u;
+    pResult->iDurationMs = xrtMonotonicMs() - uStartedMs;
+    if ( eContextStatus == XCTX_DEADLINE_EXCEEDED ) {
+        pResult->ExitInfo.bTimedOut = true;
+        pResult->ExitInfo.bCancelled = false;
+        if ( pScopeResult ) *pScopeResult = XWORK_RESULT_TIMEOUT;
+    } else if ( eContextStatus == XCTX_CANCELLED ) {
+        pResult->ExitInfo.bCancelled = true;
+        if ( pScopeResult ) *pScopeResult = XWORK_RESULT_CANCELLED;
+    } else if ( bCommandTimedOut ) {
+        pResult->ExitInfo.bTimedOut = true;
+        pResult->ExitInfo.bCancelled = false;
+    }
+    xrtProcessDestroy(pProcess);
+    return true;
+}
+
 static xwork_result xwork__tool_exec_command(
     void* pUserData,
     const xwork_tool_context* pContext,
@@ -1337,6 +1434,7 @@ static xwork_result xwork__tool_exec_command(
     xvalue tExpectedExitCodes;
     xprocessconfig tConfig;
     xprocessresult tProcess;
+    xwork_result eScopeResult = XWORK_RESULT_OK;
     xwork_buf tOutput = {0};
     xwork_result eResult = XWORK_RESULT_ERROR;
     (void)pContext;
@@ -1388,8 +1486,18 @@ static xwork_result xwork__tool_exec_command(
     tConfig.Stderr.iMode = bMerge ? XPROC_STDIO_INHERIT : XPROC_STDIO_PIPE;
     tConfig.Stderr.bCapture = !bMerge;
     tConfig.Stdin.iMode = XPROC_STDIO_NULL;
-    if ( !xrtExecCapture(&tConfig, &tProcess, (uint32_t)uTimeout) ) {
+    if ( !xwork__exec_capture_scoped(pAgent, &tConfig, &tProcess, (uint32_t)uTimeout, &eScopeResult) ) {
         eResult = xwork__tool_fail(pOutput, "failed to start or capture command"); goto cleanup;
+    }
+    if ( eScopeResult == XWORK_RESULT_TIMEOUT ) {
+        xwork__set_error(pError, XWORK_ERROR_TIMEOUT, "agent operation deadline was exceeded during command execution");
+        eResult = XWORK_RESULT_TIMEOUT;
+        goto cleanup;
+    }
+    if ( eScopeResult == XWORK_RESULT_CANCELLED ) {
+        xwork__set_error(pError, XWORK_ERROR_CANCELLED, "agent operation was cancelled during command execution");
+        eResult = XWORK_RESULT_CANCELLED;
+        goto cleanup;
     }
     bExpectedExit = tProcess.ExitInfo.iKind == XPROC_EXIT_NORMAL &&
         !tProcess.ExitInfo.bTimedOut && !tProcess.ExitInfo.bCancelled;

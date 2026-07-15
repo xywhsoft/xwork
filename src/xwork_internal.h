@@ -57,6 +57,7 @@ struct xwork_agent {
     char* sArtifactDirectory;
     char* sModel;
     char* sReasoningEffort;
+    xctx* pContext;
 
     xwork_approval_mode eApprovalMode;
     xwork_approval_fn OnApproval;
@@ -163,7 +164,13 @@ static inline void xwork__atomic_store(volatile long* pValue, long iValue)
 
 static inline bool xwork__is_cancelled(xwork_agent* pAgent)
 {
-    return pAgent && xwork__atomic_load(&pAgent->iCancelled) != 0;
+    return pAgent && (xwork__atomic_load(&pAgent->iCancelled) != 0 ||
+        (pAgent->pContext && xrtContextDone(pAgent->pContext)));
+}
+
+static inline xctx_status xwork__context_status(xwork_agent* pAgent)
+{
+    return pAgent && pAgent->pContext ? xrtContextStatus(pAgent->pContext) : XCTX_ACTIVE;
 }
 
 #endif

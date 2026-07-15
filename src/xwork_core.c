@@ -49,6 +49,7 @@ const char* xworkErrorCodeName(xwork_error_code eCode)
         case XWORK_ERROR_CONTEXT: return "context";
         case XWORK_ERROR_LOOP_GUARD: return "loop_guard";
         case XWORK_ERROR_CANCELLED: return "cancelled";
+        case XWORK_ERROR_TIMEOUT: return "timeout";
         default: return "unknown";
     }
 }
@@ -453,11 +454,13 @@ xwork_agent* xworkAgentCreate(const xwork_agent_config* pConfig, xwork_error* pE
     pAgent->sArtifactDirectory = xwork__strdup(pConfig->sArtifactDirectory ? pConfig->sArtifactDirectory : ".xcode/artifacts");
     pAgent->sModel = pConfig->sModel ? xwork__strdup(pConfig->sModel) : NULL;
     pAgent->sReasoningEffort = pConfig->sReasoningEffort ? xwork__strdup(pConfig->sReasoningEffort) : NULL;
+    pAgent->pContext = pConfig->pContext ? xrtContextAddRef(pConfig->pContext) : NULL;
     xrtFree(sRoot);
     if ( !pAgent->sWorkspaceRoot || !pAgent->sSystemPrompt || !pAgent->sArtifactDirectory ||
          (pConfig->sSessionPath && !pAgent->sSessionPath) ||
          (pConfig->sModel && !pAgent->sModel) ||
-         (pConfig->sReasoningEffort && !pAgent->sReasoningEffort) ) {
+         (pConfig->sReasoningEffort && !pAgent->sReasoningEffort) ||
+         (pConfig->pContext && !pAgent->pContext) ) {
         xworkAgentDestroy(pAgent);
         xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to copy agent configuration");
         return NULL;
@@ -517,6 +520,7 @@ void xworkAgentDestroy(xwork_agent* pAgent)
     free(pAgent->sArtifactDirectory);
     free(pAgent->sModel);
     free(pAgent->sReasoningEffort);
+    xrtContextRelease(pAgent->pContext);
     free(pAgent);
 }
 
@@ -529,6 +533,7 @@ bool xworkAgentCancel(xwork_agent* pAgent)
 {
     if ( !pAgent ) return false;
     xwork__atomic_store(&pAgent->iCancelled, 1);
+    if ( pAgent->pContext ) { (void)xrtContextCancel(pAgent->pContext); }
     return true;
 }
 
