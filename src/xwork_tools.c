@@ -1553,67 +1553,67 @@ bool xworkAgentRegisterBuiltinTools(xwork_agent* pAgent, xwork_error* pError)
             "read_file",
             "Read a UTF-8 text file from the workspace with stable line numbers. Use start_line to continue large files.",
             "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"start_line\":{\"type\":\"integer\",\"minimum\":1},\"max_lines\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":10000}},\"required\":[\"path\"],\"additionalProperties\":false}",
-            true, XWORK_TOOL_EFFECT_READ_ONLY, xwork__tool_read_file, NULL
+            true, XWORK_TOOL_EFFECT_READ_ONLY, xwork__tool_read_file, NULL, NULL
         },
         {
             "list_files",
             "List files and directories within the workspace. Recursive scans skip .git and .xcode.",
             "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"pattern\":{\"type\":\"string\"},\"recursive\":{\"type\":\"boolean\"},\"max_results\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":10000},\"max_depth\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":64}},\"additionalProperties\":false}",
-            true, XWORK_TOOL_EFFECT_READ_ONLY, xwork__tool_list_files, NULL
+            true, XWORK_TOOL_EFFECT_READ_ONLY, xwork__tool_list_files, NULL, NULL
         },
         {
             "search_text",
             "Search literal text in workspace files. Use pattern such as *.c to narrow files; binary and files over 4 MiB are skipped.",
             "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"pattern\":{\"type\":\"string\"},\"max_results\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":5000},\"max_depth\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":64}},\"required\":[\"query\"],\"additionalProperties\":false}",
-            true, XWORK_TOOL_EFFECT_READ_ONLY, xwork__tool_search_text, NULL
+            true, XWORK_TOOL_EFFECT_READ_ONLY, xwork__tool_search_text, NULL, NULL
         },
         {
             "write_file",
             "Create, overwrite, or append a UTF-8 file inside the workspace. Prefer replace_text for small edits to existing files.",
             "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"},\"mode\":{\"type\":\"string\",\"enum\":[\"overwrite\",\"create\",\"append\"]},\"create_dirs\":{\"type\":\"boolean\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}",
-            true, XWORK_TOOL_EFFECT_WORKSPACE_WRITE, xwork__tool_write_file, NULL
+            true, XWORK_TOOL_EFFECT_WORKSPACE_WRITE, xwork__tool_write_file, NULL, NULL
         },
         {
             "replace_text",
             "Replace an exact text block in one workspace file. By default the old text must occur exactly once; include surrounding context for safe edits.",
             "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old_text\":{\"type\":\"string\"},\"new_text\":{\"type\":\"string\"},\"replace_all\":{\"type\":\"boolean\"}},\"required\":[\"path\",\"old_text\",\"new_text\"],\"additionalProperties\":false}",
-            true, XWORK_TOOL_EFFECT_WORKSPACE_WRITE, xwork__tool_replace_text, NULL
+            true, XWORK_TOOL_EFFECT_WORKSPACE_WRITE, xwork__tool_replace_text, NULL, NULL
         },
         {
             "apply_patch",
             "Apply a validated multi-file UTF-8 text transaction. Every change is checked before writing; a failed write rolls back earlier changes.",
             "{\"type\":\"object\",\"properties\":{\"changes\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":64,\"items\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"operation\":{\"type\":\"string\",\"enum\":[\"create\",\"replace\",\"delete\"]},\"content\":{\"type\":\"string\"},\"old_text\":{\"type\":\"string\"},\"new_text\":{\"type\":\"string\"},\"replace_all\":{\"type\":\"boolean\"}},\"required\":[\"path\",\"operation\"],\"additionalProperties\":false}}},\"required\":[\"changes\"],\"additionalProperties\":false}",
-            true, XWORK_TOOL_EFFECT_WORKSPACE_WRITE, xwork__tool_apply_patch, NULL
+            true, XWORK_TOOL_EFFECT_WORKSPACE_WRITE, xwork__tool_apply_patch, NULL, NULL
         },
         {
             "start_process",
             "Start a managed long-running shell process in the workspace. Returns a process_id for polling, stdin writes, and cleanup.",
             "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"cwd\":{\"type\":\"string\"},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000},\"max_capture_bytes\":{\"type\":\"integer\",\"minimum\":1024,\"maximum\":67108864},\"merge_stderr\":{\"type\":\"boolean\"}},\"required\":[\"command\"],\"additionalProperties\":false}",
-            true, XWORK_TOOL_EFFECT_PROCESS, xwork__tool_start_process, NULL
+            true, XWORK_TOOL_EFFECT_PROCESS, xwork__tool_start_process, NULL, NULL
         },
         {
             "poll_process",
             "Incrementally read new stdout and stderr from a managed process and report its state. Set release=true only after it exits.",
             "{\"type\":\"object\",\"properties\":{\"process_id\":{\"type\":\"integer\",\"minimum\":1},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000},\"max_bytes\":{\"type\":\"integer\",\"minimum\":256,\"maximum\":1048576},\"release\":{\"type\":\"boolean\"}},\"required\":[\"process_id\"],\"additionalProperties\":false}",
-            true, XWORK_TOOL_EFFECT_READ_ONLY, xwork__tool_poll_process, NULL
+            true, XWORK_TOOL_EFFECT_READ_ONLY, xwork__tool_poll_process, NULL, NULL
         },
         {
             "write_process",
             "Write UTF-8 text to a managed process stdin, optionally append a newline and/or close stdin.",
             "{\"type\":\"object\",\"properties\":{\"process_id\":{\"type\":\"integer\",\"minimum\":1},\"input\":{\"type\":\"string\"},\"append_newline\":{\"type\":\"boolean\"},\"close_stdin\":{\"type\":\"boolean\"}},\"required\":[\"process_id\"],\"additionalProperties\":false}",
-            true, XWORK_TOOL_EFFECT_PROCESS, xwork__tool_write_process, NULL
+            true, XWORK_TOOL_EFFECT_PROCESS, xwork__tool_write_process, NULL, NULL
         },
         {
             "stop_process",
             "Stop a managed process using interrupt, terminate, kill, or kill_tree; returns final incremental output when it exits.",
             "{\"type\":\"object\",\"properties\":{\"process_id\":{\"type\":\"integer\",\"minimum\":1},\"mode\":{\"type\":\"string\",\"enum\":[\"interrupt\",\"terminate\",\"kill\",\"kill_tree\"]},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000},\"release\":{\"type\":\"boolean\"}},\"required\":[\"process_id\"],\"additionalProperties\":false}",
-            true, XWORK_TOOL_EFFECT_PROCESS, xwork__tool_stop_process, NULL
+            true, XWORK_TOOL_EFFECT_PROCESS, xwork__tool_stop_process, NULL, NULL
         },
         {
             "exec_command",
             "Run a non-interactive command in a workspace directory and capture stdout, stderr, exit code, duration, and timeout state. For negative tests, pass expected_exit_codes so an intentional nonzero exit is treated as success; the default is [0].",
             "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"cwd\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":3600000},\"merge_stderr\":{\"type\":\"boolean\"},\"expected_exit_codes\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":32,\"items\":{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}}},\"required\":[\"command\"],\"additionalProperties\":false}",
-            true, XWORK_TOOL_EFFECT_PROCESS, xwork__tool_exec_command, NULL
+            true, XWORK_TOOL_EFFECT_PROCESS, xwork__tool_exec_command, NULL, NULL
         }
     };
     size_t i;
@@ -1625,6 +1625,7 @@ bool xworkAgentRegisterBuiltinTools(xwork_agent* pAgent, xwork_error* pError)
     for ( i = 0u; i < sizeof(arrTools) / sizeof(arrTools[0]); ++i ) {
         tTool = arrTools[i];
         tTool.pUserData = pAgent;
+        tTool.sSource = "builtin";
         if ( !xworkAgentRegisterTool(pAgent, &tTool, pError) ) return false;
     }
     return true;

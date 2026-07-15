@@ -4,6 +4,7 @@
 #include "xllm-memory.c"
 
 static int g_iFailures = 0;
+static const char* g_sSelfPath = NULL;
 
 #define CHECK(expr, name) do { \
     bool xwork_ok__ = !!(expr); \
@@ -28,6 +29,8 @@ typedef struct mock_model {
     bool bSawHighRiskPermission;
     uint32_t uBeforeToolHooks;
     uint32_t uAfterToolHooks;
+    xwork_agent* pAgent;
+    bool bRegistryMutationBlocked;
 } mock_model;
 
 typedef struct test_events {
@@ -55,6 +58,22 @@ static char* test_strdup(const char* sText)
     char* sCopy = (char*)malloc(iLen + 1u);
     if ( sCopy ) memcpy(sCopy, sText, iLen + 1u);
     return sCopy;
+}
+
+static xwork_result registry_probe_execute(
+    void* pUserData,
+    const xwork_tool_context* pContext,
+    const char* sArgumentsJson,
+    xwork_tool_output* pOutput,
+    xwork_error* pError
+)
+{
+    (void)pUserData;
+    (void)pContext;
+    (void)sArgumentsJson;
+    (void)pError;
+    return xworkToolOutputSet(pOutput, true, "dynamic registry probe")
+        ? XWORK_RESULT_OK : XWORK_RESULT_ERROR;
 }
 
 static xllm_response* mock_response(const char* sContent, size_t iToolCount)
@@ -145,6 +164,13 @@ static xllm_result mock_complete(
             );
         }
     } else {
+        if ( !pMock->bRegistryMutationBlocked && pMock->pAgent ) {
+            xwork_error tRegistryError;
+            xworkErrorInit(&tRegistryError);
+            pMock->bRegistryMutationBlocked =
+                !xworkAgentUnregisterTool(pMock->pAgent, "read_file", &tRegistryError) &&
+                tRegistryError.eCode == XWORK_ERROR_CONTEXT;
+        }
         ++pMock->uAgentCalls;
         pMock->bSawTools = pRequest->iToolCount == 11u;
         pMock->bSawParallel = pRequest->bParallelToolCalls;
@@ -332,6 +358,7 @@ static void test_agent_loop(void)
     xllm_error tLlmError;
     xwork_agent_config tAgentConfig;
     xwork_agent* pAgent;
+    xwork_mcp_client* pMcpClient = NULL;
     xctx* pContext = NULL;
     xwork_error tError;
     xwork_run_result tResult;
@@ -450,6 +477,97 @@ static void test_agent_loop(void)
     CHECK(pAgent != NULL, "agent creates with injected model boundary");
     CHECK(pAgent && xworkAgentToolCount(pAgent) == 11u, "eleven practical builtin tools registered");
     if ( !pAgent ) goto cleanup;
+    tMock.pAgent = pAgent;
+
+    {
+        xwork_tool_info tInfo;
+        xwork_tool_definition tDynamic;
+        uint64_t uGeneration = xworkAgentToolRegistryGeneration(pAgent);
+        size_t iRemoved = 0u;
+        memset(&tInfo, 0, sizeof(tInfo));
+        memset(&tDynamic, 0, sizeof(tDynamic));
+        tDynamic.sName = "registry_probe";
+        tDynamic.sDescription = "Exercise dynamic registry lifecycle.";
+        tDynamic.sParametersJson = "{\"type\":\"object\",\"additionalProperties\":false}";
+        tDynamic.bStrict = true;
+        tDynamic.eEffect = XWORK_TOOL_EFFECT_READ_ONLY;
+        tDynamic.OnExecute = registry_probe_execute;
+        tDynamic.sSource = "test.dynamic";
+        CHECK(xworkAgentToolAt(pAgent, 0u, &tInfo) && tInfo.sSource &&
+            strcmp(tInfo.sSource, "builtin") == 0,
+            "tool registry enumeration exposes stable source metadata");
+        CHECK(xworkAgentRegisterTool(pAgent, &tDynamic, &tError) &&
+            xworkAgentToolCount(pAgent) == 12u &&
+            xworkAgentToolRegistryGeneration(pAgent) == uGeneration + 1u,
+            "dynamic tool registration advances the registry generation");
+        xworkErrorInit(&tError);
+        CHECK(xworkAgentUnregisterToolsBySource(pAgent, "test.dynamic", &iRemoved, &tError) &&
+            iRemoved == 1u && xworkAgentToolCount(pAgent) == 11u &&
+            xworkAgentToolRegistryGeneration(pAgent) == uGeneration + 2u,
+            "bulk source removal atomically retires dynamic tools");
+    }
+
+    {
+        const char* arrMcpArgs[] = {"--mcp-test-server"};
+        xwork_mcp_stdio_config tMcpConfig;
+        xwork_mcp_info tMcpInfo;
+        const xwork_tool_entry* pMcpTool;
+        xwork_tool_context tMcpToolContext;
+        xwork_tool_output tMcpOutput;
+        size_t iRemoved = 0u;
+        xworkMcpStdioConfigInit(&tMcpConfig);
+        tMcpConfig.sServerName = "phase3";
+        tMcpConfig.sProgram = g_sSelfPath;
+        tMcpConfig.psArguments = arrMcpArgs;
+        tMcpConfig.iArgumentCount = 1u;
+        tMcpConfig.uRequestTimeoutMs = 5000u;
+        pMcpClient = xworkMcpClientCreate(&tMcpConfig, &tError);
+        CHECK(pMcpClient && xworkMcpClientConnect(pMcpClient, &tError),
+            "MCP stdio client completes initialize and initialized handshake");
+        CHECK(pMcpClient && xworkMcpClientRefreshTools(pMcpClient, pAgent, &tError) &&
+            xworkAgentToolCount(pAgent) == 12u,
+            "MCP tools/list dynamically registers namespaced proxy tools");
+        pMcpTool = xwork__find_tool(pAgent, "mcp__phase3__echo");
+        memset(&tMcpToolContext, 0, sizeof(tMcpToolContext));
+        tMcpToolContext.pAgent = pAgent;
+        tMcpToolContext.sWorkspaceRoot = sWorkspace;
+        xworkToolOutputInit(&tMcpOutput);
+        CHECK(pMcpTool && strcmp(pMcpTool->sSource, "mcp:phase3") == 0 &&
+            pMcpTool->eEffect == XWORK_TOOL_EFFECT_PROCESS,
+            "MCP proxies retain source ownership and distrust read-only hints by default");
+        CHECK(pMcpTool && pMcpTool->OnExecute(
+                pMcpTool->pUserData, &tMcpToolContext,
+                "{\"text\":\"hello mcp\"}", &tMcpOutput, &tError) == XWORK_RESULT_OK &&
+            tMcpOutput.bSuccess && tMcpOutput.sContent &&
+            strstr(tMcpOutput.sContent, "echo: hello mcp") &&
+            strstr(tMcpOutput.sContent, "structured_content"),
+            "MCP tools/call returns text and structured content through the proxy");
+        xworkToolOutputUnit(&tMcpOutput);
+        memset(&tMcpInfo, 0, sizeof(tMcpInfo));
+        CHECK(xworkMcpClientGetInfo(pMcpClient, &tMcpInfo) && tMcpInfo.bConnected &&
+            tMcpInfo.iToolCount == 1u && tMcpInfo.uRequestsCompleted == 3u &&
+            strcmp(tMcpInfo.sProtocolVersion, "2025-06-18") == 0,
+            "MCP diagnostics expose negotiated version, tool count, and request count");
+        {
+            xctx* pMcpDeadline = xrtContextCreateTimeout(NULL, 100u);
+            uint64_t uStartedMs = xrtMonotonicMs();
+            xworkToolOutputInit(&tMcpOutput);
+            CHECK(pMcpDeadline && xworkMcpClientCallTool(
+                    pMcpClient, "echo", "{\"delay\":true}", pMcpDeadline,
+                    &tMcpOutput, &tError) == XWORK_RESULT_TIMEOUT &&
+                tError.eCode == XWORK_ERROR_TIMEOUT &&
+                xrtMonotonicMs() - uStartedMs < 2000u,
+                "MCP tool calls honor operation deadlines and send cancellation promptly");
+            xworkToolOutputUnit(&tMcpOutput);
+            xrtContextRelease(pMcpDeadline);
+        }
+        CHECK(xworkAgentUnregisterToolsBySource(
+                pAgent, "mcp:phase3", &iRemoved, &tError) && iRemoved == 1u &&
+            xworkAgentToolCount(pAgent) == 11u,
+            "MCP source can be detached without disturbing builtin tools");
+        xworkMcpClientDestroy(pMcpClient);
+        pMcpClient = NULL;
+    }
 
     eAgentRun = xworkAgentRun(pAgent, "Create and verify the requested note file.", &tResult, &tError);
     if ( eAgentRun != XWORK_RESULT_OK ) {
@@ -457,6 +575,8 @@ static void test_agent_loop(void)
             (int)eAgentRun, xworkErrorCodeName(tError.eCode), tError.sMessage);
     }
     CHECK(eAgentRun == XWORK_RESULT_OK, "multi-turn tool loop completes");
+    CHECK(tMock.bRegistryMutationBlocked,
+        "tool registry mutation is rejected while an agent run is active");
     CHECK(tResult.sFinalText && strstr(tResult.sFinalText, "verified"), "final assistant response returned");
     CHECK(tResult.uAgentTurns == 5u && tResult.uToolCalls == 8u, "verification gate adds one model turn while eight tool calls run");
     CHECK(tResult.uCompactions >= 1u && tMock.uCompactionCalls == tResult.uCompactions + 1u &&
@@ -633,6 +753,7 @@ static void test_agent_loop(void)
     xworkRunResultUnit(&tResult);
     xworkAgentDestroy(pAgent);
 cleanup:
+    xworkMcpClientDestroy(pMcpClient);
     xrtContextRelease(pContext);
     if ( sFile && iFileSize ) xrtFree(sFile);
     if ( sArtifactAbsolute ) xrtFree(sArtifactAbsolute);
@@ -742,8 +863,33 @@ static void test_command_context_deadline(void)
     (void)xrtDirDelete((str)sWorkspace);
 }
 
-int main(void)
+static int run_mcp_test_server(void)
 {
+    char sLine[65536];
+    while ( fgets(sLine, sizeof(sLine), stdin) ) {
+        const char* sIdText = strstr(sLine, "\"id\":");
+        unsigned long long uId = sIdText ? strtoull(sIdText + 5u, NULL, 10) : 0u;
+        if ( strstr(sLine, "\"method\":\"initialize\"") ) {
+            printf("{\"jsonrpc\":\"2.0\",\"id\":%llu,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"xwork-test-mcp\",\"version\":\"1.0\"}}}\n", uId);
+            fflush(stdout);
+        } else if ( strstr(sLine, "\"method\":\"tools/list\"") ) {
+            printf("{\"jsonrpc\":\"2.0\",\"id\":%llu,\"result\":{\"tools\":[{\"name\":\"echo\",\"description\":\"Echo test text.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true}}]}}\n", uId);
+            fflush(stdout);
+        } else if ( strstr(sLine, "\"method\":\"tools/call\"") ) {
+            if ( strstr(sLine, "\"delay\":true") ) xrtSleep(3000u);
+            printf("{\"jsonrpc\":\"2.0\",\"id\":%llu,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"echo: hello mcp\"}],\"structuredContent\":{\"echoed\":true},\"isError\":false}}\n", uId);
+            fflush(stdout);
+        }
+    }
+    return ferror(stdin) ? 1 : 0;
+}
+
+int main(int argc, char** argv)
+{
+    if ( argc == 2 && strcmp(argv[1], "--mcp-test-server") == 0 ) {
+        return run_mcp_test_server();
+    }
+    g_sSelfPath = argc > 0 ? argv[0] : NULL;
     printf("xwork v2 tests\n");
     if ( !xrtInit() ) {
         fprintf(stderr, "xrtInit failed\n");

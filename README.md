@@ -41,6 +41,11 @@ xcode CLI / IDE host
 - workspace-contained filesystem path resolution;
 - oversized tool output spill to `.xcode/artifacts`, with bounded head/tail context returned to the model;
 - injectable model callback for deterministic offline tests.
+- source-owned dynamic tool registration, enumeration, generation tracking,
+  exact removal, and bulk removal without mutating a running agent;
+- MCP 2025-06-18 stdio client support for initialization, paginated tool
+  discovery, namespaced proxy registration, synchronous tool calls, structured
+  results, cancellation notifications, deadlines, and protocol diagnostics.
 
 Built-in tools:
 
@@ -95,6 +100,30 @@ xworkAgentDestroy(agent);
 
 The product host should render `xwork_event` values and install its own approval callback where human confirmation is required.
 
+## Dynamic tools and MCP
+
+Hosts can add tools between agent runs with `xworkAgentRegisterTool()`. Each
+definition has a copied `sSource`; use `xworkAgentToolAt()` for discovery and
+`xworkAgentUnregisterToolsBySource()` to replace an entire provider registry.
+`xworkAgentToolRegistryGeneration()` changes after every successful registry
+mutation. Registration and removal are rejected while a run is active, so the
+model request always sees a stable tool set.
+
+For MCP stdio, create and connect an `xwork_mcp_client`, then call
+`xworkMcpClientRefreshTools(client, agent, &error)`. Proxy names use the form
+`mcp__<server>__<tool>` and their source is `mcp:<server>`. The MCP client owns
+the subprocess and proxy callback state, so it must outlive every agent using
+those tools. Destroy the agent before destroying the client, or explicitly
+remove its source first.
+
+The client launches a program and argv directly, never through a shell. Wire
+messages are compact UTF-8 JSON-RPC lines; blank output, malformed JSON-RPC,
+capture truncation, oversized messages, repeated pagination cursors, duplicate
+remote names, and unexpected server exit are reported distinctly. MCP tool
+annotations are untrusted by default. A host may opt into `readOnlyHint` only
+for a trusted server; otherwise every proxy retains the configured conservative
+effect used by approval and permission policy.
+
 When `config.pContext` is non-NULL, the agent retains it until destruction and passes it to every normal and compaction model request. `xworkAgentCancel()` also cancels this context. A cancelled scope returns `XWORK_RESULT_CANCELLED`; an expired deadline returns `XWORK_RESULT_TIMEOUT` and `XWORK_ERROR_TIMEOUT`, including during provider transport, retry backoff, or a long `exec_command`. Scoped command waits interrupt, terminate, and finally kill the process tree instead of waiting for the tool timeout.
 
 If startup inspection reports an interrupted durable run, call `xworkAgentResume(agent, &result, &error)` before accepting another prompt. A normal `xworkAgentRun` refuses to append new user input while the durable tail is waiting for a model response or has unresolved tool calls.
@@ -120,4 +149,4 @@ sh build.sh
 Cross builds use `RUN_TESTS=0`; sibling locations and flags are overrideable through
 `XLLM_DIR`, `XRT_DIR`, `BUILD_DIR`, `RELEASE_DIR`, `CFLAGS`, `LDFLAGS`, and `LIBS`.
 
-The optimized warning-as-error suite covers operation-deadline propagation, a forced context compaction followed by a multi-turn workflow using the built-in tools, transactional multi-file editing and rollback, managed-process stdin/output, artifact spill, session persistence, interrupted parallel-tool recovery, duplicate-prompt rejection, and a rejected workspace escape.
+The optimized warning-as-error suite covers operation-deadline propagation, a forced context compaction followed by a multi-turn workflow using the built-in tools, transactional multi-file editing and rollback, managed-process stdin/output, artifact spill, session persistence, interrupted parallel-tool recovery, duplicate-prompt rejection, a rejected workspace escape, dynamic registry replacement, and a real local MCP stdio handshake/discovery/call lifecycle.

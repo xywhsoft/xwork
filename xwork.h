@@ -21,10 +21,11 @@ extern "C" {
 #endif
 
 #define XWORK_VERSION_MAJOR 2
-#define XWORK_VERSION_MINOR 1
+#define XWORK_VERSION_MINOR 2
 #define XWORK_VERSION_PATCH 0
 
 typedef struct xwork_agent xwork_agent;
+typedef struct xwork_mcp_client xwork_mcp_client;
 
 typedef enum xwork_result {
     XWORK_RESULT_OK = 0,
@@ -148,7 +149,19 @@ typedef struct xwork_tool_definition {
     xwork_tool_effect eEffect;
     xwork_tool_execute_fn OnExecute;
     void* pUserData;
+    /* Stable owner namespace used for discovery and bulk replacement. When
+     * omitted the registry records "application". The agent copies it. */
+    const char* sSource;
 } xwork_tool_definition;
+
+typedef struct xwork_tool_info {
+    const char* sName;
+    const char* sDescription;
+    const char* sParametersJson;
+    const char* sSource;
+    bool bStrict;
+    xwork_tool_effect eEffect;
+} xwork_tool_info;
 
 typedef enum xwork_event_kind {
     XWORK_EVENT_AGENT_START = 0,
@@ -295,7 +308,59 @@ void xworkAgentConfigInit(xwork_agent_config* pConfig);
 xwork_agent* xworkAgentCreate(const xwork_agent_config* pConfig, xwork_error* pError);
 void xworkAgentDestroy(xwork_agent* pAgent);
 bool xworkAgentRegisterTool(xwork_agent* pAgent, const xwork_tool_definition* pDefinition, xwork_error* pError);
+bool xworkAgentUnregisterTool(xwork_agent* pAgent, const char* sName, xwork_error* pError);
+bool xworkAgentUnregisterToolsBySource(
+    xwork_agent* pAgent,
+    const char* sSource,
+    size_t* piRemoved,
+    xwork_error* pError
+);
 size_t xworkAgentToolCount(const xwork_agent* pAgent);
+bool xworkAgentToolAt(const xwork_agent* pAgent, size_t iIndex, xwork_tool_info* pInfo);
+uint64_t xworkAgentToolRegistryGeneration(const xwork_agent* pAgent);
+
+/* MCP stdio client. The client owns the subprocess and discovered proxy
+ * definitions. It must outlive every agent whose registry refers to those
+ * proxies. Transport messages use newline-delimited UTF-8 JSON-RPC. */
+typedef struct xwork_mcp_stdio_config {
+    const char* sServerName;
+    const char* sProgram;
+    const char* const* psArguments;
+    size_t iArgumentCount;
+    const char* sWorkingDirectory;
+    const char* sProtocolVersion;
+    uint32_t uRequestTimeoutMs;
+    size_t iMaxMessageBytes;
+    size_t iMaxTools;
+    xwork_tool_effect eDefaultToolEffect;
+    bool bTrustReadOnlyAnnotations;
+    xctx* pContext;
+} xwork_mcp_stdio_config;
+
+typedef struct xwork_mcp_info {
+    const char* sServerName;
+    const char* sProtocolVersion;
+    const char* sToolSource;
+    size_t iToolCount;
+    uint64_t uRequestsCompleted;
+    bool bConnected;
+    bool bServerSupportsToolListChanges;
+} xwork_mcp_info;
+
+void xworkMcpStdioConfigInit(xwork_mcp_stdio_config* pConfig);
+xwork_mcp_client* xworkMcpClientCreate(const xwork_mcp_stdio_config* pConfig, xwork_error* pError);
+bool xworkMcpClientConnect(xwork_mcp_client* pClient, xwork_error* pError);
+bool xworkMcpClientRefreshTools(xwork_mcp_client* pClient, xwork_agent* pAgent, xwork_error* pError);
+xwork_result xworkMcpClientCallTool(
+    xwork_mcp_client* pClient,
+    const char* sRemoteToolName,
+    const char* sArgumentsJson,
+    xctx* pContext,
+    xwork_tool_output* pOutput,
+    xwork_error* pError
+);
+bool xworkMcpClientGetInfo(const xwork_mcp_client* pClient, xwork_mcp_info* pInfo);
+void xworkMcpClientDestroy(xwork_mcp_client* pClient);
 bool xworkAgentCancel(xwork_agent* pAgent);
 const char* xworkAgentWorkspaceRoot(const xwork_agent* pAgent);
 

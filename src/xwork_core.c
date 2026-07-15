@@ -373,6 +373,7 @@ static void xwork__tool_entry_unit(xwork_tool_entry* pTool)
     free(pTool->sName);
     free(pTool->sDescription);
     free(pTool->sParametersJson);
+    free(pTool->sSource);
     memset(pTool, 0, sizeof(*pTool));
 }
 
@@ -396,6 +397,10 @@ bool xworkAgentRegisterTool(xwork_agent* pAgent, const xwork_tool_definition* pD
         xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "invalid tool definition");
         return false;
     }
+    if ( pAgent->bRunning ) {
+        xwork__set_error(pError, XWORK_ERROR_CONTEXT, "tool registry cannot change while the agent is running");
+        return false;
+    }
     if ( xwork__find_tool(pAgent, pDefinition->sName) ) {
         xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "tool name is already registered");
         return false;
@@ -415,7 +420,9 @@ bool xworkAgentRegisterTool(xwork_agent* pAgent, const xwork_tool_definition* pD
     pTool->sName = xwork__strdup(pDefinition->sName);
     pTool->sDescription = xwork__strdup(pDefinition->sDescription);
     pTool->sParametersJson = xwork__strdup(pDefinition->sParametersJson);
-    if ( !pTool->sName || !pTool->sDescription || !pTool->sParametersJson ) {
+    pTool->sSource = xwork__strdup(
+        pDefinition->sSource && pDefinition->sSource[0] ? pDefinition->sSource : "application");
+    if ( !pTool->sName || !pTool->sDescription || !pTool->sParametersJson || !pTool->sSource ) {
         xwork__tool_entry_unit(pTool);
         xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to copy tool definition");
         return false;
@@ -425,6 +432,68 @@ bool xworkAgentRegisterTool(xwork_agent* pAgent, const xwork_tool_definition* pD
     pTool->OnExecute = pDefinition->OnExecute;
     pTool->pUserData = pDefinition->pUserData;
     ++pAgent->iToolCount;
+    ++pAgent->uToolRegistryGeneration;
+    return true;
+}
+
+bool xworkAgentUnregisterTool(xwork_agent* pAgent, const char* sName, xwork_error* pError)
+{
+    size_t i;
+    if ( !pAgent || !sName || !sName[0] ) {
+        xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "agent and tool name are required");
+        return false;
+    }
+    if ( pAgent->bRunning ) {
+        xwork__set_error(pError, XWORK_ERROR_CONTEXT, "tool registry cannot change while the agent is running");
+        return false;
+    }
+    for ( i = 0u; i < pAgent->iToolCount; ++i ) {
+        if ( strcmp(pAgent->pTools[i].sName, sName) != 0 ) continue;
+        xwork__tool_entry_unit(&pAgent->pTools[i]);
+        if ( i + 1u < pAgent->iToolCount ) {
+            memmove(&pAgent->pTools[i], &pAgent->pTools[i + 1u],
+                (pAgent->iToolCount - i - 1u) * sizeof(*pAgent->pTools));
+        }
+        --pAgent->iToolCount;
+        memset(&pAgent->pTools[pAgent->iToolCount], 0, sizeof(*pAgent->pTools));
+        ++pAgent->uToolRegistryGeneration;
+        return true;
+    }
+    xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "tool name is not registered");
+    return false;
+}
+
+bool xworkAgentUnregisterToolsBySource(
+    xwork_agent* pAgent,
+    const char* sSource,
+    size_t* piRemoved,
+    xwork_error* pError
+)
+{
+    size_t i = 0u;
+    size_t iRemoved = 0u;
+    if ( piRemoved ) *piRemoved = 0u;
+    if ( !pAgent || !sSource || !sSource[0] ) {
+        xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "agent and tool source are required");
+        return false;
+    }
+    if ( pAgent->bRunning ) {
+        xwork__set_error(pError, XWORK_ERROR_CONTEXT, "tool registry cannot change while the agent is running");
+        return false;
+    }
+    while ( i < pAgent->iToolCount ) {
+        if ( strcmp(pAgent->pTools[i].sSource, sSource) != 0 ) { ++i; continue; }
+        xwork__tool_entry_unit(&pAgent->pTools[i]);
+        if ( i + 1u < pAgent->iToolCount ) {
+            memmove(&pAgent->pTools[i], &pAgent->pTools[i + 1u],
+                (pAgent->iToolCount - i - 1u) * sizeof(*pAgent->pTools));
+        }
+        --pAgent->iToolCount;
+        memset(&pAgent->pTools[pAgent->iToolCount], 0, sizeof(*pAgent->pTools));
+        ++iRemoved;
+    }
+    if ( iRemoved ) ++pAgent->uToolRegistryGeneration;
+    if ( piRemoved ) *piRemoved = iRemoved;
     return true;
 }
 
@@ -546,6 +615,26 @@ void xworkAgentDestroy(xwork_agent* pAgent)
 size_t xworkAgentToolCount(const xwork_agent* pAgent)
 {
     return pAgent ? pAgent->iToolCount : 0u;
+}
+
+bool xworkAgentToolAt(const xwork_agent* pAgent, size_t iIndex, xwork_tool_info* pInfo)
+{
+    const xwork_tool_entry* pTool;
+    if ( !pAgent || !pInfo || iIndex >= pAgent->iToolCount ) return false;
+    pTool = &pAgent->pTools[iIndex];
+    memset(pInfo, 0, sizeof(*pInfo));
+    pInfo->sName = pTool->sName;
+    pInfo->sDescription = pTool->sDescription;
+    pInfo->sParametersJson = pTool->sParametersJson;
+    pInfo->sSource = pTool->sSource;
+    pInfo->bStrict = pTool->bStrict;
+    pInfo->eEffect = pTool->eEffect;
+    return true;
+}
+
+uint64_t xworkAgentToolRegistryGeneration(const xwork_agent* pAgent)
+{
+    return pAgent ? pAgent->uToolRegistryGeneration : 0u;
 }
 
 bool xworkAgentCancel(xwork_agent* pAgent)

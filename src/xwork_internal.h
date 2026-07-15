@@ -33,6 +33,7 @@ typedef struct xwork_tool_entry {
     char* sName;
     char* sDescription;
     char* sParametersJson;
+    char* sSource;
     bool bStrict;
     xwork_tool_effect eEffect;
     xwork_tool_execute_fn OnExecute;
@@ -93,6 +94,7 @@ struct xwork_agent {
     xwork_tool_entry* pTools;
     size_t iToolCount;
     size_t iToolCap;
+    uint64_t uToolRegistryGeneration;
     xwork_process_entry* pProcesses;
     size_t iProcessCount;
     size_t iProcessCap;
