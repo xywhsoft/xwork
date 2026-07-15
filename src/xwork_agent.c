@@ -626,6 +626,15 @@ static void xwork__emit_error(xwork_agent* pAgent, uint64_t uTurn, const xwork_e
     tEvent.sText = pError ? pError->sMessage : "agent failed";
     tEvent.iTextLength = tEvent.sText ? strlen(tEvent.sText) : 0u;
     tEvent.bSuccess = false;
+    if ( pError ) {
+        tEvent.eModelErrorCode = pError->tModelError.eCode;
+        tEvent.uHttpStatus = pError->tModelError.iHttpStatus > 0
+            ? (uint32_t)pError->tModelError.iHttpStatus : 0u;
+        tEvent.sProviderRequestId = pError->tModelError.sRequestId;
+        tEvent.sProviderCode = pError->tModelError.sProviderCode;
+        tEvent.sProviderMessage = pError->tModelError.sProviderMessage;
+        tEvent.tDiagnostics = pError->tModelError.tDiagnostics;
+    }
     (void)xwork__emit(pAgent, &tEvent);
 }
 

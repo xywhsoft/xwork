@@ -22,7 +22,7 @@ extern "C" {
 
 #define XWORK_VERSION_MAJOR 2
 #define XWORK_VERSION_MINOR 3
-#define XWORK_VERSION_PATCH 0
+#define XWORK_VERSION_PATCH 1
 
 typedef struct xwork_agent xwork_agent;
 typedef struct xwork_mcp_client xwork_mcp_client;
@@ -192,6 +192,8 @@ typedef struct xwork_event {
     const char* sArtifactPath;
     const char* sModel;
     const char* sProviderRequestId;
+    const char* sProviderCode;
+    const char* sProviderMessage;
     const char* sFinishReason;
     const char* sRequestFingerprint;
     size_t iMessageCount;
@@ -199,6 +201,7 @@ typedef struct xwork_event {
     size_t iResponseToolCallCount;
     uint32_t uMaxOutputTokens;
     uint32_t uHttpStatus;
+    xllm_error_code eModelErrorCode;
     bool bSuccess;
     uint32_t uCompactionAttempt;
     xllm_compaction_quality tCompactionQuality;
