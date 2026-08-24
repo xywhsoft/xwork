@@ -9,6 +9,15 @@ typedef struct xwork_walk_entry {
 
 typedef bool (*xwork_walk_fn)(void* pUserData, const xwork_walk_entry* pEntry);
 
+static bool xwork__path_size(const char* sPath, uint64_t* pSize)
+{
+    xfileinfo tInfo;
+    if ( pSize ) *pSize = 0u;
+    if ( !sPath || !xrtPathStat(sPath, true, &tInfo) ) return false;
+    if ( pSize ) *pSize = tInfo.Size;
+    return true;
+}
+
 static bool xwork__buf_append_escaped_bytes(xwork_buf* pBuf, const unsigned char* pData, size_t iSize)
 {
     size_t i;
@@ -30,18 +39,31 @@ static bool xwork__buf_append_process_text(xwork_buf* pBuf, const void* pData, s
     const unsigned char* pBytes = (const unsigned char*)pData;
     if ( iSize == 0u ) return true;
     if ( !pData ) return false;
-    if ( memchr(pData, 0, iSize) == NULL && xrtIsUTF8((str)pData, iSize) ) {
+    if ( memchr(pData, 0, iSize) == NULL &&
+         xrtUtf8Valid((xstrview){ (const char*)pData, iSize }, NULL) ) {
         return xwork__buf_append(pBuf, pData, iSize);
     }
 #if defined(_WIN32)
     if ( memchr(pData, 0, iSize) == NULL ) {
-        char* sConverted = (char*)xrtConvCharset((ptr)pData, iSize, (int)GetOEMCP(), XRT_CP_UTF8, NULL);
-        if ( sConverted && sConverted[0] && xrtIsUTF8((str)sConverted, strlen(sConverted)) ) {
+        int iWide = MultiByteToWideChar(GetOEMCP(), 0, (const char*)pData, (int)iSize, NULL, 0);
+        wchar_t* pWide = iWide > 0 ? (wchar_t*)malloc(((size_t)iWide + 1u) * sizeof(wchar_t)) : NULL;
+        int iUtf8 = pWide ? MultiByteToWideChar(GetOEMCP(), 0, (const char*)pData,
+            (int)iSize, pWide, iWide) : 0;
+        char* sConverted = NULL;
+        if ( iUtf8 > 0 ) {
+            int iBytes = WideCharToMultiByte(CP_UTF8, 0, pWide, iWide, NULL, 0, NULL, NULL);
+            sConverted = iBytes > 0 ? (char*)malloc((size_t)iBytes + 1u) : NULL;
+            if ( sConverted && WideCharToMultiByte(CP_UTF8, 0, pWide, iWide,
+                    sConverted, iBytes, NULL, NULL) > 0 ) sConverted[iBytes] = '\0';
+        }
+        free(pWide);
+        if ( sConverted && sConverted[0] &&
+             xrtUtf8Valid((xstrview){ sConverted, strlen(sConverted) }, NULL) ) {
             bool bOk = xwork__buf_append_cstr(pBuf, sConverted);
-            xrtFree(sConverted);
+            free(sConverted);
             return bOk;
         }
-        if ( sConverted ) xrtFree(sConverted);
+        free(sConverted);
     }
 #endif
     return xwork__buf_append_escaped_bytes(pBuf, pBytes, iSize);
@@ -90,10 +112,10 @@ static bool xwork__walk_directory(xwork_walk_context* pContext, const char* sDir
 #if defined(_WIN32)
     WIN32_FIND_DATAW tData;
     HANDLE hFind;
-    char* sPattern = (char*)xrtPathJoin(2u, sDirectory, "*");
-    u16str sPatternWide;
+    char* sPattern = xrtPathJoin(sDirectory, "*");
+    uint16* sPatternWide;
     if ( !sPattern ) return false;
-    sPatternWide = xrtUTF8to16((u8str)sPattern, 0u, NULL);
+    sPatternWide = xrtUtf8To16(sPattern, NULL);
     xrtFree(sPattern);
     if ( !sPatternWide ) return false;
     hFind = FindFirstFileW((LPCWSTR)sPatternWide, &tData);
@@ -105,10 +127,10 @@ static bool xwork__walk_directory(xwork_walk_context* pContext, const char* sDir
         char* sName;
         xwork_walk_entry tEntry;
         bool bDir = (tData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-        sName = (char*)xrtUTF16to8((u16str)tData.cFileName, 0u, NULL);
+        sName = xrtUtf16To8((const uint16*)tData.cFileName, NULL);
         if ( !sName ) { FindClose(hFind); return false; }
         if ( xwork__is_skipped_directory(sName) ) { xrtFree(sName); continue; }
-        sPath = (char*)xrtPathJoin(2u, sDirectory, sName);
+        sPath = xrtPathJoin(sDirectory, sName);
         if ( !sPath ) { xrtFree(sName); FindClose(hFind); return false; }
         sRelative = xwork__relative_path(pContext->pAgent, sPath);
         if ( !sRelative ) { xrtFree(sName); xrtFree(sPath); FindClose(hFind); return false; }
@@ -140,7 +162,7 @@ static bool xwork__walk_directory(xwork_walk_context* pContext, const char* sDir
         xwork_walk_entry tEntry;
         bool bDir;
         if ( xwork__is_skipped_directory(pItem->d_name) ) continue;
-        sPath = (char*)xrtPathJoin(2u, sDirectory, pItem->d_name);
+        sPath = xrtPathJoin(sDirectory, pItem->d_name);
         if ( !sPath ) { closedir(pDir); return false; }
         if ( stat(sPath, &tStat) != 0 ) { xrtFree(sPath); continue; }
         bDir = S_ISDIR(tStat.st_mode);
@@ -198,7 +220,7 @@ static xwork_result xwork__tool_read_file(
     xwork_error* pError
 )
 {
-    xvalue tArgs = NULL;
+    xvalue* tArgs = NULL;
     const char* sPath;
     char* sResolved = NULL;
     unsigned char* pData = NULL;
@@ -224,8 +246,13 @@ static xwork_result xwork__tool_read_file(
     sResolved = xwork__resolve_path(pAgent, sPath, pError);
     if ( !sResolved ) { eResult = xwork__tool_fail(pOutput, pError && pError->sMessage[0] ? pError->sMessage : "path denied"); goto cleanup; }
     if ( !xrtFileExists((str)sResolved) ) { eResult = xwork__tool_fail(pOutput, "file does not exist"); goto cleanup; }
-    if ( xrtFileGetSize((str)sResolved) > 64u * 1024u * 1024u ) { eResult = xwork__tool_fail(pOutput, "file is larger than the 64 MiB read limit"); goto cleanup; }
-    pData = (unsigned char*)xrtFileGetAll((str)sResolved, &iSize);
+    {
+        uint64_t uSize = 0u;
+        if ( !xwork__path_size(sResolved, &uSize) || uSize > 64u * 1024u * 1024u ) {
+            eResult = xwork__tool_fail(pOutput, "file is larger than the 64 MiB read limit"); goto cleanup;
+        }
+    }
+    pData = (unsigned char*)xrtFileReadAll(sResolved, &iSize);
     if ( !pData && iSize ) { eResult = xwork__tool_fail(pOutput, "failed to read file"); goto cleanup; }
     if ( xwork__looks_binary(pData, iSize) ) { eResult = xwork__tool_fail(pOutput, "file appears to be binary"); goto cleanup; }
     if ( !xwork__buf_appendf(&tOutput, "file: %s (%zu bytes)\n", sPath, iSize) ) goto oom;
@@ -252,7 +279,7 @@ static xwork_result xwork__tool_read_file(
 oom:
     xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to build read_file output");
 cleanup:
-    if ( tArgs ) xvoUnref(tArgs);
+    if ( tArgs ) xrtValueRelease(tArgs);
     free(sResolved);
     if ( pData && iSize ) xrtFree(pData);
     xwork__buf_unit(&tOutput);
@@ -294,7 +321,7 @@ static xwork_result xwork__tool_list_files(
 )
 {
     xwork_agent* pAgent = (xwork_agent*)pUserData;
-    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    xvalue* tArgs = xwork__json_parse_object(sArgumentsJson);
     const char* sPath;
     const char* sPattern;
     char* sResolved = NULL;
@@ -333,7 +360,7 @@ static xwork_result xwork__tool_list_files(
 oom:
     xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to build list_files output");
 cleanup:
-    if ( tArgs ) xvoUnref(tArgs);
+    if ( tArgs ) xrtValueRelease(tArgs);
     free(sResolved);
     xwork__buf_unit(&tList.tOutput);
     return eResult;
@@ -361,7 +388,7 @@ static bool xwork__search_entry(void* pUserData, const xwork_walk_entry* pEntry)
          !xwork__wildcard_match(pContext->sPattern, pEntry->sName) &&
          !xwork__wildcard_match(pContext->sPattern, pEntry->sRelativePath) ) return true;
     if ( pEntry->uSize > 4u * 1024u * 1024u ) return true;
-    pData = (unsigned char*)xrtFileGetAll((str)pEntry->sAbsolutePath, &iSize);
+    pData = (unsigned char*)xrtFileReadAll(pEntry->sAbsolutePath, &iSize);
     if ( !pData || xwork__looks_binary(pData, iSize) ) { if ( pData ) xrtFree(pData); return true; }
     ++pContext->uFiles;
     while ( i < iSize && pContext->uMatches < pContext->uLimit ) {
@@ -401,7 +428,7 @@ static xwork_result xwork__tool_search_text(
 )
 {
     xwork_agent* pAgent = (xwork_agent*)pUserData;
-    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    xvalue* tArgs = xwork__json_parse_object(sArgumentsJson);
     const char* sPath;
     const char* sQuery;
     char* sResolved = NULL;
@@ -437,7 +464,7 @@ static xwork_result xwork__tool_search_text(
 oom:
     xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to build search_text output");
 cleanup:
-    if ( tArgs ) xvoUnref(tArgs);
+    if ( tArgs ) xrtValueRelease(tArgs);
     free(sResolved);
     xwork__buf_unit(&tSearch.tOutput);
     return eResult;
@@ -453,33 +480,15 @@ static bool xwork__write_bytes(const char* sPath, const char* sContent, bool bAp
         return true;
     }
     return bAppend
-        ? xrtFileAppend((str)sPath, (str)sContent, iLen, XRT_CP_UTF8) == (int)iLen
-        : xrtFilePutAll((str)sPath, (ptr)sContent, iLen) == (int)iLen;
+        ? xrtFileAppend(sPath, (xbytesview){ (const uint8*)sContent, iLen })
+        : xrtFileWriteAtomic(sPath, (xbytesview){ (const uint8*)sContent, iLen });
 }
 
 static bool xwork__write_atomic_bytes(const char* sPath, const char* sContent, size_t iLen)
 {
-    char* sTemporary;
-    bool bWritten;
-    bool bReplaced;
     if ( !sPath || (!sContent && iLen) ) return false;
-    sTemporary = (char*)xrtPathRandom((str)sPath, 0u, (str)".xwork-tmp", 10u, 12u);
-    if ( !sTemporary || !sTemporary[0] ) {
-        if ( sTemporary ) xrtFree(sTemporary);
-        return false;
-    }
-    bWritten = iLen == 0u
-        ? xrtFileTouch((str)sTemporary)
-        : xrtFilePutAll((str)sTemporary, (ptr)sContent, iLen) == (int)iLen;
-    if ( !bWritten ) {
-        (void)xrtFileDelete((str)sTemporary);
-        xrtFree(sTemporary);
-        return false;
-    }
-    bReplaced = xrtFileReplace((str)sTemporary, (str)sPath);
-    if ( !bReplaced ) (void)xrtFileDelete((str)sTemporary);
-    xrtFree(sTemporary);
-    return bReplaced;
+    return xrtFileWriteAtomic(sPath,
+        (xbytesview){ (const uint8*)sContent, iLen });
 }
 
 static xwork_result xwork__tool_write_file(
@@ -491,7 +500,7 @@ static xwork_result xwork__tool_write_file(
 )
 {
     xwork_agent* pAgent = (xwork_agent*)pUserData;
-    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    xvalue* tArgs = xwork__json_parse_object(sArgumentsJson);
     const char* sPath;
     const char* sContent;
     const char* sMode;
@@ -530,7 +539,7 @@ static xwork_result xwork__tool_write_file(
 oom:
     xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to build write_file output");
 cleanup:
-    if ( tArgs ) xvoUnref(tArgs);
+    if ( tArgs ) xrtValueRelease(tArgs);
     free(sResolved);
     xwork__buf_unit(&tOutput);
     return eResult;
@@ -545,7 +554,7 @@ static xwork_result xwork__tool_replace_text(
 )
 {
     xwork_agent* pAgent = (xwork_agent*)pUserData;
-    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    xvalue* tArgs = xwork__json_parse_object(sArgumentsJson);
     const char* sPath;
     const char* sOld;
     const char* sNew;
@@ -573,7 +582,7 @@ static xwork_result xwork__tool_replace_text(
     sResolved = xwork__resolve_path(pAgent, sPath, pError);
     if ( !sResolved ) { eResult = xwork__tool_fail(pOutput, pError && pError->sMessage[0] ? pError->sMessage : "path denied"); goto cleanup; }
     if ( !xrtFileExists((str)sResolved) ) { eResult = xwork__tool_fail(pOutput, "file does not exist"); goto cleanup; }
-    sCurrent = (char*)xrtFileReadAll((str)sResolved, XRT_CP_UTF8, &iCurrent);
+    sCurrent = (char*)xrtFileReadAll(sResolved, &iCurrent);
     if ( !sCurrent && iCurrent ) { eResult = xwork__tool_fail(pOutput, "failed to read file"); goto cleanup; }
     iOld = strlen(sOld);
     iNew = strlen(sNew);
@@ -597,7 +606,7 @@ static xwork_result xwork__tool_replace_text(
 oom:
     xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to apply text replacement");
 cleanup:
-    if ( tArgs ) xvoUnref(tArgs);
+    if ( tArgs ) xrtValueRelease(tArgs);
     free(sResolved);
     if ( sCurrent && iCurrent ) xrtFree(sCurrent);
     xwork__buf_unit(&tNext);
@@ -720,8 +729,8 @@ static xwork_result xwork__tool_apply_patch(
 )
 {
     xwork_agent* pAgent = (xwork_agent*)pUserData;
-    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
-    xvalue tChanges;
+    xvalue* tArgs = xwork__json_parse_object(sArgumentsJson);
+    xvalue* tChanges;
     xwork_patch_change* pChanges = NULL;
     uint32_t iCount = 0u;
     uint32_t i;
@@ -733,11 +742,11 @@ static xwork_result xwork__tool_apply_patch(
     (void)pContext;
     if ( !tArgs ) return xwork__tool_fail(pOutput, "invalid arguments: expected a JSON object");
     tChanges = xwork__json_get(tArgs, "changes");
-    if ( !tChanges || xvoType(tChanges) != XVO_DT_ARRAY ) {
+    if ( !tChanges || xrtValueType(tChanges) != XVALUE_ARRAY ) {
         eResult = xwork__tool_fail(pOutput, "changes must be an array");
         goto cleanup;
     }
-    iCount = xvoArrayItemCount(tChanges);
+    iCount = xrtValueCount(tChanges);
     if ( iCount == 0u || iCount > XWORK_PATCH_MAX_CHANGES ) {
         eResult = xwork__tool_fail(pOutput, "changes must contain between 1 and 64 entries");
         goto cleanup;
@@ -747,7 +756,7 @@ static xwork_result xwork__tool_apply_patch(
 
     /* Prepare the full transaction before touching the workspace. */
     for ( i = 0u; i < iCount; ++i ) {
-        xvalue tChange = xvoArrayGetValue(tChanges, i);
+        xvalue* tChange = xrtValueArrayGet(tChanges, i);
         const char* sPath;
         const char* sOperation;
         const char* sContent;
@@ -759,7 +768,7 @@ static xwork_result xwork__tool_apply_patch(
         size_t iFile = 0u;
         int iReplaceResult;
         xwork_patch_change* pChange = &pChanges[i];
-        if ( !tChange || xvoType(tChange) != XVO_DT_TABLE ) {
+        if ( !tChange || xrtValueType(tChange) != XVALUE_OBJECT ) {
             if ( !xwork__buf_appendf(&tOutput, "change %u must be an object", (unsigned int)(i + 1u)) ) goto oom;
             eResult = xwork__tool_fail(pOutput, tOutput.pData);
             goto cleanup;
@@ -812,18 +821,21 @@ static xwork_result xwork__tool_apply_patch(
             goto cleanup;
         }
         if ( pChange->bExisted ) {
-            if ( xrtFileGetSize((str)pChange->sResolved) > XWORK_PATCH_MAX_FILE_BYTES ) {
+            uint64_t uFileSize = 0u;
+            if ( !xwork__path_size(pChange->sResolved, &uFileSize) ||
+                 uFileSize > XWORK_PATCH_MAX_FILE_BYTES ) {
                 if ( !xwork__buf_appendf(&tOutput, "change %u (%s): file exceeds the 16 MiB patch limit", (unsigned int)(i + 1u), sPath) ) goto oom;
                 eResult = xwork__tool_fail(pOutput, tOutput.pData);
                 goto cleanup;
             }
-            pFile = xrtFileGetAll((str)pChange->sResolved, &iFile);
+            pFile = xrtFileReadAll(pChange->sResolved, &iFile);
             if ( !pFile && iFile ) {
                 if ( !xwork__buf_appendf(&tOutput, "change %u (%s): failed to read current file", (unsigned int)(i + 1u), sPath) ) goto oom;
                 eResult = xwork__tool_fail(pOutput, tOutput.pData);
                 goto cleanup;
             }
-            if ( xwork__looks_binary((const unsigned char*)pFile, iFile) || (iFile && !xrtIsUTF8((str)pFile, iFile)) ) {
+            if ( xwork__looks_binary((const unsigned char*)pFile, iFile) ||
+                 (iFile && !xrtUtf8Valid((xstrview){ (const char*)pFile, iFile }, NULL)) ) {
                 if ( pFile ) xrtFree(pFile);
                 if ( !xwork__buf_appendf(&tOutput, "change %u (%s): target must be UTF-8 text", (unsigned int)(i + 1u), sPath) ) goto oom;
                 eResult = xwork__tool_fail(pOutput, tOutput.pData);
@@ -922,22 +934,155 @@ cleanup:
         for ( i = 0u; i < iCount; ++i ) xwork__patch_change_unit(&pChanges[i]);
         free(pChanges);
     }
-    if ( tArgs ) xvoUnref(tArgs);
+    if ( tArgs ) xrtValueRelease(tArgs);
     xwork__buf_unit(&tOutput);
     return eResult;
+}
+
+static bool xwork__process_running(const xprocess* pProcess)
+{
+    return pProcess && xrtProcessState(pProcess) == XPROCESS_RUNNING;
+}
+
+static int32 xwork__process_capture_thread(void* pData)
+{
+    xwork_process_capture_stream* pStream = (xwork_process_capture_stream*)pData;
+    uint8_t pChunk[4096];
+    for ( ;; ) {
+        int64 iRead = xrtProcessRead(pStream->pOwner->pProcess,
+            pStream->eStream, pChunk, sizeof(pChunk));
+        if ( iRead <= 0 ) break;
+        if ( !xrtMutexLock(pStream->pOwner->pLock) ) break;
+        if ( (size_t)iRead >= pStream->iLimit ) {
+            size_t iKeep = pStream->iLimit;
+            pStream->uBaseOffset += pStream->tData.iLen + (uint64_t)iRead - iKeep;
+            pStream->tData.iLen = 0u;
+            (void)xwork__buf_append(&pStream->tData,
+                pChunk + (size_t)iRead - iKeep, iKeep);
+        } else {
+            size_t iDrop = pStream->tData.iLen + (size_t)iRead > pStream->iLimit
+                ? pStream->tData.iLen + (size_t)iRead - pStream->iLimit : 0u;
+            if ( iDrop ) {
+                memmove(pStream->tData.pData, pStream->tData.pData + iDrop,
+                    pStream->tData.iLen - iDrop);
+                pStream->tData.iLen -= iDrop;
+                pStream->uBaseOffset += iDrop;
+            }
+            (void)xwork__buf_append(&pStream->tData, pChunk, (size_t)iRead);
+        }
+        (void)xrtMutexUnlock(pStream->pOwner->pLock);
+    }
+    if ( xrtMutexLock(pStream->pOwner->pLock) ) {
+        pStream->bDone = true;
+        (void)xrtMutexUnlock(pStream->pOwner->pLock);
+    }
+    return 0;
+}
+
+static xwork_process_capture* xwork__process_capture_create(
+    xprocess* pProcess,
+    size_t iLimit,
+    bool bCaptureStderr
+)
+{
+    xwork_process_capture* pCapture = (xwork_process_capture*)calloc(1u, sizeof(*pCapture));
+    if ( !pCapture ) return NULL;
+    pCapture->pProcess = pProcess;
+    pCapture->pLock = xrtMutexCreate();
+    pCapture->tStdout.pOwner = pCapture;
+    pCapture->tStdout.eStream = XPROCESS_STDOUT;
+    pCapture->tStdout.iLimit = iLimit;
+    pCapture->tStderr.pOwner = pCapture;
+    pCapture->tStderr.eStream = XPROCESS_STDERR;
+    pCapture->tStderr.iLimit = iLimit;
+    if ( !pCapture->pLock ) goto fail;
+    pCapture->tStdout.pThread = xrtThreadCreate(
+        xwork__process_capture_thread, &pCapture->tStdout, 0u);
+    if ( !pCapture->tStdout.pThread ) goto fail;
+    if ( bCaptureStderr ) {
+        pCapture->tStderr.pThread = xrtThreadCreate(
+            xwork__process_capture_thread, &pCapture->tStderr, 0u);
+        if ( !pCapture->tStderr.pThread ) goto fail;
+    } else {
+        pCapture->tStderr.bDone = true;
+    }
+    return pCapture;
+fail:
+    if ( pCapture->tStdout.pThread ) {
+        (void)xrtProcessClose(pProcess, XPROCESS_STDOUT);
+        (void)xrtThreadWait(pCapture->tStdout.pThread);
+        xrtThreadDestroy(pCapture->tStdout.pThread);
+    }
+    if ( pCapture->pLock ) (void)xrtMutexDestroy(pCapture->pLock);
+    free(pCapture);
+    return NULL;
+}
+
+static void xwork__process_capture_destroy(xwork_process_capture* pCapture)
+{
+    if ( !pCapture ) return;
+    if ( pCapture->tStdout.pThread ) {
+        (void)xrtThreadWait(pCapture->tStdout.pThread);
+        xrtThreadDestroy(pCapture->tStdout.pThread);
+    }
+    if ( pCapture->tStderr.pThread ) {
+        (void)xrtThreadWait(pCapture->tStderr.pThread);
+        xrtThreadDestroy(pCapture->tStderr.pThread);
+    }
+    xwork__buf_unit(&pCapture->tStdout.tData);
+    xwork__buf_unit(&pCapture->tStderr.tData);
+    if ( pCapture->pLock ) (void)xrtMutexDestroy(pCapture->pLock);
+    free(pCapture);
+}
+
+static void* xwork__process_capture_since(
+    xwork_process_capture* pCapture,
+    bool bStderr,
+    uint64_t uOffset,
+    size_t iMaxBytes,
+    size_t* pSize,
+    uint64_t* pBaseOffset,
+    uint64_t* pNextOffset
+)
+{
+    xwork_process_capture_stream* pStream;
+    uint64_t uAvailableEnd;
+    size_t iStart;
+    size_t iCopy;
+    uint8_t* pCopy = NULL;
+    if ( pSize ) *pSize = 0u;
+    if ( !pCapture || !xrtMutexLock(pCapture->pLock) ) return NULL;
+    pStream = bStderr ? &pCapture->tStderr : &pCapture->tStdout;
+    uAvailableEnd = pStream->uBaseOffset + pStream->tData.iLen;
+    if ( pBaseOffset ) *pBaseOffset = pStream->uBaseOffset;
+    if ( uOffset < pStream->uBaseOffset ) uOffset = pStream->uBaseOffset;
+    if ( uOffset > uAvailableEnd ) uOffset = uAvailableEnd;
+    iStart = (size_t)(uOffset - pStream->uBaseOffset);
+    iCopy = pStream->tData.iLen - iStart;
+    if ( iCopy > iMaxBytes ) iCopy = iMaxBytes;
+    if ( iCopy ) {
+        pCopy = (uint8_t*)malloc(iCopy);
+        if ( pCopy ) memcpy(pCopy, pStream->tData.pData + iStart, iCopy);
+        else iCopy = 0u;
+    }
+    if ( pSize ) *pSize = iCopy;
+    if ( pNextOffset ) *pNextOffset = uOffset + iCopy;
+    (void)xrtMutexUnlock(pCapture->pLock);
+    return pCopy;
 }
 
 static void xwork__process_entry_close(xwork_process_entry* pEntry)
 {
     if ( !pEntry ) return;
     if ( pEntry->pProcess ) {
-        if ( xrtProcessIsRunning(pEntry->pProcess) ) {
+        if ( xwork__process_running(pEntry->pProcess) ) {
             (void)xrtProcessKillTree(pEntry->pProcess);
-            if ( xrtProcessWaitTimeout(pEntry->pProcess, 3000u) != XRT_WAIT_OK ) {
+            if ( xrtProcessWaitFor(pEntry->pProcess, UINT64_C(3000000)) != XWAIT_OK ) {
                 (void)xrtProcessKill(pEntry->pProcess);
                 (void)xrtProcessWait(pEntry->pProcess);
             }
         }
+        xwork__process_capture_destroy(pEntry->pCapture);
         xrtProcessDestroy(pEntry->pProcess);
     }
     free(pEntry->sCommand);
@@ -984,7 +1129,7 @@ static xwork_process_entry* xwork__process_add(xwork_agent* pAgent)
     size_t i;
     size_t iCap;
     for ( i = pAgent->iProcessCount; i > 0u && pAgent->iProcessCount >= pAgent->uMaxManagedProcesses; --i ) {
-        if ( !xrtProcessIsRunning(pAgent->pProcesses[i - 1u].pProcess) ) xwork__process_remove(pAgent, i - 1u);
+        if ( !xwork__process_running(pAgent->pProcesses[i - 1u].pProcess) ) xwork__process_remove(pAgent, i - 1u);
     }
     if ( pAgent->iProcessCount >= pAgent->uMaxManagedProcesses ) return NULL;
     if ( pAgent->iProcessCount == pAgent->iProcessCap ) {
@@ -1012,26 +1157,25 @@ static bool xwork__append_process_stream(
 {
     uint64_t* puOffset = bStderr ? &pEntry->uStderrOffset : &pEntry->uStdoutOffset;
     uint64_t uRequested = *puOffset;
-    xprocessreadinfo tInfo;
     void* pData;
     size_t iSize = 0u;
-    memset(&tInfo, 0, sizeof(tInfo));
-    pData = bStderr
-        ? xrtProcessReadStderrSince(pEntry->pProcess, uRequested, iMaxBytes, &iSize, &tInfo)
-        : xrtProcessReadStdoutSince(pEntry->pProcess, uRequested, iMaxBytes, &iSize, &tInfo);
-    if ( tInfo.iNextOffset > *puOffset ) *puOffset = tInfo.iNextOffset;
-    if ( tInfo.iBaseOffset > uRequested &&
+    uint64_t uBaseOffset = 0u;
+    uint64_t uNextOffset = uRequested;
+    pData = xwork__process_capture_since(pEntry->pCapture, bStderr,
+        uRequested, iMaxBytes, &iSize, &uBaseOffset, &uNextOffset);
+    if ( uNextOffset > *puOffset ) *puOffset = uNextOffset;
+    if ( uBaseOffset > uRequested &&
          !xwork__buf_appendf(pOutput, "[%s output before offset %llu was dropped by the capture limit]\n",
-            bStderr ? "stderr" : "stdout", (unsigned long long)tInfo.iBaseOffset) ) goto fail;
+            bStderr ? "stderr" : "stdout", (unsigned long long)uBaseOffset) ) goto fail;
     if ( iSize ) {
         if ( !xwork__buf_appendf(pOutput, "--- %s ---\n", bStderr ? "stderr" : "stdout") ||
              !xwork__buf_append_process_text(pOutput, pData, iSize) ||
              !xwork__buf_append_char(pOutput, '\n') ) goto fail;
     }
-    if ( pData ) xrtFree(pData);
+    free(pData);
     return true;
 fail:
-    if ( pData ) xrtFree(pData);
+    free(pData);
     return false;
 }
 
@@ -1043,11 +1187,11 @@ static bool xwork__append_process_status(
 )
 {
     bool bRunning;
-    xprocessexitinfo tExit;
-    if ( uWaitMs && xrtProcessIsRunning(pEntry->pProcess) ) {
-        (void)xrtProcessWaitTimeout(pEntry->pProcess, uWaitMs);
+    xprocessstatus tExit;
+    if ( uWaitMs && xwork__process_running(pEntry->pProcess) ) {
+        (void)xrtProcessWaitFor(pEntry->pProcess, (uint64_t)uWaitMs * UINT64_C(1000));
     }
-    bRunning = xrtProcessIsRunning(pEntry->pProcess);
+    bRunning = xwork__process_running(pEntry->pProcess);
     if ( !xwork__buf_appendf(pOutput, "process_id: %llu\nstate: %s\ncommand: %s\n",
             (unsigned long long)pEntry->uId, bRunning ? "running" : "exited",
             pEntry->sCommand ? pEntry->sCommand : "") ) return false;
@@ -1055,9 +1199,9 @@ static bool xwork__append_process_status(
          !xwork__append_process_stream(pOutput, pEntry, true, iMaxBytes) ) return false;
     if ( !bRunning ) {
         memset(&tExit, 0, sizeof(tExit));
-        (void)xrtProcessGetExitInfo(pEntry->pProcess, &tExit);
+        (void)xrtProcessStatus(pEntry->pProcess, &tExit);
         if ( !xwork__buf_appendf(pOutput, "exit_code: %d\nexit_kind: %d\nstop_reason: %d\n",
-                tExit.iExitCode, tExit.iKind, tExit.iStopReason) ) return false;
+                tExit.Code, tExit.Kind, tExit.Stop) ) return false;
     } else if ( !xwork__buf_append_cstr(pOutput, "use poll_process to read more output\n") ) {
         return false;
     }
@@ -1073,7 +1217,7 @@ static xwork_result xwork__tool_start_process(
 )
 {
     xwork_agent* pAgent = (xwork_agent*)pUserData;
-    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    xvalue* tArgs = xwork__json_parse_object(sArgumentsJson);
     const char* sCommand;
     const char* sCwd;
     char* sResolvedCwd = NULL;
@@ -1108,19 +1252,15 @@ static xwork_result xwork__tool_start_process(
     pEntry->sCommand = xwork__strdup(sCommand);
     if ( !pEntry->sCommand ) goto oom;
     xrtProcessConfigInit(&tConfig);
-    tConfig.iTargetKind = XPROC_TARGET_SHELL;
-    tConfig.sCommand = (str)sCommand;
-    tConfig.sWorkDir = (str)sResolvedCwd;
-    tConfig.bInheritEnv = true;
-    tConfig.bMergeStderr = bMerge;
-    tConfig.bCreateProcessGroup = true;
-    tConfig.bHideWindow = true;
-    tConfig.iMaxCaptureBytes = (size_t)uCapture;
-    tConfig.Stdin.iMode = XPROC_STDIO_PIPE;
-    tConfig.Stdout.iMode = XPROC_STDIO_PIPE;
-    tConfig.Stdout.bCapture = true;
-    tConfig.Stderr.iMode = bMerge ? XPROC_STDIO_INHERIT : XPROC_STDIO_PIPE;
-    tConfig.Stderr.bCapture = !bMerge;
+    tConfig.Target = XPROCESS_SHELL;
+    tConfig.Command = sCommand;
+    tConfig.WorkDir = sResolvedCwd;
+    tConfig.InheritEnv = true;
+    tConfig.NewGroup = true;
+    tConfig.HideWindow = true;
+    tConfig.Stdin.Mode = XPROCESS_IO_PIPE;
+    tConfig.Stdout.Mode = XPROCESS_IO_PIPE;
+    tConfig.Stderr.Mode = bMerge ? XPROCESS_IO_MERGE : XPROCESS_IO_PIPE;
     pProcess = xrtProcessSpawn(&tConfig);
     if ( !pProcess ) {
         xwork__process_remove(pAgent, pAgent->iProcessCount - 1u);
@@ -1129,6 +1269,15 @@ static xwork_result xwork__tool_start_process(
         goto cleanup;
     }
     pEntry->pProcess = pProcess;
+    pEntry->pCapture = xwork__process_capture_create(pProcess, (size_t)uCapture, !bMerge);
+    if ( !pEntry->pCapture ) {
+        (void)xrtProcessKillTree(pProcess);
+        (void)xrtProcessWait(pProcess);
+        xwork__process_remove(pAgent, pAgent->iProcessCount - 1u);
+        pEntry = NULL;
+        pProcess = NULL;
+        goto oom;
+    }
     pProcess = NULL;
     if ( !xwork__append_process_status(&tOutput, pEntry, (uint32_t)uWaitMs, 64u * 1024u) ||
          !xworkToolOutputSet(pOutput, true, tOutput.pData) ) goto oom;
@@ -1139,10 +1288,10 @@ oom:
     xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to create managed process");
 cleanup:
     if ( pProcess ) {
-        if ( xrtProcessIsRunning(pProcess) ) { (void)xrtProcessKillTree(pProcess); (void)xrtProcessWait(pProcess); }
+        if ( xwork__process_running(pProcess) ) { (void)xrtProcessKillTree(pProcess); (void)xrtProcessWait(pProcess); }
         xrtProcessDestroy(pProcess);
     }
-    if ( tArgs ) xvoUnref(tArgs);
+    if ( tArgs ) xrtValueRelease(tArgs);
     free(sResolvedCwd);
     xwork__buf_unit(&tOutput);
     return eResult;
@@ -1157,7 +1306,7 @@ static xwork_result xwork__tool_poll_process(
 )
 {
     xwork_agent* pAgent = (xwork_agent*)pUserData;
-    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    xvalue* tArgs = xwork__json_parse_object(sArgumentsJson);
     uint64_t uId;
     uint64_t uWaitMs;
     uint64_t uMaxBytes;
@@ -1179,10 +1328,10 @@ static xwork_result xwork__tool_poll_process(
     if ( !bValid ) { eResult = xwork__tool_fail(pOutput, "release must be boolean"); goto cleanup; }
     pEntry = xwork__process_find(pAgent, uId, &iIndex);
     if ( !pEntry ) { eResult = xwork__tool_fail(pOutput, "unknown or released process_id"); goto cleanup; }
-    if ( bRelease && xrtProcessIsRunning(pEntry->pProcess) ) {
-        if ( uWaitMs ) (void)xrtProcessWaitTimeout(pEntry->pProcess, (uint32_t)uWaitMs);
+    if ( bRelease && xwork__process_running(pEntry->pProcess) ) {
+        if ( uWaitMs ) (void)xrtProcessWaitFor(pEntry->pProcess, uWaitMs * UINT64_C(1000));
         uWaitMs = 0u;
-        if ( xrtProcessIsRunning(pEntry->pProcess) ) {
+        if ( xwork__process_running(pEntry->pProcess) ) {
             eResult = xwork__tool_fail(pOutput, "cannot release a running process; stop it first");
             goto cleanup;
         }
@@ -1195,7 +1344,7 @@ static xwork_result xwork__tool_poll_process(
 oom:
     xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to report managed process status");
 cleanup:
-    if ( tArgs ) xvoUnref(tArgs);
+    if ( tArgs ) xrtValueRelease(tArgs);
     xwork__buf_unit(&tOutput);
     return eResult;
 }
@@ -1209,7 +1358,7 @@ static xwork_result xwork__tool_write_process(
 )
 {
     xwork_agent* pAgent = (xwork_agent*)pUserData;
-    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    xvalue* tArgs = xwork__json_parse_object(sArgumentsJson);
     uint64_t uId;
     const char* sInput;
     bool bValid;
@@ -1232,15 +1381,15 @@ static xwork_result xwork__tool_write_process(
     if ( !sInput && !bClose ) { eResult = xwork__tool_fail(pOutput, "input or close_stdin=true is required"); goto cleanup; }
     pEntry = xwork__process_find(pAgent, uId, NULL);
     if ( !pEntry ) { eResult = xwork__tool_fail(pOutput, "unknown or released process_id"); goto cleanup; }
-    if ( !xrtProcessIsRunning(pEntry->pProcess) ) { eResult = xwork__tool_fail(pOutput, "process has already exited"); goto cleanup; }
+    if ( !xwork__process_running(pEntry->pProcess) ) { eResult = xwork__tool_fail(pOutput, "process has already exited"); goto cleanup; }
     if ( pEntry->bStdinClosed ) { eResult = xwork__tool_fail(pOutput, "process stdin is already closed"); goto cleanup; }
     if ( sInput && (sInput[0] || bNewline) ) {
         if ( !xwork__buf_append_cstr(&tInput, sInput) || (bNewline && !xwork__buf_append_char(&tInput, '\n')) ) goto oom;
-        iWritten = xrtProcessWriteText(pEntry->pProcess, (str)tInput.pData, tInput.iLen);
+        iWritten = xrtProcessWrite(pEntry->pProcess, tInput.pData, tInput.iLen);
         if ( iWritten < 0 || (size_t)iWritten != tInput.iLen ) { eResult = xwork__tool_fail(pOutput, "failed to write complete input to process"); goto cleanup; }
     }
     if ( bClose ) {
-        if ( !xrtProcessCloseStdin(pEntry->pProcess) ) { eResult = xwork__tool_fail(pOutput, "failed to close process stdin"); goto cleanup; }
+        if ( !xrtProcessClose(pEntry->pProcess, XPROCESS_STDIN) ) { eResult = xwork__tool_fail(pOutput, "failed to close process stdin"); goto cleanup; }
         pEntry->bStdinClosed = true;
     }
     if ( !xwork__buf_appendf(&tOutput, "process_id: %llu\nwrote: %lld bytes\nstdin: %s\n",
@@ -1251,7 +1400,7 @@ static xwork_result xwork__tool_write_process(
 oom:
     xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to prepare managed process input");
 cleanup:
-    if ( tArgs ) xvoUnref(tArgs);
+    if ( tArgs ) xrtValueRelease(tArgs);
     xwork__buf_unit(&tInput);
     xwork__buf_unit(&tOutput);
     return eResult;
@@ -1266,7 +1415,7 @@ static xwork_result xwork__tool_stop_process(
 )
 {
     xwork_agent* pAgent = (xwork_agent*)pUserData;
-    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    xvalue* tArgs = xwork__json_parse_object(sArgumentsJson);
     uint64_t uId;
     uint64_t uWaitMs;
     const char* sMode;
@@ -1294,7 +1443,7 @@ static xwork_result xwork__tool_stop_process(
     if ( !bValid ) { eResult = xwork__tool_fail(pOutput, "release must be boolean"); goto cleanup; }
     pEntry = xwork__process_find(pAgent, uId, &iIndex);
     if ( !pEntry ) { eResult = xwork__tool_fail(pOutput, "unknown or released process_id"); goto cleanup; }
-    if ( xrtProcessIsRunning(pEntry->pProcess) ) {
+    if ( xwork__process_running(pEntry->pProcess) ) {
         if ( strcmp(sMode, "interrupt") == 0 ) bRequested = xrtProcessInterrupt(pEntry->pProcess);
         else if ( strcmp(sMode, "terminate") == 0 ) bRequested = xrtProcessTerminate(pEntry->pProcess);
         else if ( strcmp(sMode, "kill") == 0 ) bRequested = xrtProcessKill(pEntry->pProcess);
@@ -1302,7 +1451,7 @@ static xwork_result xwork__tool_stop_process(
         if ( !bRequested ) { eResult = xwork__tool_fail(pOutput, "process stop request failed"); goto cleanup; }
     }
     if ( !xwork__append_process_status(&tOutput, pEntry, (uint32_t)uWaitMs, 64u * 1024u) ) goto oom;
-    bRunning = xrtProcessIsRunning(pEntry->pProcess);
+    bRunning = xwork__process_running(pEntry->pProcess);
     if ( !xworkToolOutputSet(pOutput, !bRunning, tOutput.pData) ) goto oom;
     if ( bRelease && !bRunning ) xwork__process_remove(pAgent, iIndex);
     eResult = XWORK_RESULT_OK;
@@ -1310,20 +1459,9 @@ static xwork_result xwork__tool_stop_process(
 oom:
     xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to stop or report managed process");
 cleanup:
-    if ( tArgs ) xvoUnref(tArgs);
+    if ( tArgs ) xrtValueRelease(tArgs);
     xwork__buf_unit(&tOutput);
     return eResult;
-}
-
-static void xwork__stop_scoped_process(xprocess* pProcess)
-{
-    if ( !pProcess || !xrtProcessIsRunning(pProcess) ) return;
-    (void)xrtProcessInterrupt(pProcess);
-    if ( xrtProcessWaitTimeout(pProcess, 250u) == XRT_WAIT_OK ) return;
-    (void)xrtProcessTerminate(pProcess);
-    if ( xrtProcessWaitTimeout(pProcess, 250u) == XRT_WAIT_OK ) return;
-    if ( !xrtProcessKillTree(pProcess) ) (void)xrtProcessKill(pProcess);
-    (void)xrtProcessWait(pProcess);
 }
 
 static bool xwork__exec_capture_scoped(
@@ -1334,81 +1472,34 @@ static bool xwork__exec_capture_scoped(
     xwork_result* pScopeResult
 )
 {
-    xprocess* pProcess;
-    xprocessreadinfo tStdoutInfo;
-    xprocessreadinfo tStderrInfo;
-    uint64_t uStartedMs;
-    bool bCommandTimedOut = false;
-    xctx_status eContextStatus = XCTX_ACTIVE;
-    int iWait = XRT_WAIT_TIMEOUT;
+    xprocessrunoptions tOptions;
+    xdeadline uCommandDeadline;
+    xwork_operation_status eStatus;
     if ( pScopeResult ) *pScopeResult = XWORK_RESULT_OK;
     if ( !pAgent || !pConfig || !pResult ) return false;
     memset(pResult, 0, sizeof(*pResult));
-    eContextStatus = xwork__context_status(pAgent);
-    if ( eContextStatus != XCTX_ACTIVE ) {
-        if ( pScopeResult ) *pScopeResult = eContextStatus == XCTX_DEADLINE_EXCEEDED
+    eStatus = xwork__operation_status(pAgent);
+    if ( eStatus != XWORK_OPERATION_ACTIVE ) {
+        if ( pScopeResult ) *pScopeResult = eStatus == XWORK_OPERATION_TIMED_OUT
             ? XWORK_RESULT_TIMEOUT : XWORK_RESULT_CANCELLED;
         return true;
     }
-    uStartedMs = xrtMonotonicMs();
-    pProcess = xrtProcessSpawn(pConfig);
-    if ( !pProcess ) return false;
-    for ( ;; ) {
-        uint64_t uNowMs;
-        uint64_t uElapsedMs;
-        uint32_t uSliceMs = 20u;
-        int64_t iContextRemaining;
-        iWait = xrtProcessWaitTimeout(pProcess, 0u);
-        if ( iWait == XRT_WAIT_OK || iWait == XRT_WAIT_ERROR ) break;
-        eContextStatus = xwork__context_status(pAgent);
-        if ( eContextStatus != XCTX_ACTIVE ) break;
-        uNowMs = xrtMonotonicMs();
-        uElapsedMs = uNowMs >= uStartedMs ? uNowMs - uStartedMs : 0u;
-        if ( uElapsedMs >= (uint64_t)uTimeoutMs ) {
-            bCommandTimedOut = true;
-            break;
-        }
-        if ( (uint64_t)uSliceMs > (uint64_t)uTimeoutMs - uElapsedMs ) {
-            uSliceMs = (uint32_t)((uint64_t)uTimeoutMs - uElapsedMs);
-        }
-        iContextRemaining = pAgent->pContext ? xrtContextRemainingMs(pAgent->pContext) : -1;
-        if ( iContextRemaining >= 0 && iContextRemaining < (int64_t)uSliceMs ) {
-            uSliceMs = iContextRemaining > 0 ? (uint32_t)iContextRemaining : 1u;
-        }
-        if ( !uSliceMs ) uSliceMs = 1u;
-        iWait = xrtProcessWaitTimeout(pProcess, uSliceMs);
-        if ( iWait == XRT_WAIT_OK || iWait == XRT_WAIT_ERROR ) break;
-    }
-    if ( eContextStatus != XCTX_ACTIVE || bCommandTimedOut ) {
-        xwork__stop_scoped_process(pProcess);
-    } else if ( iWait == XRT_WAIT_ERROR ) {
-        (void)xrtProcessWait(pProcess);
-    }
-    (void)xrtProcessGetExitInfo(pProcess, &pResult->ExitInfo);
-    pResult->iExitCode = pResult->ExitInfo.iExitCode;
-    memset(&tStdoutInfo, 0, sizeof(tStdoutInfo));
-    memset(&tStderrInfo, 0, sizeof(tStderrInfo));
-    pResult->pStdout = xrtProcessReadStdoutSince(pProcess, 0u, SIZE_MAX,
-        &pResult->iStdoutSize, &tStdoutInfo);
-    pResult->pStderr = xrtProcessReadStderrSince(pProcess, 0u, SIZE_MAX,
-        &pResult->iStderrSize, &tStderrInfo);
-    pResult->iStdoutBaseOffset = tStdoutInfo.iBaseOffset;
-    pResult->iStderrBaseOffset = tStderrInfo.iBaseOffset;
-    pResult->bStdoutTruncated = tStdoutInfo.iBaseOffset != 0u;
-    pResult->bStderrTruncated = tStderrInfo.iBaseOffset != 0u;
-    pResult->iDurationMs = xrtMonotonicMs() - uStartedMs;
-    if ( eContextStatus == XCTX_DEADLINE_EXCEEDED ) {
-        pResult->ExitInfo.bTimedOut = true;
-        pResult->ExitInfo.bCancelled = false;
-        if ( pScopeResult ) *pScopeResult = XWORK_RESULT_TIMEOUT;
-    } else if ( eContextStatus == XCTX_CANCELLED ) {
-        pResult->ExitInfo.bCancelled = true;
+    if ( !xrtProcessRunOptionsInit(&tOptions) ) return false;
+    uCommandDeadline = xrtDeadlineAfter((uint64_t)uTimeoutMs * UINT64_C(1000));
+    tOptions.Deadline = pAgent->uDeadline != XRT_DEADLINE_NEVER &&
+        pAgent->uDeadline < uCommandDeadline ? pAgent->uDeadline : uCommandDeadline;
+    tOptions.Cancel = pAgent->pCancel;
+    tOptions.StdoutLimit = pAgent->iMaxCapturedCommandBytes;
+    tOptions.StderrLimit = pAgent->iMaxCapturedCommandBytes;
+    tOptions.Overflow = XPROCESS_OVERFLOW_KEEP_LAST;
+    if ( !xrtProcessRun(pConfig, &tOptions, pResult) ) return false;
+    if ( pResult->Wait == XWAIT_CANCELLED ) {
         if ( pScopeResult ) *pScopeResult = XWORK_RESULT_CANCELLED;
-    } else if ( bCommandTimedOut ) {
-        pResult->ExitInfo.bTimedOut = true;
-        pResult->ExitInfo.bCancelled = false;
+    } else if ( pResult->Wait == XWAIT_TIMEOUT &&
+                pAgent->uDeadline != XRT_DEADLINE_NEVER &&
+                xrtDeadlineExpired(pAgent->uDeadline) ) {
+        if ( pScopeResult ) *pScopeResult = XWORK_RESULT_TIMEOUT;
     }
-    xrtProcessDestroy(pProcess);
     return true;
 }
 
@@ -1421,7 +1512,7 @@ static xwork_result xwork__tool_exec_command(
 )
 {
     xwork_agent* pAgent = (xwork_agent*)pUserData;
-    xvalue tArgs = xwork__json_parse_object(sArgumentsJson);
+    xvalue* tArgs = xwork__json_parse_object(sArgumentsJson);
     const char* sCommand;
     const char* sCwd;
     char* sResolvedCwd = NULL;
@@ -1431,7 +1522,7 @@ static xwork_result xwork__tool_exec_command(
     uint64_t uTimeout;
     uint32_t i;
     uint32_t iExpectedCount = 0u;
-    xvalue tExpectedExitCodes;
+    xvalue* tExpectedExitCodes;
     xprocessconfig tConfig;
     xprocessresult tProcess;
     xwork_result eScopeResult = XWORK_RESULT_OK;
@@ -1450,20 +1541,19 @@ static xwork_result xwork__tool_exec_command(
     if ( !bValid ) { eResult = xwork__tool_fail(pOutput, "merge_stderr must be boolean"); goto cleanup; }
     tExpectedExitCodes = xwork__json_get(tArgs, "expected_exit_codes");
     if ( tExpectedExitCodes ) {
-        if ( xvoType(tExpectedExitCodes) != XVO_DT_ARRAY ) {
+        if ( xrtValueType(tExpectedExitCodes) != XVALUE_ARRAY ) {
             eResult = xwork__tool_fail(pOutput, "expected_exit_codes must be a non-empty array of integers"); goto cleanup;
         }
-        iExpectedCount = xvoArrayItemCount(tExpectedExitCodes);
+        iExpectedCount = xrtValueCount(tExpectedExitCodes);
         if ( iExpectedCount == 0u || iExpectedCount > 32u ) {
             eResult = xwork__tool_fail(pOutput, "expected_exit_codes must contain between 1 and 32 integers"); goto cleanup;
         }
         for ( i = 0u; i < iExpectedCount; ++i ) {
-            xvalue tCode = xvoArrayGetValue(tExpectedExitCodes, i);
+            xvalue* tCode = xrtValueArrayGet(tExpectedExitCodes, i);
             int64_t iCode;
-            if ( !tCode || xvoType(tCode) != XVO_DT_INT ) {
+            if ( !tCode || !xrtValueGetInt(tCode, &iCode) ) {
                 eResult = xwork__tool_fail(pOutput, "expected_exit_codes must contain only integers"); goto cleanup;
             }
-            iCode = xvoGetInt(tCode);
             if ( iCode < -2147483647LL - 1LL || iCode > 2147483647LL ) {
                 eResult = xwork__tool_fail(pOutput, "expected_exit_codes values must fit in a signed 32-bit exit code"); goto cleanup;
             }
@@ -1473,19 +1563,15 @@ static xwork_result xwork__tool_exec_command(
     if ( !sResolvedCwd ) { eResult = xwork__tool_fail(pOutput, pError && pError->sMessage[0] ? pError->sMessage : "cwd denied"); goto cleanup; }
     if ( !xrtDirExists((str)sResolvedCwd) ) { eResult = xwork__tool_fail(pOutput, "cwd does not exist"); goto cleanup; }
     xrtProcessConfigInit(&tConfig);
-    tConfig.iTargetKind = XPROC_TARGET_SHELL;
-    tConfig.sCommand = (str)sCommand;
-    tConfig.sWorkDir = (str)sResolvedCwd;
-    tConfig.bInheritEnv = true;
-    tConfig.bMergeStderr = bMerge;
-    tConfig.bCreateProcessGroup = true;
-    tConfig.bHideWindow = true;
-    tConfig.iMaxCaptureBytes = pAgent->iMaxCapturedCommandBytes;
-    tConfig.Stdout.iMode = XPROC_STDIO_PIPE;
-    tConfig.Stdout.bCapture = true;
-    tConfig.Stderr.iMode = bMerge ? XPROC_STDIO_INHERIT : XPROC_STDIO_PIPE;
-    tConfig.Stderr.bCapture = !bMerge;
-    tConfig.Stdin.iMode = XPROC_STDIO_NULL;
+    tConfig.Target = XPROCESS_SHELL;
+    tConfig.Command = sCommand;
+    tConfig.WorkDir = sResolvedCwd;
+    tConfig.InheritEnv = true;
+    tConfig.NewGroup = true;
+    tConfig.HideWindow = true;
+    tConfig.Stdout.Mode = XPROCESS_IO_PIPE;
+    tConfig.Stderr.Mode = bMerge ? XPROCESS_IO_MERGE : XPROCESS_IO_PIPE;
+    tConfig.Stdin.Mode = XPROCESS_IO_NULL;
     if ( !xwork__exec_capture_scoped(pAgent, &tConfig, &tProcess, (uint32_t)uTimeout, &eScopeResult) ) {
         eResult = xwork__tool_fail(pOutput, "failed to start or capture command"); goto cleanup;
     }
@@ -1499,38 +1585,40 @@ static xwork_result xwork__tool_exec_command(
         eResult = XWORK_RESULT_CANCELLED;
         goto cleanup;
     }
-    bExpectedExit = tProcess.ExitInfo.iKind == XPROC_EXIT_NORMAL &&
-        !tProcess.ExitInfo.bTimedOut && !tProcess.ExitInfo.bCancelled;
+    bExpectedExit = tProcess.Wait == XWAIT_OK &&
+        tProcess.Status.Kind == XPROCESS_EXIT_CODE;
     if ( bExpectedExit ) {
         if ( tExpectedExitCodes ) {
             bExpectedExit = false;
             for ( i = 0u; i < iExpectedCount; ++i ) {
-                if ( xvoGetInt(xvoArrayGetValue(tExpectedExitCodes, i)) == (int64_t)tProcess.iExitCode ) {
+                int64 iExpected = 0;
+                if ( xrtValueGetInt(xrtValueArrayGet(tExpectedExitCodes, i), &iExpected) &&
+                     iExpected == (int64_t)tProcess.Status.Code ) {
                     bExpectedExit = true;
                     break;
                 }
             }
         } else {
-            bExpectedExit = tProcess.iExitCode == 0;
+            bExpectedExit = tProcess.Status.Code == 0;
         }
     }
     if ( !xwork__buf_appendf(&tOutput, "$ %s\nexit_code: %d\nexit_expected: %s\nduration_ms: %llu%s\n",
             sCommand,
-            tProcess.iExitCode,
+            tProcess.Status.Code,
             bExpectedExit ? "true" : "false",
-            (unsigned long long)tProcess.iDurationMs,
-            tProcess.ExitInfo.bTimedOut ? " (timed out)" : "") ) goto oom;
-    if ( tProcess.iStdoutSize ) {
+            (unsigned long long)(tProcess.Duration / UINT64_C(1000)),
+            tProcess.Wait == XWAIT_TIMEOUT ? " (timed out)" : "") ) goto oom;
+    if ( tProcess.StdoutSize ) {
         if ( !xwork__buf_append_cstr(&tOutput, "--- stdout ---\n") ||
-             !xwork__buf_append_process_text(&tOutput, tProcess.pStdout, tProcess.iStdoutSize) ||
+             !xwork__buf_append_process_text(&tOutput, tProcess.Stdout, tProcess.StdoutSize) ||
              !xwork__buf_append_char(&tOutput, '\n') ) goto oom;
     }
-    if ( tProcess.iStderrSize ) {
+    if ( tProcess.StderrSize ) {
         if ( !xwork__buf_append_cstr(&tOutput, "--- stderr ---\n") ||
-             !xwork__buf_append_process_text(&tOutput, tProcess.pStderr, tProcess.iStderrSize) ||
+             !xwork__buf_append_process_text(&tOutput, tProcess.Stderr, tProcess.StderrSize) ||
              !xwork__buf_append_char(&tOutput, '\n') ) goto oom;
     }
-    if ( tProcess.bStdoutTruncated || tProcess.bStderrTruncated ) {
+    if ( tProcess.StdoutTruncated || tProcess.StderrTruncated ) {
         if ( !xwork__buf_append_cstr(&tOutput, "[process capture was truncated by the configured capture limit]\n") ) goto oom;
     }
     if ( !xworkToolOutputSet(pOutput, bExpectedExit, tOutput.pData ? tOutput.pData : "") ) goto oom;
@@ -1539,7 +1627,7 @@ static xwork_result xwork__tool_exec_command(
 oom:
     xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to build exec_command output");
 cleanup:
-    if ( tArgs ) xvoUnref(tArgs);
+    if ( tArgs ) xrtValueRelease(tArgs);
     free(sResolvedCwd);
     xrtProcessResultUnit(&tProcess);
     xwork__buf_unit(&tOutput);

@@ -2,7 +2,7 @@
 #define XWORK_INTERNAL_H
 
 #include "../xwork.h"
-#include "xrt.h"
+#include "../xwork-xrt.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -43,11 +43,35 @@ typedef struct xwork_tool_entry {
 typedef struct xwork_process_entry {
     uint64_t uId;
     xprocess* pProcess;
+    struct xwork_process_capture* pCapture;
     char* sCommand;
     uint64_t uStdoutOffset;
     uint64_t uStderrOffset;
     bool bStdinClosed;
 } xwork_process_entry;
+
+typedef struct xwork_process_capture_stream {
+    struct xwork_process_capture* pOwner;
+    xprocessstream eStream;
+    xthread* pThread;
+    xwork_buf tData;
+    uint64_t uBaseOffset;
+    size_t iLimit;
+    bool bDone;
+} xwork_process_capture_stream;
+
+typedef struct xwork_process_capture {
+    xprocess* pProcess;
+    xmutex* pLock;
+    xwork_process_capture_stream tStdout;
+    xwork_process_capture_stream tStderr;
+} xwork_process_capture;
+
+typedef enum xwork_operation_status {
+    XWORK_OPERATION_ACTIVE = 0,
+    XWORK_OPERATION_CANCELLED,
+    XWORK_OPERATION_TIMED_OUT
+} xwork_operation_status;
 
 struct xwork_agent {
     xllm_client* pClient;
@@ -59,7 +83,8 @@ struct xwork_agent {
     char* sArtifactDirectory;
     char* sModel;
     char* sReasoningEffort;
-    xctx* pContext;
+    xcancel* pCancel;
+    uint64_t uDeadline;
 
     xwork_approval_mode eApprovalMode;
     xwork_approval_fn OnApproval;
@@ -121,11 +146,11 @@ char* xwork__buf_detach(xwork_buf* pBuf);
 void xwork__buf_unit(xwork_buf* pBuf);
 bool xwork__json_string(xwork_buf* pBuf, const char* sText);
 
-xvalue xwork__json_parse_object(const char* sJson);
-xvalue xwork__json_get(xvalue tObject, const char* sKey);
-const char* xwork__json_text(xvalue tObject, const char* sKey);
-bool xwork__json_bool(xvalue tObject, const char* sKey, bool bDefault, bool* pValid);
-uint64_t xwork__json_u64(xvalue tObject, const char* sKey, uint64_t uDefault, bool* pValid);
+xvalue* xwork__json_parse_object(const char* sJson);
+xvalue* xwork__json_get(xvalue* pObject, const char* sKey);
+const char* xwork__json_text(xvalue* pObject, const char* sKey);
+bool xwork__json_bool(xvalue* pObject, const char* sKey, bool bDefault, bool* pValid);
+uint64_t xwork__json_u64(xvalue* pObject, const char* sKey, uint64_t uDefault, bool* pValid);
 
 char* xwork__resolve_path(const xwork_agent* pAgent, const char* sPath, xwork_error* pError);
 char* xwork__relative_path(const xwork_agent* pAgent, const char* sPath);
@@ -178,12 +203,20 @@ static inline void xwork__atomic_store(volatile long* pValue, long iValue)
 static inline bool xwork__is_cancelled(xwork_agent* pAgent)
 {
     return pAgent && (xwork__atomic_load(&pAgent->iCancelled) != 0 ||
-        (pAgent->pContext && xrtContextDone(pAgent->pContext)));
+        (pAgent->pCancel && xrtCancelRequested(pAgent->pCancel)) ||
+        (pAgent->uDeadline != XRT_DEADLINE_NEVER && xrtDeadlineExpired(pAgent->uDeadline)));
 }
 
-static inline xctx_status xwork__context_status(xwork_agent* pAgent)
+static inline xwork_operation_status xwork__operation_status(const xwork_agent* pAgent)
 {
-    return pAgent && pAgent->pContext ? xrtContextStatus(pAgent->pContext) : XCTX_ACTIVE;
+    if ( !pAgent ) return XWORK_OPERATION_ACTIVE;
+    if ( pAgent->pCancel && xrtCancelRequested(pAgent->pCancel) ) {
+        return XWORK_OPERATION_CANCELLED;
+    }
+    if ( pAgent->uDeadline != XRT_DEADLINE_NEVER && xrtDeadlineExpired(pAgent->uDeadline) ) {
+        return XWORK_OPERATION_TIMED_OUT;
+    }
+    return XWORK_OPERATION_ACTIVE;
 }
 
 #endif

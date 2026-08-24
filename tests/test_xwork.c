@@ -218,7 +218,8 @@ static xllm_result mock_complete(
     size_t i;
     (void)pError;
     *ppResponse = NULL;
-    if ( pRequest->pContext ) pMock->bSawContext = true;
+    if ( pRequest->pCancel || pRequest->uDeadline != XRT_DEADLINE_NEVER )
+        pMock->bSawContext = true;
     if ( pRequest->iToolCount == 0u ) {
         ++pMock->uCompactionCalls;
         if ( pMock->uCompactionCalls == 1u ) {
@@ -402,19 +403,19 @@ static void test_process_text_normalization(void)
     static const unsigned char sBinary[] = {'a', 0u, 0xFFu, 'b'};
     xwork_buf tText = {0};
 
-    CHECK(xrtIsUTF8((str)"valid UTF-8: \xE4\xB8\xAD\xE6\x96\x87", 0u), "strict UTF-8 accepts valid Unicode text");
-    CHECK(!xrtIsUTF8((str)sOverlong, sizeof(sOverlong)), "strict UTF-8 rejects overlong encodings");
-    CHECK(!xrtIsUTF8((str)sSurrogate, sizeof(sSurrogate)), "strict UTF-8 rejects surrogate code points");
-    CHECK(!xrtIsUTF8((str)sTooHigh, sizeof(sTooHigh)), "strict UTF-8 rejects code points above U+10FFFF");
-    CHECK(!xrtIsUTF8((str)sTruncated, sizeof(sTruncated)), "strict UTF-8 rejects truncated sequences");
+    CHECK(xrtUtf8Valid((xstrview){ "valid UTF-8: \xE4\xB8\xAD\xE6\x96\x87", 19u }, NULL), "strict UTF-8 accepts valid Unicode text");
+    CHECK(!xrtUtf8Valid((xstrview){ (const char*)sOverlong, sizeof(sOverlong) }, NULL), "strict UTF-8 rejects overlong encodings");
+    CHECK(!xrtUtf8Valid((xstrview){ (const char*)sSurrogate, sizeof(sSurrogate) }, NULL), "strict UTF-8 rejects surrogate code points");
+    CHECK(!xrtUtf8Valid((xstrview){ (const char*)sTooHigh, sizeof(sTooHigh) }, NULL), "strict UTF-8 rejects code points above U+10FFFF");
+    CHECK(!xrtUtf8Valid((xstrview){ (const char*)sTruncated, sizeof(sTruncated) }, NULL), "strict UTF-8 rejects truncated sequences");
 
     CHECK(xwork__buf_append_process_text(&tText, sLocalBytes, sizeof(sLocalBytes)), "local process bytes normalize without loss of control flow");
-    CHECK(tText.pData && xrtIsUTF8((str)tText.pData, tText.iLen), "normalized process output is valid UTF-8");
+    CHECK(tText.pData && xrtUtf8Valid((xstrview){ tText.pData, tText.iLen }, NULL), "normalized process output is valid UTF-8");
     xwork__buf_unit(&tText);
 
     CHECK(xwork__buf_append_process_text(&tText, sBinary, sizeof(sBinary)), "binary-like process output is safely represented");
     CHECK(tText.pData && strstr(tText.pData, "\\x00") && strstr(tText.pData, "\\xFF"), "binary bytes are escaped instead of entering JSON");
-    CHECK(tText.pData && xrtIsUTF8((str)tText.pData, tText.iLen), "escaped binary representation remains valid UTF-8");
+    CHECK(tText.pData && xrtUtf8Valid((xstrview){ tText.pData, tText.iLen }, NULL), "escaped binary representation remains valid UTF-8");
     xwork__buf_unit(&tText);
 }
 
@@ -432,7 +433,7 @@ static void test_agent_loop(void)
     xwork_agent_config tAgentConfig;
     xwork_agent* pAgent;
     xwork_mcp_client* pMcpClient = NULL;
-    xctx* pContext = NULL;
+    xcancel* pCancel = NULL;
     xwork_error tError;
     xwork_run_result tResult;
     mock_model tMock;
@@ -458,7 +459,7 @@ static void test_agent_loop(void)
     memset(&tMock, 0, sizeof(tMock));
     memset(&tEvents, 0, sizeof(tEvents));
     memset(&tResult, 0, sizeof(tResult));
-    (void)xrtDirDelete((str)sWorkspace);
+    (void)xrtDirRemoveAll(sWorkspace);
     CHECK(xrtDirCreateAll((str)sWorkspace), "test workspace created");
     xllmMemoryConfigInit(&tMemoryConfig);
     tMemoryConfig.sPath = "tests/tmp_xwork/.xcode/memory.json";
@@ -533,8 +534,8 @@ static void test_agent_loop(void)
     tAgentConfig.sSessionPath = sSessionPath;
     tAgentConfig.sModel = "mock-model";
     tAgentConfig.sReasoningEffort = "high";
-    pContext = xrtContextCreate(NULL);
-    tAgentConfig.pContext = pContext;
+    pCancel = xrtCancelCreate();
+    tAgentConfig.pCancel = pCancel;
     tAgentConfig.OnModelComplete = mock_complete;
     tAgentConfig.pModelUserData = &tMock;
     tAgentConfig.OnEvent = on_event;
@@ -545,8 +546,6 @@ static void test_agent_loop(void)
     tAgentConfig.pHookUserData = &tMock;
     tAgentConfig.iMaxInlineToolBytes = 300u;
     pAgent = xworkAgentCreate(&tAgentConfig, &tError);
-    xrtContextRelease(pContext);
-    pContext = NULL;
     CHECK(pAgent != NULL, "agent creates with injected model boundary");
     CHECK(pAgent && xworkAgentToolCount(pAgent) == 11u, "eleven practical builtin tools registered");
     if ( !pAgent ) goto cleanup;
@@ -622,17 +621,25 @@ static void test_agent_loop(void)
             strcmp(tMcpInfo.sProtocolVersion, "2025-06-18") == 0,
             "MCP diagnostics expose negotiated version, tool count, and request count");
         {
-            xctx* pMcpDeadline = xrtContextCreateTimeout(NULL, 100u);
-            uint64_t uStartedMs = xrtMonotonicMs();
+            uint64_t uStartedMs = xrtClock() / UINT64_C(1000);
+            xwork_result eMcpDeadlineResult;
+            uint64_t uElapsedMs;
             xworkToolOutputInit(&tMcpOutput);
-            CHECK(pMcpDeadline && xworkMcpClientCallTool(
-                    pMcpClient, "echo", "{\"delay\":true}", pMcpDeadline,
-                    &tMcpOutput, &tError) == XWORK_RESULT_TIMEOUT &&
+            eMcpDeadlineResult = xworkMcpClientCallTool(
+                pMcpClient, "echo", "{\"delay\":true}", NULL,
+                xrtDeadlineAfter(UINT64_C(100000)), &tMcpOutput, &tError);
+            uElapsedMs = xrtClock() / UINT64_C(1000) - uStartedMs;
+            if ( eMcpDeadlineResult != XWORK_RESULT_TIMEOUT ||
+                 tError.eCode != XWORK_ERROR_TIMEOUT || uElapsedMs >= 2000u ) {
+                fprintf(stderr, "MCP deadline: result=%d error=%d elapsed=%llu message=%s\n",
+                    (int)eMcpDeadlineResult, (int)tError.eCode,
+                    (unsigned long long)uElapsedMs, tError.sMessage);
+            }
+            CHECK(eMcpDeadlineResult == XWORK_RESULT_TIMEOUT &&
                 tError.eCode == XWORK_ERROR_TIMEOUT &&
-                xrtMonotonicMs() - uStartedMs < 2000u,
+                uElapsedMs < 2000u,
                 "MCP tool calls honor operation deadlines and send cancellation promptly");
             xworkToolOutputUnit(&tMcpOutput);
-            xrtContextRelease(pMcpDeadline);
         }
         CHECK(xworkAgentUnregisterToolsBySource(
                 pAgent, "mcp:phase3", &iRemoved, &tError) && iRemoved == 1u &&
@@ -690,7 +697,7 @@ static void test_agent_loop(void)
     CHECK(tPatchOutput.sContent && strstr(tPatchOutput.sContent, "rollback completed"), "failed transaction reports successful rollback");
     xworkToolOutputUnit(&tPatchOutput);
 
-    sFile = (char*)xrtFileReadAll((str)"tests/tmp_xwork/sandbox/note.txt", XRT_CP_UTF8, &iFileSize);
+    sFile = (char*)xrtFileReadAll("tests/tmp_xwork/sandbox/note.txt", &iFileSize);
     CHECK(sFile && iFileSize > 1600u && strncmp(sFile, "PATCHED-", 8u) == 0, "workspace file was created then edited by both edit tools");
     CHECK(xrtFileExists((str)"tests/tmp_xwork/sandbox/extra.txt"), "multi-file patch transaction created its second target");
     CHECK(!xrtFileExists((str)"tests/tmp_xwork/sandbox/note.txt/child.txt"), "failed transaction left no partial target behind");
@@ -771,7 +778,7 @@ static void test_agent_loop(void)
     xworkToolOutputUnit(&tProcessOutput);
 
     if ( tEvents.sLastArtifact[0] ) {
-        sArtifactAbsolute = (char*)xrtPathJoin(2u, sWorkspace, tEvents.sLastArtifact);
+        sArtifactAbsolute = xrtPathJoin(sWorkspace, tEvents.sLastArtifact);
         CHECK(sArtifactAbsolute && xrtFileExists((str)sArtifactAbsolute), "full oversized output artifact exists");
     }
     CHECK(!xrtFileExists((str)"tests/outside.txt"), "workspace escape tool call could not access outside path");
@@ -827,13 +834,13 @@ static void test_agent_loop(void)
     xworkAgentDestroy(pAgent);
 cleanup:
     xworkMcpClientDestroy(pMcpClient);
-    xrtContextRelease(pContext);
+    xrtCancelDestroy(pCancel);
     if ( sFile && iFileSize ) xrtFree(sFile);
     if ( sArtifactAbsolute ) xrtFree(sArtifactAbsolute);
     free(sOld);
     xllmMemoryClose(pMemory);
     xllmSessionDestroy(pSession);
-    (void)xrtDirDelete((str)sWorkspace);
+    (void)xrtDirRemoveAll(sWorkspace);
 }
 
 static void test_readonly_subagent(void)
@@ -849,7 +856,6 @@ static void test_readonly_subagent(void)
     xwork_run_result tResult;
     xwork_error tError;
     subagent_mock tMock;
-    xctx* pContext = NULL;
     xwork_result eResult = XWORK_RESULT_ERROR;
     size_t i;
     memset(&tMock, 0, sizeof(tMock));
@@ -860,27 +866,23 @@ static void test_readonly_subagent(void)
         sEvidence[i] = sMarker[i % (sizeof(sMarker) - 1u)];
     }
     sEvidence[sizeof(sEvidence) - 1u] = '\0';
-    (void)xrtDirDelete((str)sWorkspace);
-    CHECK(xrtDirCreateAll((str)"tests/tmp_xwork_subagent/.xcode") &&
-          xrtFilePutAll((str)"tests/tmp_xwork_subagent/evidence.txt",
-            (ptr)sEvidence, strlen(sEvidence)) == (int)strlen(sEvidence) &&
-          xrtFilePutAll((str)"tests/tmp_xwork_subagent/.xcode/secrets.local.json",
-            (ptr)"private-fixture", strlen("private-fixture")) == (int)strlen("private-fixture"),
+    (void)xrtDirRemoveAll(sWorkspace);
+    CHECK(xrtDirCreateAll("tests/tmp_xwork_subagent/.xcode") &&
+          xrtFileWriteAtomic("tests/tmp_xwork_subagent/evidence.txt",
+            (xbytesview){ (const uint8*)sEvidence, strlen(sEvidence) }) &&
+          xrtFileWriteAtomic("tests/tmp_xwork_subagent/.xcode/secrets.local.json",
+            (xbytesview){ (const uint8*)"private-fixture", strlen("private-fixture") }),
         "read-only subagent workspace and protected internal fixture created");
     xllmSessionConfigInit(&tSessionConfig);
     pSession = xllmSessionCreate(&tSessionConfig, &tLlmError);
-    pContext = xrtContextCreate(NULL);
     xworkAgentConfigInit(&tAgentConfig);
     tAgentConfig.pSession = pSession;
-    tAgentConfig.pContext = pContext;
     tAgentConfig.sWorkspaceRoot = sWorkspace;
     tAgentConfig.OnModelComplete = subagent_complete;
     tAgentConfig.pModelUserData = &tMock;
     tAgentConfig.bRegisterBuiltinTools = false;
     tAgentConfig.iMaxInlineToolBytes = 128u;
     pParent = xworkAgentCreate(&tAgentConfig, &tError);
-    xrtContextRelease(pContext);
-    pContext = NULL;
     CHECK(pSession && pParent && xworkAgentToolCount(pParent) == 0u,
         "parent fixture creates without exposing tools to the child implicitly");
     xworkReadOnlySubagentConfigInit(&tSubagentConfig);
@@ -924,9 +926,8 @@ static void test_readonly_subagent(void)
         "subagent hard turn budget stops an unfinished child deterministically");
     xworkRunResultUnit(&tResult);
     xworkAgentDestroy(pParent);
-    xrtContextRelease(pContext);
     xllmSessionDestroy(pSession);
-    (void)xrtDirDelete((str)sWorkspace);
+    (void)xrtDirRemoveAll(sWorkspace);
 }
 
 static void test_agent_context_deadline(void)
@@ -940,26 +941,22 @@ static void test_agent_context_deadline(void)
     xwork_error tError;
     xwork_run_result tResult;
     mock_model tMock;
-    xctx* pContext = NULL;
     uint64_t uTurnBefore = 0u;
     memset(&tMock, 0, sizeof(tMock));
     memset(&tResult, 0, sizeof(tResult));
-    (void)xrtDirDelete((str)sWorkspace);
+    (void)xrtDirRemoveAll(sWorkspace);
     CHECK(xrtDirCreateAll((str)sWorkspace), "deadline test workspace created");
     xllmSessionConfigInit(&tSessionConfig);
     pSession = xllmSessionCreate(&tSessionConfig, &tLlmError);
-    pContext = xrtContextCreateTimeout(NULL, 0u);
     xworkAgentConfigInit(&tAgentConfig);
     tAgentConfig.pSession = pSession;
-    tAgentConfig.pContext = pContext;
+    tAgentConfig.uDeadline = xrtDeadlineAfter(0u);
     tAgentConfig.sWorkspaceRoot = sWorkspace;
     tAgentConfig.OnModelComplete = mock_complete;
     tAgentConfig.pModelUserData = &tMock;
     pAgent = xworkAgentCreate(&tAgentConfig, &tError);
-    CHECK(pSession && pContext && pAgent, "deadline-scoped agent creates");
+    CHECK(pSession && pAgent, "deadline-scoped agent creates");
     if ( pSession ) uTurnBefore = xllmSessionCurrentTurn(pSession);
-    xrtContextRelease(pContext);
-    pContext = NULL;
     if ( pAgent ) {
         CHECK(xworkAgentRun(pAgent, "This prompt must not be appended.", &tResult, &tError) == XWORK_RESULT_TIMEOUT &&
             tError.eCode == XWORK_ERROR_TIMEOUT && tMock.uAgentCalls == 0u &&
@@ -968,9 +965,8 @@ static void test_agent_context_deadline(void)
     }
     xworkRunResultUnit(&tResult);
     xworkAgentDestroy(pAgent);
-    xrtContextRelease(pContext);
     xllmSessionDestroy(pSession);
-    (void)xrtDirDelete((str)sWorkspace);
+    (void)xrtDirRemoveAll(sWorkspace);
 }
 
 static void test_command_context_deadline(void)
@@ -983,7 +979,6 @@ static void test_command_context_deadline(void)
     xwork_agent* pAgent = NULL;
     xwork_error tError;
     mock_model tMock;
-    xctx* pContext = NULL;
     const xwork_tool_entry* pExecTool;
     xwork_tool_context tToolContext;
     xwork_tool_output tOutput;
@@ -992,25 +987,22 @@ static void test_command_context_deadline(void)
     uint64_t uElapsedMs;
     memset(&tMock, 0, sizeof(tMock));
     memset(&tToolContext, 0, sizeof(tToolContext));
-    (void)xrtDirDelete((str)sWorkspace);
+    (void)xrtDirRemoveAll(sWorkspace);
     CHECK(xrtDirCreateAll((str)sWorkspace), "command deadline test workspace created");
     xllmSessionConfigInit(&tSessionConfig);
     pSession = xllmSessionCreate(&tSessionConfig, &tLlmError);
-    pContext = xrtContextCreateTimeout(NULL, 300u);
     xworkAgentConfigInit(&tAgentConfig);
     tAgentConfig.pSession = pSession;
-    tAgentConfig.pContext = pContext;
+    tAgentConfig.uDeadline = xrtDeadlineAfter(UINT64_C(300000));
     tAgentConfig.sWorkspaceRoot = sWorkspace;
     tAgentConfig.OnModelComplete = mock_complete;
     tAgentConfig.pModelUserData = &tMock;
     pAgent = xworkAgentCreate(&tAgentConfig, &tError);
-    xrtContextRelease(pContext);
-    pContext = NULL;
     pExecTool = pAgent ? xwork__find_tool(pAgent, "exec_command") : NULL;
     tToolContext.pAgent = pAgent;
     tToolContext.sWorkspaceRoot = sWorkspace;
     xworkToolOutputInit(&tOutput);
-    uStartedMs = xrtMonotonicMs();
+    uStartedMs = xrtClock() / UINT64_C(1000);
 #if defined(_WIN32)
     if ( pExecTool ) eResult = pExecTool->OnExecute(pExecTool->pUserData, &tToolContext,
         "{\"command\":\"ping -n 6 127.0.0.1 >nul\",\"timeout_ms\":5000}", &tOutput, &tError);
@@ -1018,15 +1010,14 @@ static void test_command_context_deadline(void)
     if ( pExecTool ) eResult = pExecTool->OnExecute(pExecTool->pUserData, &tToolContext,
         "{\"command\":\"sleep 5\",\"timeout_ms\":5000}", &tOutput, &tError);
 #endif
-    uElapsedMs = xrtMonotonicMs() - uStartedMs;
+    uElapsedMs = xrtClock() / UINT64_C(1000) - uStartedMs;
     CHECK(pAgent && pExecTool && eResult == XWORK_RESULT_TIMEOUT &&
         tError.eCode == XWORK_ERROR_TIMEOUT && uElapsedMs < 3000u,
         "operation deadline interrupts a long command without waiting for tool timeout");
     xworkToolOutputUnit(&tOutput);
     xworkAgentDestroy(pAgent);
-    xrtContextRelease(pContext);
     xllmSessionDestroy(pSession);
-    (void)xrtDirDelete((str)sWorkspace);
+    (void)xrtDirRemoveAll(sWorkspace);
 }
 
 static int run_mcp_test_server(void)
@@ -1057,17 +1048,11 @@ int main(int argc, char** argv)
     }
     g_sSelfPath = argc > 0 ? argv[0] : NULL;
     printf("xwork v2 tests\n");
-    if ( !xrtInit() ) {
-        fprintf(stderr, "xrtInit failed\n");
-        return 1;
-    }
     test_process_text_normalization();
     test_agent_context_deadline();
     test_command_context_deadline();
     test_readonly_subagent();
     test_agent_loop();
-    xrtNetSyncShutdownHiddenEngine();
-    xrtUnit();
     printf("xwork v2: %s (%d failures)\n", g_iFailures ? "FAIL" : "PASS", g_iFailures);
     return g_iFailures ? 1 : 0;
 }

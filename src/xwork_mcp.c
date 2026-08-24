@@ -35,8 +35,10 @@ struct xwork_mcp_client {
     bool bTrustReadOnlyAnnotations;
     bool bConnected;
     bool bServerSupportsToolListChanges;
-    xctx* pContext;
+    xcancel* pCancel;
+    uint64_t uDeadline;
     xprocess* pProcess;
+    xwork_process_capture* pCapture;
     uint64_t uStdoutOffset;
     uint64_t uNextRequestId;
     uint64_t uRequestsCompleted;
@@ -92,37 +94,42 @@ static void xwork__mcp_tools_unit(xwork_mcp_tool_proxy* pTools, size_t iCount)
 static void xwork__mcp_process_unit(xwork_mcp_client* pClient)
 {
     if ( !pClient || !pClient->pProcess ) return;
-    (void)xrtProcessCloseStdin(pClient->pProcess);
-    if ( xrtProcessWaitTimeout(pClient->pProcess, 200u) == XRT_WAIT_TIMEOUT ) {
+    (void)xrtProcessClose(pClient->pProcess, XPROCESS_STDIN);
+    if ( xrtProcessWaitFor(pClient->pProcess, UINT64_C(200000)) == XWAIT_TIMEOUT ) {
         (void)xrtProcessKillTree(pClient->pProcess);
         (void)xrtProcessWait(pClient->pProcess);
     }
+    xwork__process_capture_destroy(pClient->pCapture);
+    pClient->pCapture = NULL;
     xrtProcessDestroy(pClient->pProcess);
     pClient->pProcess = NULL;
     pClient->bConnected = false;
 }
 
-static void xwork__mcp_set_context_error(xwork_error* pError, xctx_status eStatus)
+static void xwork__mcp_set_context_error(xwork_error* pError, xwork_operation_status eStatus)
 {
-    if ( eStatus == XCTX_DEADLINE_EXCEEDED ) {
+    if ( eStatus == XWORK_OPERATION_TIMED_OUT ) {
         xwork__set_error(pError, XWORK_ERROR_TIMEOUT, "MCP request deadline exceeded");
     } else {
         xwork__set_error(pError, XWORK_ERROR_CANCELLED, "MCP request cancelled");
     }
 }
 
-static xctx_status xwork__mcp_context_status(
+static xwork_operation_status xwork__mcp_context_status(
     const xwork_mcp_client* pClient,
-    const xctx* pOperationContext
+    const xcancel* pOperationCancel,
+    uint64_t uOperationDeadline
 )
 {
-    xctx_status eStatus;
-    if ( pOperationContext ) {
-        eStatus = xrtContextStatus(pOperationContext);
-        if ( eStatus != XCTX_ACTIVE ) return eStatus;
-    }
-    if ( pClient && pClient->pContext ) return xrtContextStatus(pClient->pContext);
-    return XCTX_ACTIVE;
+    if ( pOperationCancel && xrtCancelRequested(pOperationCancel) )
+        return XWORK_OPERATION_CANCELLED;
+    if ( pClient && pClient->pCancel && xrtCancelRequested(pClient->pCancel) )
+        return XWORK_OPERATION_CANCELLED;
+    if ( uOperationDeadline != XRT_DEADLINE_NEVER && xrtDeadlineExpired(uOperationDeadline) )
+        return XWORK_OPERATION_TIMED_OUT;
+    if ( pClient && pClient->uDeadline != XRT_DEADLINE_NEVER &&
+         xrtDeadlineExpired(pClient->uDeadline) ) return XWORK_OPERATION_TIMED_OUT;
+    return XWORK_OPERATION_ACTIVE;
 }
 
 static bool xwork__mcp_write_all(xwork_mcp_client* pClient, const char* sData, size_t iSize)
@@ -181,29 +188,33 @@ static char* xwork__mcp_take_line(xwork_mcp_client* pClient)
 static char* xwork__mcp_stderr_tail(xwork_mcp_client* pClient)
 {
     size_t iSize = 0u;
-    char* sData = (char*)xrtProcessGetStderr(pClient->pProcess, &iSize);
+    uint64_t uBase = 0u;
+    uint64_t uNext = 0u;
+    char* sData = (char*)xwork__process_capture_since(
+        pClient->pCapture, true, 0u, SIZE_MAX, &iSize, &uBase, &uNext);
     char* sTail;
     size_t iStart = iSize > 2048u ? iSize - 2048u : 0u;
-    if ( !sData || !iSize ) { if ( sData ) xrtFree(sData); return NULL; }
+    if ( !sData || !iSize ) { free(sData); return NULL; }
     sTail = (char*)malloc(iSize - iStart + 1u);
     if ( sTail ) {
         memcpy(sTail, sData + iStart, iSize - iStart);
         sTail[iSize - iStart] = '\0';
     }
-    xrtFree(sData);
+    free(sData);
     return sTail;
 }
 
 static char* xwork__mcp_read_message(
     xwork_mcp_client* pClient,
-    const xctx* pOperationContext,
+    const xcancel* pOperationCancel,
+    uint64_t uOperationDeadline,
     uint64_t uDeadlineMs,
     xwork_error* pError
 )
 {
     for ( ;; ) {
         char* sLine = xwork__mcp_take_line(pClient);
-        xctx_status eContextStatus;
+        xwork_operation_status eContextStatus;
         if ( sLine ) {
             if ( !sLine[0] ) {
                 free(sLine);
@@ -219,43 +230,45 @@ static char* xwork__mcp_read_message(
         }
         {
             size_t iSize = 0u;
-            xprocessreadinfo tReadInfo;
             char* sChunk;
-            memset(&tReadInfo, 0, sizeof(tReadInfo));
-            sChunk = (char*)xrtProcessReadStdoutSince(
-                pClient->pProcess,
+            uint64_t uBaseOffset = 0u;
+            uint64_t uNextOffset = pClient->uStdoutOffset;
+            sChunk = (char*)xwork__process_capture_since(
+                pClient->pCapture, false,
                 pClient->uStdoutOffset,
                 pClient->iMaxMessageBytes + 1u,
                 &iSize,
-                &tReadInfo
+                &uBaseOffset,
+                &uNextOffset
             );
-            if ( tReadInfo.iBaseOffset > pClient->uStdoutOffset ) {
-                if ( sChunk ) xrtFree(sChunk);
+            if ( uBaseOffset > pClient->uStdoutOffset ) {
+                free(sChunk);
                 xwork__set_error(pError, XWORK_ERROR_IO, "MCP stdout capture was truncated");
                 return NULL;
             }
-            pClient->uStdoutOffset = tReadInfo.iNextOffset;
+            pClient->uStdoutOffset = uNextOffset;
             if ( sChunk && iSize ) {
                 bool bAppended = xwork__buf_append(&pClient->tReadBuffer, sChunk, iSize);
-                xrtFree(sChunk);
+                free(sChunk);
                 if ( !bAppended ) {
                     xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to buffer MCP response");
                     return NULL;
                 }
                 continue;
             }
-            if ( sChunk ) xrtFree(sChunk);
+            free(sChunk);
         }
-        eContextStatus = xwork__mcp_context_status(pClient, pOperationContext);
-        if ( eContextStatus != XCTX_ACTIVE ) {
+        eContextStatus = xwork__mcp_context_status(
+            pClient, pOperationCancel, uOperationDeadline);
+        if ( eContextStatus != XWORK_OPERATION_ACTIVE ) {
             xwork__mcp_set_context_error(pError, eContextStatus);
             return NULL;
         }
-        if ( xrtMonotonicMs() >= uDeadlineMs ) {
+        if ( xrtClock() / UINT64_C(1000) >= uDeadlineMs ) {
             xwork__set_error(pError, XWORK_ERROR_TIMEOUT, "MCP request timed out");
             return NULL;
         }
-        if ( !xrtProcessIsRunning(pClient->pProcess) ) {
+        if ( !xwork__process_running(pClient->pProcess) ) {
             char* sTail = xwork__mcp_stderr_tail(pClient);
             if ( sTail && sTail[0] ) {
                 snprintf(pError->sMessage, sizeof(pError->sMessage),
@@ -280,21 +293,23 @@ static void xwork__mcp_cancel_request(xwork_mcp_client* pClient, uint64_t uReque
     (void)xwork__mcp_send_notification(pClient, "notifications/cancelled", sParams);
 }
 
-static xvalue xwork__mcp_request(
+static xvalue* xwork__mcp_request(
     xwork_mcp_client* pClient,
     const char* sMethod,
     const char* sParamsJson,
-    const xctx* pOperationContext,
+    const xcancel* pOperationCancel,
+    uint64_t uOperationDeadline,
     bool bCancellable,
     xwork_error* pError
 )
 {
     xwork_buf tWire = {0};
     uint64_t uRequestId = ++pClient->uNextRequestId;
-    uint64_t uStartedMs = xrtMonotonicMs();
+    uint64_t uStartedMs = xrtClock() / UINT64_C(1000);
     uint64_t uDeadlineMs = uStartedMs + pClient->uRequestTimeoutMs;
-    xctx_status eContextStatus = xwork__mcp_context_status(pClient, pOperationContext);
-    if ( eContextStatus != XCTX_ACTIVE ) {
+    xwork_operation_status eContextStatus = xwork__mcp_context_status(
+        pClient, pOperationCancel, uOperationDeadline);
+    if ( eContextStatus != XWORK_OPERATION_ACTIVE ) {
         xwork__mcp_set_context_error(pError, eContextStatus);
         return NULL;
     }
@@ -316,10 +331,11 @@ static xvalue xwork__mcp_request(
     xwork__buf_unit(&tWire);
     for ( ;; ) {
         char* sMessage = xwork__mcp_read_message(
-            pClient, pOperationContext, uDeadlineMs, pError);
-        xvalue tRoot;
-        xvalue tId;
-        xvalue tError;
+            pClient, pOperationCancel, uOperationDeadline, uDeadlineMs, pError);
+        xvalue* tRoot;
+        xvalue* tId;
+        xvalue* tError;
+        int64 iId = -1;
         const char* sJsonRpc;
         if ( !sMessage ) {
             if ( bCancellable && (pError->eCode == XWORK_ERROR_CANCELLED ||
@@ -328,17 +344,17 @@ static xvalue xwork__mcp_request(
             }
             return NULL;
         }
-        tRoot = xrtParseJSON((str)sMessage, strlen(sMessage));
+        tRoot = xrtJsonParse((xstrview){ sMessage, strlen(sMessage) });
         free(sMessage);
-        if ( !tRoot || !xvoIsTable(tRoot) ) {
-            if ( tRoot ) xvoUnref(tRoot);
+        if ( !tRoot || xrtValueType(tRoot) != XVALUE_OBJECT ) {
+            if ( tRoot ) xrtValueRelease(tRoot);
             xwork__set_error(pError, XWORK_ERROR_TOOL,
                 "MCP stdout contained a non-object JSON-RPC message");
             return NULL;
         }
         sJsonRpc = xwork__json_text(tRoot, "jsonrpc");
         if ( !sJsonRpc || strcmp(sJsonRpc, "2.0") != 0 ) {
-            xvoUnref(tRoot);
+            xrtValueRelease(tRoot);
             xwork__set_error(pError, XWORK_ERROR_TOOL, "MCP response has an invalid jsonrpc version");
             return NULL;
         }
@@ -346,12 +362,12 @@ static xvalue xwork__mcp_request(
         if ( !tId ) {
             /* Notifications are asynchronous and may legally interleave a
              * response. list_changed is reflected in the next explicit refresh. */
-            xvoUnref(tRoot);
+            xrtValueRelease(tRoot);
             continue;
         }
-        if ( !xvoIsNumber(tId) || xvoGetInt(tId) < 0 ||
-             (uint64_t)xvoGetInt(tId) != uRequestId ) {
-            xvoUnref(tRoot);
+        if ( !xrtValueGetInt(tId, &iId) || iId < 0 ||
+             (uint64_t)iId != uRequestId ) {
+            xrtValueRelease(tRoot);
             continue;
         }
         tError = xwork__json_get(tRoot, "error");
@@ -360,11 +376,11 @@ static xvalue xwork__mcp_request(
             snprintf(pError->sMessage, sizeof(pError->sMessage),
                 "MCP protocol error: %.900s", sRemoteMessage ? sRemoteMessage : "unknown error");
             pError->eCode = XWORK_ERROR_TOOL;
-            xvoUnref(tRoot);
+            xrtValueRelease(tRoot);
             return NULL;
         }
         if ( !xwork__json_get(tRoot, "result") ) {
-            xvoUnref(tRoot);
+            xrtValueRelease(tRoot);
             xwork__set_error(pError, XWORK_ERROR_TOOL, "MCP response has neither result nor error");
             return NULL;
         }
@@ -443,14 +459,14 @@ static bool xwork__mcp_append_proxy(
     xwork_mcp_tool_proxy** ppTools,
     size_t* piCount,
     size_t* piCap,
-    xvalue tTool,
+    xvalue* tTool,
     xwork_error* pError
 )
 {
     const char* sRemoteName = xwork__json_text(tTool, "name");
     const char* sDescription = xwork__json_text(tTool, "description");
-    xvalue tSchema = xwork__json_get(tTool, "inputSchema");
-    xvalue tAnnotations = xwork__json_get(tTool, "annotations");
+    xvalue* tSchema = xwork__json_get(tTool, "inputSchema");
+    xvalue* tAnnotations = xwork__json_get(tTool, "annotations");
     xwork_mcp_tool_proxy* pProxy;
     xwork_mcp_tool_proxy* pNew;
     char* sSchema = NULL;
@@ -458,7 +474,8 @@ static bool xwork__mcp_append_proxy(
     bool bReadOnly = false;
     bool bValid = true;
     uint32_t uSalt = 0u;
-    if ( !sRemoteName || !sRemoteName[0] || !tSchema || !xvoIsTable(tSchema) ) {
+    if ( !sRemoteName || !sRemoteName[0] || !tSchema ||
+         xrtValueType(tSchema) != XVALUE_OBJECT ) {
         xwork__set_error(pError, XWORK_ERROR_TOOL,
             "MCP tools/list returned a tool without a name or object inputSchema");
         return false;
@@ -488,7 +505,7 @@ static bool xwork__mcp_append_proxy(
     pProxy->pClient = pClient;
     pProxy->sRemoteName = xwork__strdup(sRemoteName);
     pProxy->sDescription = xwork__strdup(sDescription ? sDescription : "MCP tool");
-    sSchema = (char*)xrtStringifyJSON(tSchema, 0, &iSchema);
+    sSchema = xrtJsonStringify(tSchema, NULL, &iSchema);
     if ( sSchema ) pProxy->sParametersJson = xwork__strdup(sSchema);
     if ( sSchema ) xrtFree(sSchema);
     pProxy->sWireName = xwork__mcp_wire_name(pClient->sServerName, sRemoteName, 0u);
@@ -497,7 +514,8 @@ static bool xwork__mcp_append_proxy(
         uSalt = xwork__mcp_name_hash(sRemoteName);
         pProxy->sWireName = xwork__mcp_wire_name(pClient->sServerName, sRemoteName, uSalt);
     }
-    if ( pClient->bTrustReadOnlyAnnotations && tAnnotations && xvoIsTable(tAnnotations) ) {
+    if ( pClient->bTrustReadOnlyAnnotations && tAnnotations &&
+         xrtValueType(tAnnotations) == XVALUE_OBJECT ) {
         bReadOnly = xwork__json_bool(tAnnotations, "readOnlyHint", false, &bValid);
     }
     pProxy->eEffect = bValid && bReadOnly
@@ -524,9 +542,9 @@ static bool xwork__mcp_discover_tools(
     uint32_t uPages = 0u;
     for ( ;; ) {
         xwork_buf tParams = {0};
-        xvalue tRoot = NULL;
-        xvalue tResult;
-        xvalue tTools;
+        xvalue* tRoot = NULL;
+        xvalue* tResult;
+        xvalue* tTools;
         const char* sNextCursor;
         uint32_t i;
         bool bOk;
@@ -542,41 +560,43 @@ static bool xwork__mcp_discover_tools(
             xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to build tools/list request");
             return false;
         }
-        tRoot = xwork__mcp_request(pClient, "tools/list", tParams.pData, NULL, true, pError);
+        tRoot = xwork__mcp_request(pClient, "tools/list", tParams.pData,
+            NULL, XRT_DEADLINE_NEVER, true, pError);
         xwork__buf_unit(&tParams);
         if ( !tRoot ) { free(sCursor); return false; }
         tResult = xwork__json_get(tRoot, "result");
         tTools = xwork__json_get(tResult, "tools");
-        if ( !tResult || !xvoIsTable(tResult) || !tTools || !xvoIsArray(tTools) ) {
-            xvoUnref(tRoot);
+        if ( !tResult || xrtValueType(tResult) != XVALUE_OBJECT || !tTools ||
+             xrtValueType(tTools) != XVALUE_ARRAY ) {
+            xrtValueRelease(tRoot);
             free(sCursor);
             xwork__set_error(pError, XWORK_ERROR_TOOL, "MCP tools/list result has no tools array");
             return false;
         }
-        for ( i = 0u; i < xvoArrayItemCount(tTools); ++i ) {
-            xvalue tTool = xvoArrayGetValue(tTools, i);
-            if ( !tTool || !xvoIsTable(tTool) ||
+        for ( i = 0u; i < xrtValueCount(tTools); ++i ) {
+            xvalue* tTool = xrtValueArrayGet(tTools, i);
+            if ( !tTool || xrtValueType(tTool) != XVALUE_OBJECT ||
                  !xwork__mcp_append_proxy(pClient, ppTools, piCount, piCap, tTool, pError) ) {
-                xvoUnref(tRoot);
+                xrtValueRelease(tRoot);
                 free(sCursor);
                 return false;
             }
         }
         sNextCursor = xwork__json_text(tResult, "nextCursor");
         if ( !sNextCursor || !sNextCursor[0] ) {
-            xvoUnref(tRoot);
+            xrtValueRelease(tRoot);
             free(sCursor);
             return true;
         }
         if ( sCursor && strcmp(sCursor, sNextCursor) == 0 ) {
-            xvoUnref(tRoot);
+            xrtValueRelease(tRoot);
             free(sCursor);
             xwork__set_error(pError, XWORK_ERROR_TOOL, "MCP tools/list repeated its pagination cursor");
             return false;
         }
         {
             char* sCopy = xwork__strdup(sNextCursor);
-            xvoUnref(tRoot);
+            xrtValueRelease(tRoot);
             if ( !sCopy ) {
                 free(sCursor);
                 xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to copy MCP cursor");
@@ -602,11 +622,13 @@ static xwork_result xwork__mcp_tool_execute(
 )
 {
     xwork_mcp_tool_proxy* pProxy = (xwork_mcp_tool_proxy*)pUserData;
-    xctx* pOperationContext = pContext && pContext->pAgent
-        ? pContext->pAgent->pContext : NULL;
+    xcancel* pOperationCancel = pContext && pContext->pAgent
+        ? pContext->pAgent->pCancel : NULL;
+    uint64_t uOperationDeadline = pContext && pContext->pAgent
+        ? pContext->pAgent->uDeadline : XRT_DEADLINE_NEVER;
     return xworkMcpClientCallTool(
         pProxy->pClient, pProxy->sRemoteName, sArgumentsJson,
-        pOperationContext, pOutput, pError);
+        pOperationCancel, uOperationDeadline, pOutput, pError);
 }
 
 void xworkMcpStdioConfigInit(xwork_mcp_stdio_config* pConfig)
@@ -618,6 +640,7 @@ void xworkMcpStdioConfigInit(xwork_mcp_stdio_config* pConfig)
     pConfig->iMaxMessageBytes = XWORK_MCP_MESSAGE_DEFAULT;
     pConfig->iMaxTools = XWORK_MCP_TOOLS_DEFAULT;
     pConfig->eDefaultToolEffect = XWORK_TOOL_EFFECT_PROCESS;
+    pConfig->uDeadline = XRT_DEADLINE_NEVER;
 }
 
 xwork_mcp_client* xworkMcpClientCreate(
@@ -671,12 +694,12 @@ xwork_mcp_client* xworkMcpClientCreate(
     pClient->iMaxTools = pConfig->iMaxTools ? pConfig->iMaxTools : XWORK_MCP_TOOLS_DEFAULT;
     pClient->eDefaultToolEffect = pConfig->eDefaultToolEffect;
     pClient->bTrustReadOnlyAnnotations = pConfig->bTrustReadOnlyAnnotations;
-    pClient->pContext = pConfig->pContext ? xrtContextAddRef(pConfig->pContext) : NULL;
+    pClient->pCancel = pConfig->pCancel;
+    pClient->uDeadline = pConfig->uDeadline;
     if ( !pClient->sServerName || !pClient->sProgram || !pClient->sRequestedProtocolVersion ||
          !pClient->sToolSource ||
          (pConfig->sWorkingDirectory && pConfig->sWorkingDirectory[0] && !pClient->sWorkingDirectory) ||
          (pClient->iArgumentCount && (!pClient->psArguments || i != pClient->iArgumentCount)) ||
-         (pConfig->pContext && !pClient->pContext) ||
          pClient->iMaxMessageBytes < 1024u || pClient->iMaxTools == 0u ) {
         xworkMcpClientDestroy(pClient);
         xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to copy MCP configuration");
@@ -688,10 +711,10 @@ xwork_mcp_client* xworkMcpClientCreate(
 bool xworkMcpClientConnect(xwork_mcp_client* pClient, xwork_error* pError)
 {
     xprocessconfig tConfig;
-    xvalue tRoot = NULL;
-    xvalue tResult;
-    xvalue tCapabilities;
-    xvalue tToolsCapability;
+    xvalue* tRoot = NULL;
+    xvalue* tResult;
+    xvalue* tCapabilities;
+    xvalue* tToolsCapability;
     const char* sProtocol;
     bool bValid = true;
     xwork_buf tParams = {0};
@@ -711,22 +734,27 @@ bool xworkMcpClientConnect(xwork_mcp_client* pClient, xwork_error* pError)
     pClient->uNextRequestId = 0u;
     pClient->tReadBuffer.iLen = 0u;
     xrtProcessConfigInit(&tConfig);
-    tConfig.sProgram = (str)pClient->sProgram;
-    tConfig.arrArgs = (str*)pClient->psArguments;
-    tConfig.iArgCount = (uint32_t)pClient->iArgumentCount;
-    tConfig.sWorkDir = (str)pClient->sWorkingDirectory;
-    tConfig.bHideWindow = true;
-    tConfig.bCreateProcessGroup = true;
-    tConfig.iMaxCaptureBytes = pClient->iMaxMessageBytes <= SIZE_MAX / 4u
-        ? pClient->iMaxMessageBytes * 4u : pClient->iMaxMessageBytes;
-    tConfig.Stdin.iMode = XPROC_STDIO_PIPE;
-    tConfig.Stdout.iMode = XPROC_STDIO_PIPE;
-    tConfig.Stdout.bCapture = true;
-    tConfig.Stderr.iMode = XPROC_STDIO_PIPE;
-    tConfig.Stderr.bCapture = true;
+    tConfig.Program = pClient->sProgram;
+    tConfig.Args = (const cstr*)pClient->psArguments;
+    tConfig.ArgCount = pClient->iArgumentCount;
+    tConfig.WorkDir = pClient->sWorkingDirectory;
+    tConfig.HideWindow = true;
+    tConfig.NewGroup = true;
+    tConfig.Stdin.Mode = XPROCESS_IO_PIPE;
+    tConfig.Stdout.Mode = XPROCESS_IO_PIPE;
+    tConfig.Stderr.Mode = XPROCESS_IO_PIPE;
     pClient->pProcess = xrtProcessSpawn(&tConfig);
     if ( !pClient->pProcess ) {
         xwork__set_error(pError, XWORK_ERROR_IO, "failed to start MCP stdio server");
+        goto cleanup;
+    }
+    pClient->pCapture = xwork__process_capture_create(pClient->pProcess,
+        pClient->iMaxMessageBytes <= SIZE_MAX / 4u
+            ? pClient->iMaxMessageBytes * 4u : pClient->iMaxMessageBytes,
+        true);
+    if ( !pClient->pCapture ) {
+        xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY,
+            "failed to create MCP output capture");
         goto cleanup;
     }
     if ( !xwork__buf_append_cstr(&tParams, "{\"protocolVersion\":") ||
@@ -736,15 +764,16 @@ bool xworkMcpClientConnect(xwork_mcp_client* pClient, xwork_error* pError)
         xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to build MCP initialize request");
         goto cleanup;
     }
-    tRoot = xwork__mcp_request(pClient, "initialize", tParams.pData, NULL, false, pError);
+    tRoot = xwork__mcp_request(pClient, "initialize", tParams.pData,
+        NULL, XRT_DEADLINE_NEVER, false, pError);
     if ( !tRoot ) goto cleanup;
     tResult = xwork__json_get(tRoot, "result");
     sProtocol = xwork__json_text(tResult, "protocolVersion");
     tCapabilities = xwork__json_get(tResult, "capabilities");
     tToolsCapability = xwork__json_get(tCapabilities, "tools");
-    if ( !tResult || !xvoIsTable(tResult) || !sProtocol || !sProtocol[0] ||
-         !tCapabilities || !xvoIsTable(tCapabilities) ||
-         !tToolsCapability || !xvoIsTable(tToolsCapability) ) {
+    if ( !tResult || xrtValueType(tResult) != XVALUE_OBJECT || !sProtocol || !sProtocol[0] ||
+         !tCapabilities || xrtValueType(tCapabilities) != XVALUE_OBJECT ||
+         !tToolsCapability || xrtValueType(tToolsCapability) != XVALUE_OBJECT ) {
         xwork__set_error(pError, XWORK_ERROR_TOOL,
             "MCP initialize response lacks protocolVersion or tools capability");
         goto cleanup;
@@ -767,7 +796,7 @@ bool xworkMcpClientConnect(xwork_mcp_client* pClient, xwork_error* pError)
     bOk = true;
 
 cleanup:
-    if ( tRoot ) xvoUnref(tRoot);
+    if ( tRoot ) xrtValueRelease(tRoot);
     xwork__buf_unit(&tParams);
     if ( !bOk ) xwork__mcp_process_unit(pClient);
     xwork__mcp_unlock(pClient);
@@ -854,16 +883,17 @@ xwork_result xworkMcpClientCallTool(
     xwork_mcp_client* pClient,
     const char* sRemoteToolName,
     const char* sArgumentsJson,
-    xctx* pContext,
+    xcancel* pCancel,
+    uint64_t uDeadline,
     xwork_tool_output* pOutput,
     xwork_error* pError
 )
 {
-    xvalue tArguments = NULL;
-    xvalue tRoot = NULL;
-    xvalue tResult;
-    xvalue tContent;
-    xvalue tStructured;
+    xvalue* tArguments = NULL;
+    xvalue* tRoot = NULL;
+    xvalue* tResult;
+    xvalue* tContent;
+    xvalue* tStructured;
     xwork_buf tParams = {0};
     xwork_buf tRendered = {0};
     bool bIsError = false;
@@ -885,11 +915,11 @@ xwork_result xworkMcpClientCallTool(
             ? XWORK_RESULT_OK : XWORK_RESULT_ERROR;
     }
     if ( !xwork__mcp_try_lock(pClient) ) {
-        xvoUnref(tArguments);
+        xrtValueRelease(tArguments);
         return xworkToolOutputSet(pOutput, false, "MCP client is busy")
             ? XWORK_RESULT_OK : XWORK_RESULT_ERROR;
     }
-    sCompactArguments = (char*)xrtStringifyJSON(tArguments, 0, &iCompactArguments);
+    sCompactArguments = xrtJsonStringify(tArguments, NULL, &iCompactArguments);
     if ( !sCompactArguments ) {
         xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY,
             "failed to normalize MCP tool arguments");
@@ -903,7 +933,8 @@ xwork_result xworkMcpClientCallTool(
         xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to build MCP tools/call request");
         goto cleanup;
     }
-    tRoot = xwork__mcp_request(pClient, "tools/call", tParams.pData, pContext, true, pError);
+    tRoot = xwork__mcp_request(pClient, "tools/call", tParams.pData,
+        pCancel, uDeadline, true, pError);
     if ( !tRoot ) {
         if ( pError->eCode == XWORK_ERROR_CANCELLED ) { eResult = XWORK_RESULT_CANCELLED; goto cleanup; }
         if ( pError->eCode == XWORK_ERROR_TIMEOUT ) { eResult = XWORK_RESULT_TIMEOUT; goto cleanup; }
@@ -919,7 +950,8 @@ xwork_result xworkMcpClientCallTool(
     tResult = xwork__json_get(tRoot, "result");
     tContent = xwork__json_get(tResult, "content");
     tStructured = xwork__json_get(tResult, "structuredContent");
-    if ( !tResult || !xvoIsTable(tResult) || !tContent || !xvoIsArray(tContent) ) {
+    if ( !tResult || xrtValueType(tResult) != XVALUE_OBJECT || !tContent ||
+         xrtValueType(tContent) != XVALUE_ARRAY ) {
         if ( !xworkToolOutputSet(pOutput, false,
                 "MCP tools/call result has no content array") ) goto cleanup;
         eResult = XWORK_RESULT_OK;
@@ -931,16 +963,17 @@ xwork_result xworkMcpClientCallTool(
         eResult = XWORK_RESULT_OK;
         goto cleanup;
     }
-    for ( i = 0u; i < xvoArrayItemCount(tContent); ++i ) {
-        xvalue tBlock = xvoArrayGetValue(tContent, i);
+    for ( i = 0u; i < xrtValueCount(tContent); ++i ) {
+        xvalue* tBlock = xrtValueArrayGet(tContent, i);
         const char* sType = xwork__json_text(tBlock, "type");
         const char* sText = xwork__json_text(tBlock, "text");
         if ( i && !xwork__buf_append_char(&tRendered, '\n') ) goto oom;
-        if ( tBlock && xvoIsTable(tBlock) && sType && strcmp(sType, "text") == 0 && sText ) {
+        if ( tBlock && xrtValueType(tBlock) == XVALUE_OBJECT &&
+             sType && strcmp(sType, "text") == 0 && sText ) {
             if ( !xwork__buf_append_cstr(&tRendered, sText) ) goto oom;
         } else {
             size_t iJson = 0u;
-            char* sJson = tBlock ? (char*)xrtStringifyJSON(tBlock, 0, &iJson) : NULL;
+            char* sJson = tBlock ? xrtJsonStringify(tBlock, NULL, &iJson) : NULL;
             if ( !sJson || !xwork__buf_append_cstr(&tRendered, "[MCP content] ") ||
                  !xwork__buf_append(&tRendered, sJson, iJson) ) {
                 if ( sJson ) xrtFree(sJson);
@@ -951,7 +984,7 @@ xwork_result xworkMcpClientCallTool(
     }
     if ( tStructured ) {
         size_t iJson = 0u;
-        char* sJson = (char*)xrtStringifyJSON(tStructured, 0, &iJson);
+        char* sJson = xrtJsonStringify(tStructured, NULL, &iJson);
         if ( !sJson ||
              (tRendered.iLen && !xwork__buf_append_cstr(&tRendered, "\n")) ||
              !xwork__buf_append_cstr(&tRendered, "structured_content: ") ||
@@ -971,8 +1004,8 @@ oom:
 
 cleanup:
     if ( sCompactArguments ) xrtFree(sCompactArguments);
-    if ( tRoot ) xvoUnref(tRoot);
-    if ( tArguments ) xvoUnref(tArguments);
+    if ( tRoot ) xrtValueRelease(tRoot);
+    if ( tArguments ) xrtValueRelease(tArguments);
     xwork__buf_unit(&tParams);
     xwork__buf_unit(&tRendered);
     xwork__mcp_unlock(pClient);
@@ -1009,6 +1042,5 @@ void xworkMcpClientDestroy(xwork_mcp_client* pClient)
     free(pClient->sNegotiatedProtocolVersion);
     free(pClient->sToolSource);
     xwork__buf_unit(&pClient->tReadBuffer);
-    xrtContextRelease(pClient->pContext);
     free(pClient);
 }

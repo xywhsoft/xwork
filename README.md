@@ -104,7 +104,8 @@ xwork_run_result result = {0};
 xworkAgentConfigInit(&config);
 config.pClient = client;
 config.pSession = session;
-config.pContext = operation_context;
+config.pCancel = operation_cancel;
+config.uDeadline = xrtDeadlineAfter(UINT64_C(120000000));
 config.sWorkspaceRoot = "D:/GIT/project";
 config.sSessionPath = "D:/GIT/project/.xcode/session.json";
 config.eApprovalMode = XWORK_APPROVAL_AUTO;
@@ -144,7 +145,7 @@ annotations are untrusted by default. A host may opt into `readOnlyHint` only
 for a trusted server; otherwise every proxy retains the configured conservative
 effect used by approval and permission policy.
 
-When `config.pContext` is non-NULL, the agent retains it until destruction and passes it to every normal and compaction model request. `xworkAgentCancel()` also cancels this context. A cancelled scope returns `XWORK_RESULT_CANCELLED`; an expired deadline returns `XWORK_RESULT_TIMEOUT` and `XWORK_ERROR_TIMEOUT`, including during provider transport, retry backoff, or a long `exec_command`. Scoped command waits interrupt, terminate, and finally kill the process tree instead of waiting for the tool timeout.
+`config.pCancel` is borrowed and must outlive the agent. The agent creates a child token and passes it, together with the absolute monotonic `config.uDeadline`, to every normal and compaction model request. `xworkAgentCancel()` cancels only the child token. A cancelled scope returns `XWORK_RESULT_CANCELLED`; an expired deadline returns `XWORK_RESULT_TIMEOUT` and `XWORK_ERROR_TIMEOUT`, including during provider transport, retry backoff, MCP calls, or a long `exec_command`. Scoped commands use XRT's bounded process runner and terminate the process group when cancellation or a deadline wins.
 
 If startup inspection reports an interrupted durable run, call `xworkAgentResume(agent, &result, &error)` before accepting another prompt. A normal `xworkAgentRun` refuses to append new user input while the durable tail is waiting for a model response or has unresolved tool calls.
 

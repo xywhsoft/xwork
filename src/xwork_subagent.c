@@ -95,7 +95,6 @@ xwork_result xworkAgentRunReadOnlySubagent(
     xllm_session_config tSessionConfig;
     xllm_error tSessionError;
     xllm_session* pSession = NULL;
-    xctx* pContext = NULL;
     xwork_agent_config tAgentConfig;
     xwork_agent* pChild = NULL;
     xwork_subagent_policy tPolicy;
@@ -145,12 +144,6 @@ xwork_result xworkAgentRunReadOnlySubagent(
             "failed to create isolated subagent session");
         goto cleanup;
     }
-    pContext = xrtContextCreateTimeout(pParent->pContext, pConfig->uTimeoutMs);
-    if ( !pContext ) {
-        xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY,
-            "failed to create subagent operation context");
-        goto cleanup;
-    }
     memset(&tPolicy, 0, sizeof(tPolicy));
     tPolicy.pConfig = pConfig;
     xworkAgentConfigInit(&tAgentConfig);
@@ -162,7 +155,15 @@ xwork_result xworkAgentRunReadOnlySubagent(
     tAgentConfig.sArtifactDirectory = pParent->sArtifactDirectory;
     tAgentConfig.sModel = pParent->sModel;
     tAgentConfig.sReasoningEffort = pParent->sReasoningEffort;
-    tAgentConfig.pContext = pContext;
+    tAgentConfig.pCancel = pParent->pCancel;
+    tAgentConfig.uDeadline = pConfig->uTimeoutMs
+        ? xrtDeadlineAfter((uint64_t)pConfig->uTimeoutMs * UINT64_C(1000))
+        : pParent->uDeadline;
+    if ( pParent->uDeadline != XRT_DEADLINE_NEVER &&
+         (tAgentConfig.uDeadline == XRT_DEADLINE_NEVER ||
+          pParent->uDeadline < tAgentConfig.uDeadline) ) {
+        tAgentConfig.uDeadline = pParent->uDeadline;
+    }
     tAgentConfig.eApprovalMode = XWORK_APPROVAL_READ_ONLY;
     tAgentConfig.OnPermission = xwork__subagent_permission;
     tAgentConfig.pPermissionUserData = &tPolicy;
@@ -205,7 +206,6 @@ xwork_result xworkAgentRunReadOnlySubagent(
     }
 cleanup:
     xworkAgentDestroy(pChild);
-    xrtContextRelease(pContext);
     xllmSessionDestroy(pSession);
     return eResult;
 }

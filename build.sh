@@ -5,6 +5,7 @@ set -eu
 CC=${CC:-cc}
 XLLM_DIR=${XLLM_DIR:-../xllm}
 XRT_DIR=${XRT_DIR:-../xrt}
+XRT_INCLUDE=${XRT_INCLUDE:-$XRT_DIR/single}
 BUILD_DIR=${BUILD_DIR:-build}
 RELEASE_DIR=${RELEASE_DIR:-release}
 RUN_TESTS=${RUN_TESTS:-1}
@@ -15,9 +16,10 @@ LIBS=${LIBS:-"-pthread -ldl -lm"}
 
 mkdir -p "$BUILD_DIR" "$RELEASE_DIR"
 
-$CC $CFLAGS -I. -I"$XLLM_DIR" -I"$XRT_DIR" -c xwork.c -o "$RELEASE_DIR/xwork.o"
-$CC $XRT_CFLAGS $LDFLAGS -I. -I"$XLLM_DIR" -I"$XRT_DIR" \
-    tests/test_xwork.c "$XRT_DIR/xrt.c" $LIBS -o "$BUILD_DIR/test_xwork"
+$CC $CFLAGS -I. -I"$XLLM_DIR" -I"$XRT_INCLUDE" -c xwork.c -o "$RELEASE_DIR/xwork.o"
+$CC $XRT_CFLAGS -I. -I"$XLLM_DIR" -I"$XRT_INCLUDE" -c xwork-xrt.c -o "$RELEASE_DIR/xwork-xrt.o"
+$CC $XRT_CFLAGS $LDFLAGS -I. -I"$XLLM_DIR" -I"$XRT_INCLUDE" \
+    tests/test_xwork.c "$RELEASE_DIR/xwork-xrt.o" $LIBS -o "$BUILD_DIR/test_xwork"
 
 if [ "$RUN_TESTS" = "1" ]; then
     "$BUILD_DIR/test_xwork"

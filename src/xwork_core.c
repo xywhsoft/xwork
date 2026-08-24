@@ -203,47 +203,49 @@ bool xwork__json_string(xwork_buf* pBuf, const char* sText)
     return xwork__buf_append_char(pBuf, '"');
 }
 
-xvalue xwork__json_parse_object(const char* sJson)
+xvalue* xwork__json_parse_object(const char* sJson)
 {
-    xvalue tValue;
+    xvalue* pValue;
     if ( !sJson ) return NULL;
-    tValue = xrtParseJSON((str)sJson, strlen(sJson));
-    if ( !tValue || !xvoIsTable(tValue) ) {
-        if ( tValue ) xvoUnref(tValue);
+    pValue = xrtJsonParse((xstrview){ sJson, strlen(sJson) });
+    if ( !pValue || xrtValueType(pValue) != XVALUE_OBJECT ) {
+        if ( pValue ) xrtValueRelease(pValue);
         return NULL;
     }
-    return tValue;
+    return pValue;
 }
 
-xvalue xwork__json_get(xvalue tObject, const char* sKey)
+xvalue* xwork__json_get(xvalue* pObject, const char* sKey)
 {
-    xvalue tValue = (tObject && xvoIsTable(tObject)) ? xvoTableGetValue(tObject, sKey, 0u) : NULL;
-    return (tValue && !xvoIsNull(tValue)) ? tValue : NULL;
+    xvalue* pValue = (pObject && xrtValueType(pObject) == XVALUE_OBJECT)
+        ? xrtValueObjectGet(pObject, (xstrview){ sKey, strlen(sKey) }) : NULL;
+    return (pValue && xrtValueType(pValue) != XVALUE_NULL) ? pValue : NULL;
 }
 
-const char* xwork__json_text(xvalue tObject, const char* sKey)
+const char* xwork__json_text(xvalue* pObject, const char* sKey)
 {
-    xvalue tValue = xwork__json_get(tObject, sKey);
-    return (tValue && xvoIsText(tValue)) ? (const char*)xvoGetText(tValue) : NULL;
+    xvalue* pValue = xwork__json_get(pObject, sKey);
+    xstrview tText = {0};
+    return (pValue && xrtValueGetString(pValue, &tText)) ? tText.Data : NULL;
 }
 
-bool xwork__json_bool(xvalue tObject, const char* sKey, bool bDefault, bool* pValid)
+bool xwork__json_bool(xvalue* pObject, const char* sKey, bool bDefault, bool* pValid)
 {
-    xvalue tValue = xwork__json_get(tObject, sKey);
+    xvalue* pValue = xwork__json_get(pObject, sKey);
+    bool bValue;
     if ( pValid ) *pValid = true;
-    if ( !tValue ) return bDefault;
-    if ( !xvoIsBool(tValue) ) { if ( pValid ) *pValid = false; return bDefault; }
-    return xvoGetBool(tValue);
+    if ( !pValue ) return bDefault;
+    if ( !xrtValueGetBool(pValue, &bValue) ) { if ( pValid ) *pValid = false; return bDefault; }
+    return bValue;
 }
 
-uint64_t xwork__json_u64(xvalue tObject, const char* sKey, uint64_t uDefault, bool* pValid)
+uint64_t xwork__json_u64(xvalue* pObject, const char* sKey, uint64_t uDefault, bool* pValid)
 {
-    xvalue tValue = xwork__json_get(tObject, sKey);
+    xvalue* pValue = xwork__json_get(pObject, sKey);
     int64_t iValue;
     if ( pValid ) *pValid = true;
-    if ( !tValue ) return uDefault;
-    if ( !xvoIsNumber(tValue) ) { if ( pValid ) *pValid = false; return uDefault; }
-    iValue = xvoGetInt(tValue);
+    if ( !pValue ) return uDefault;
+    if ( !xrtValueGetInt(pValue, &iValue) ) { if ( pValid ) *pValid = false; return uDefault; }
     if ( iValue < 0 ) { if ( pValid ) *pValid = false; return uDefault; }
     return (uint64_t)iValue;
 }
@@ -267,15 +269,15 @@ char* xwork__resolve_path(const xwork_agent* pAgent, const char* sPath, xwork_er
         xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "tool path is empty");
         return NULL;
     }
-    if ( xrtPathIsAbs((str)sPath, strlen(sPath)) ) {
-        sAbs = (char*)xrtPathAbs((str)sPath, strlen(sPath));
+    if ( xrtPathIsAbs(sPath) ) {
+        sAbs = xrtPathAbs(sPath);
     } else {
-        sJoined = (char*)xrtPathJoin(2u, pAgent->sWorkspaceRoot, sPath);
+        sJoined = xrtPathJoin(pAgent->sWorkspaceRoot, sPath);
         if ( !sJoined ) {
             xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to join workspace path");
             return NULL;
         }
-        sAbs = (char*)xrtPathAbs((str)sJoined, strlen(sJoined));
+        sAbs = xrtPathAbs(sJoined);
         xrtFree(sJoined);
     }
     if ( !sAbs ) {
@@ -298,7 +300,7 @@ char* xwork__relative_path(const xwork_agent* pAgent, const char* sPath)
     char* sRelative;
     char* sCopy;
     if ( !pAgent || !sPath ) return NULL;
-    sRelative = (char*)xrtPathRel((str)pAgent->sWorkspaceRoot, (str)sPath);
+    sRelative = xrtPathRel(pAgent->sWorkspaceRoot, sPath);
     if ( !sRelative ) return xwork__strdup(sPath);
     sCopy = xwork__strdup(sRelative);
     xrtFree(sRelative);
@@ -310,7 +312,7 @@ bool xwork__ensure_parent(const char* sPath)
     char* sDir;
     bool bOk;
     if ( !sPath ) return false;
-    sDir = (char*)xrtPathGetDir((str)sPath, strlen(sPath));
+    sDir = xrtPathParent(sPath);
     if ( !sDir || !sDir[0] ) { if ( sDir ) xrtFree(sDir); return true; }
     bOk = xrtDirExists((str)sDir) || xrtDirCreateAll((str)sDir);
     xrtFree(sDir);
@@ -353,6 +355,7 @@ void xworkAgentConfigInit(xwork_agent_config* pConfig)
 {
     if ( !pConfig ) return;
     memset(pConfig, 0, sizeof(*pConfig));
+    pConfig->uDeadline = XRT_DEADLINE_NEVER;
     pConfig->eApprovalMode = XWORK_APPROVAL_AUTO;
     pConfig->uCommandTimeoutMs = 120000u;
     pConfig->uMaxAgentTurns = 0u;
@@ -514,7 +517,7 @@ xwork_agent* xworkAgentCreate(const xwork_agent_config* pConfig, xwork_error* pE
         xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "agent requires a session, workspace, and model boundary");
         return NULL;
     }
-    sRoot = (char*)xrtPathAbs((str)pConfig->sWorkspaceRoot, strlen(pConfig->sWorkspaceRoot));
+    sRoot = xrtPathAbs(pConfig->sWorkspaceRoot);
     if ( !sRoot || !xrtDirExists((str)sRoot) ) {
         if ( sRoot ) xrtFree(sRoot);
         xwork__set_error(pError, XWORK_ERROR_INVALID_ARGUMENT, "workspace root does not exist");
@@ -535,13 +538,14 @@ xwork_agent* xworkAgentCreate(const xwork_agent_config* pConfig, xwork_error* pE
     pAgent->sArtifactDirectory = xwork__strdup(pConfig->sArtifactDirectory ? pConfig->sArtifactDirectory : ".xcode/artifacts");
     pAgent->sModel = pConfig->sModel ? xwork__strdup(pConfig->sModel) : NULL;
     pAgent->sReasoningEffort = pConfig->sReasoningEffort ? xwork__strdup(pConfig->sReasoningEffort) : NULL;
-    pAgent->pContext = pConfig->pContext ? xrtContextAddRef(pConfig->pContext) : NULL;
+    pAgent->pCancel = xrtCancelChild(pConfig->pCancel);
+    pAgent->uDeadline = pConfig->uDeadline;
     xrtFree(sRoot);
     if ( !pAgent->sWorkspaceRoot || !pAgent->sSystemPrompt || !pAgent->sArtifactDirectory ||
          (pConfig->sSessionPath && !pAgent->sSessionPath) ||
          (pConfig->sModel && !pAgent->sModel) ||
          (pConfig->sReasoningEffort && !pAgent->sReasoningEffort) ||
-         (pConfig->pContext && !pAgent->pContext) ) {
+         !pAgent->pCancel ) {
         xworkAgentDestroy(pAgent);
         xwork__set_error(pError, XWORK_ERROR_OUT_OF_MEMORY, "failed to copy agent configuration");
         return NULL;
@@ -615,7 +619,7 @@ void xworkAgentDestroy(xwork_agent* pAgent)
     free(pAgent->sArtifactDirectory);
     free(pAgent->sModel);
     free(pAgent->sReasoningEffort);
-    xrtContextRelease(pAgent->pContext);
+    xrtCancelDestroy(pAgent->pCancel);
     free(pAgent);
 }
 
@@ -648,7 +652,7 @@ bool xworkAgentCancel(xwork_agent* pAgent)
 {
     if ( !pAgent ) return false;
     xwork__atomic_store(&pAgent->iCancelled, 1);
-    if ( pAgent->pContext ) { (void)xrtContextCancel(pAgent->pContext); }
+    if ( pAgent->pCancel ) { (void)xrtCancelRequest(pAgent->pCancel); }
     return true;
 }
 
